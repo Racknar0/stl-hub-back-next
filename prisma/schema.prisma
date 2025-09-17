@@ -1,0 +1,67 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model user {
+  id                   Int       @id @default(autoincrement())
+  email                String    @unique
+  password             String
+  language             String    @default("es") // campo para el idioma del usuario
+  tokenExpiration      DateTime? // campo para la expiración del token
+  lastLogin            DateTime? // campo para la última vez que se logueó
+  resetToken           String? // campo para el token de reseteo de contraseña
+  resetTokenExpiration DateTime? // campo para la expiración del token de reseteo
+  jwtVersion           Int       @default(1) // campo para la versión del token
+  lastPasswordChange   DateTime?
+  isActive             Boolean   @default(false) // estado de la cuenta
+
+  roleId Int
+  role   role @relation(fields: [roleId], references: [id])
+
+  // Relación con suscripciones
+  subscriptions subscription[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model role {
+  id   Int    @id @default(autoincrement())
+  name String
+
+  users     user[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Suscripción simple: estado, fecha de compra y fecha de finalización del periodo actual
+model subscription {
+  id               Int                @id @default(autoincrement())
+  userId           Int
+  user             user               @relation(fields: [userId], references: [id])
+  status           SubscriptionStatus @default(ACTIVE)
+  startedAt        DateTime           @default(now()) // fecha de compra
+  currentPeriodEnd DateTime                          // fecha de finalización
+
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  @@index([userId])
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  EXPIRED
+}
