@@ -65,3 +65,46 @@ enum SubscriptionStatus {
   CANCELED
   EXPIRED
 }
+
+enum AccountStatus {
+  CONNECTED
+  ERROR
+  EXPIRED
+  SUSPENDED
+}
+
+model megaAccount {
+  id                Int           @id @default(autoincrement())
+  alias             String        @unique
+  email             String
+  baseFolder        String
+  priority          Int           @default(1)
+  status            AccountStatus @default(ERROR)
+  statusMessage     String?
+  suspended         Boolean       @default(false)
+
+  // Métricas
+  storageUsedMB     Int           @default(0)
+  storageTotalMB    Int           @default(0)
+  bandwidthUsedMB   Int           @default(0)
+  bandwidthPeriodAt DateTime?
+  errors24h         Int           @default(0)
+
+  lastCheckAt       DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  credentials       accountCredential?
+}
+
+model accountCredential {
+  id        Int          @id @default(autoincrement())
+  accountId Int          @unique
+  encData   Bytes        // blob cifrado (AES-GCM)
+  encIv     Bytes
+  encTag    Bytes
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  account   megaAccount  @relation(fields: [accountId], references: [id])
+}
