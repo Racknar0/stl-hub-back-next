@@ -35,13 +35,40 @@ export const createUser = async (req, res) => {
   }
 };
 
-// Get all users (omit password)
+// Get all users (omit password) con paginación, búsqueda e info de suscripción activa
 export const getUsers = async (req, res) => {
   try {
-    const users = await prisma.user.findMany({
-      select: { id: true, email: true, isActive: true, createdAt: true, updatedAt: true, roleId: true },
-    });
-    res.status(200).json(users);
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize) || 10, 1), 100);
+    const q = (req.query.q || '').trim();
+
+    const where = q ? { email: { contains: q } } : {};
+
+    const [total, users] = await prisma.$transaction([
+      prisma.user.count({ where }),
+      prisma.user.findMany({
+        where,
+        select: {
+          id: true,
+          email: true,
+          roleId: true,
+          isActive: true,
+          createdAt: true,
+          updatedAt: true,
+          subscriptions: {
+            where: { status: 'ACTIVE' },
+            orderBy: { startedAt: 'desc' },
+            take: 1,
+            select: { id: true, status: true, startedAt: true, currentPeriodEnd: true },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+    ]);
+
+    res.status(200).json({ data: users, total, page, pageSize });
   } catch (error) {
     console.log('Error getting users: ', error);
     res.status(500).json({ message: 'Error getting users' });
@@ -102,14 +129,77 @@ export const deleteUser = async (req, res) => {
   const { id } = req.params;
 
   try {
-    const deletedUser = await prisma.user.delete({
+    const user = await prisma.user.findUnique({
       where: { id: parseInt(id) },
       select: { id: true, email: true, isActive: true, roleId: true },
     });
 
-    res.status(200).json(deletedUser);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    // No permitir borrar administradores por seguridad
+    if (user.roleId === 2) {
+      return res.status(403).json({ message: 'Admins cannot be deleted' });
+    }
+
+    await prisma.$transaction([
+      prisma.subscription.deleteMany({ where: { userId: user.id } }),
+      prisma.user.delete({ where: { id: user.id } }),
+    ]);
+
+    return res.status(200).json(user);
   } catch (error) {
     console.log('Error deleting user: ', error);
-    res.status(500).json({ message: 'Error deleting user' });
+    if (error?.code === 'P2003') {
+      return res.status(409).json({ message: 'Cannot delete user due to related records' });
+    }
+    return res.status(500).json({ message: 'Error deleting user' });
+  }
+};
+
+// Extender suscripción activa del usuario (3, 6 o 12 meses)
+export const extendSubscription = async (req, res) => {
+  try {
+    const userId = parseInt(req.params.id);
+    const { months } = req.body; // 3 | 6 | 12
+
+    if (![3, 6, 12].includes(Number(months))) {
+      return res.status(400).json({ message: 'Invalid months value. Use 3, 6 or 12.' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true } });
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    const now = new Date();
+    const addMonths = (date, m) => { const d = new Date(date); d.setMonth(d.getMonth() + m); return d; };
+
+    // Última suscripción activa
+    const activeSub = await prisma.subscription.findFirst({
+      where: { userId, status: 'ACTIVE' },
+      orderBy: { startedAt: 'desc' },
+    });
+
+    let newEnd;
+    if (activeSub && activeSub.currentPeriodEnd > now) {
+      newEnd = addMonths(activeSub.currentPeriodEnd, Number(months));
+    } else {
+      newEnd = addMonths(now, Number(months));
+    }
+
+    let updatedSub;
+    if (activeSub) {
+      updatedSub = await prisma.subscription.update({
+        where: { id: activeSub.id },
+        data: { currentPeriodEnd: newEnd, startedAt: activeSub.startedAt ?? now, status: 'ACTIVE' },
+      });
+    } else {
+      updatedSub = await prisma.subscription.create({
+        data: { userId, status: 'ACTIVE', startedAt: now, currentPeriodEnd: newEnd },
+      });
+    }
+
+    return res.status(200).json({ message: 'Subscription extended', subscription: updatedSub });
+  } catch (error) {
+    console.error('Error extending subscription:', error);
+    return res.status(500).json({ message: 'Error extending subscription' });
   }
 };
