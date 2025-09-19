@@ -10,7 +10,8 @@ import {
   getAssetProgress,
   listAssets,
   uploadImages,
-  uploadArchiveTemp
+  uploadArchiveTemp,
+  updateAsset
 } from '../../controllers/asset.controller.js';
 
 const router = Router();
@@ -50,9 +51,11 @@ const uploadImagesMulter = multer({ storage: imageStorage });
 const uploadCombined = multer({ storage: archiveStorage });
 
 // Rutas
+// GET /assets?q=texto&pageIndex=0&pageSize=25 para paginación del lado del servidor
 router.get('/', listAssets);
 router.get('/:id', getAsset);
 router.get('/:id/progress', getAssetProgress);
+router.put('/:id', updateAsset);
 
 // Flujo unificado: archivo + imágenes en una sola llamada
 router.post('/upload', uploadCombined.fields([

@@ -43,9 +43,40 @@ function removeEmptyDirsUp(startDir, stopDir) {
 }
 
 // Listar y obtener
-export const listAssets = async (_req, res) => {
+export const listAssets = async (req, res) => {
   try {
-    const items = await prisma.asset.findMany({ orderBy: { id: 'desc' }, take: 100 });
+    const { q = '', pageIndex, pageSize } = req.query;
+    const hasPagination = pageIndex !== undefined && pageSize !== undefined;
+
+    const where = q
+      ? { title: { contains: String(q), mode: 'insensitive' } }
+      : undefined;
+
+    if (hasPagination) {
+      const take = Math.max(1, Math.min(1000, Number(pageSize) || 50));
+      const page = Math.max(0, Number(pageIndex) || 0);
+      const skip = page * take;
+
+      const [items, total] = await Promise.all([
+        prisma.asset.findMany({
+          where,
+          include: { account: { select: { alias: true } } },
+          orderBy: { id: 'desc' },
+          skip,
+          take,
+        }),
+        prisma.asset.count({ where }),
+      ]);
+
+      return res.json({ items, total, page, pageSize: take });
+    }
+
+    const items = await prisma.asset.findMany({
+      where,
+      include: { account: { select: { alias: true } } },
+      orderBy: { id: 'desc' },
+      take: 50,
+    });
     return res.json(items);
   } catch (e) {
     console.error('[ASSETS] list error:', e);
@@ -64,6 +95,33 @@ export const getAsset = async (req, res) => {
     return res.status(500).json({ message: 'Error getting asset' });
   }
 };
+
+export const updateAsset = async (req, res) => {
+  try {
+    const id = Number(req.params.id)
+    const existing = await prisma.asset.findUnique({ where: { id } })
+    if (!existing) return res.status(404).json({ message: 'Asset not found' })
+
+    const { title, category, tags, isPremium } = req.body
+    const data = {}
+    if (title !== undefined) data.title = String(title)
+    if (category !== undefined) data.category = String(category)
+    if (typeof isPremium !== 'undefined') data.isPremium = Boolean(isPremium)
+    if (typeof tags !== 'undefined') {
+      try {
+        data.tags = Array.isArray(tags) ? tags : JSON.parse(tags)
+      } catch {
+        data.tags = undefined
+      }
+    }
+
+    const updated = await prisma.asset.update({ where: { id }, data })
+    return res.json(updated)
+  } catch (e) {
+    console.error('[ASSETS] update error:', e)
+    return res.status(500).json({ message: 'Error updating asset' })
+  }
+}
 
 // 1) Subida temporal de archivo principal
 export const uploadArchiveTemp = async (req, res) => {
@@ -137,6 +195,8 @@ export const uploadImages = async (req, res) => {
     const asset = await prisma.asset.findUnique({ where: { id: assetId } });
     if (!asset) return res.status(404).json({ message: 'Asset not found' });
 
+    const replacing = String(req.query?.replace || '').toLowerCase() === 'true'
+
     const category = safeName(asset.category || 'uncategorized');
     const slug = asset.slug;
 
@@ -147,6 +207,27 @@ export const uploadImages = async (req, res) => {
 
     const files = req.files || [];
     const stored = [];
+
+    // Si se reemplaza, eliminar imágenes anteriores registradas en DB
+    if (replacing) {
+      const prev = Array.isArray(asset.images) ? asset.images : []
+      for (const rel of prev) {
+        try {
+          const abs = path.join(UPLOADS_DIR, rel)
+          if (fs.existsSync(abs)) fs.unlinkSync(abs)
+          // limpiar directorios vacíos ascendiendo
+          removeEmptyDirsUp(path.dirname(abs), IMAGES_DIR)
+        } catch (e) { console.warn('[ASSETS] replace cleanup warn:', e.message) }
+      }
+      // limpiar thumbs
+      try {
+        if (fs.existsSync(thumbsDir)) {
+          for (const f of fs.readdirSync(thumbsDir)) {
+            try { fs.unlinkSync(path.join(thumbsDir, f)) } catch {}
+          }
+        }
+      } catch {}
+    }
 
     for (let i = 0; i < files.length; i++) {
       const f = files[i];
@@ -170,14 +251,14 @@ export const uploadImages = async (req, res) => {
 
     // actualizar asset.images (guardar rutas relativas)
     const imagesJson = Array.isArray(asset.images) ? asset.images : [];
-    const newImages = imagesJson.concat(stored);
+    const newImages = replacing ? stored : imagesJson.concat(stored);
 
     const updated = await prisma.asset.update({
       where: { id: assetId },
       data: { images: newImages },
     });
 
-    return res.json({ images: newImages, thumbs });
+    return res.json({ images: newImages, thumbs, replaced: replacing });
   } catch (e) {
     console.error('[ASSETS] upload images error:', e);
     return res.status(500).json({ message: 'Error uploading images' });
@@ -418,7 +499,7 @@ export async function enqueueToMegaReal(asset) {
         let answered = false
         const child = spawn('mega-export', ['-a', remoteFilePath], { shell: true })
         const maybeAnswer = (s) => {
-          if (!answered && /Do you accept these terms\?/i.test(s)) {
+          if (!answered && /Do you accept estos términos\?/i.test(s)) {
             try { child.stdin.write('Yes\n'); answered = true } catch {}
           }
         }
