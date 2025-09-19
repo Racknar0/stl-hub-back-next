@@ -1,3 +1,20 @@
 node_modules
 # Keep environment variables out of version control
 .env
+
+# Mantener carpetas uploads y subcarpetas pero ignorar su contenido
+uploads/**
+!uploads/
+!uploads/.gitkeep
+
+uploads/tmp/**
+!uploads/tmp/
+!uploads/tmp/.gitkeep
+
+uploads/images/**
+!uploads/images/
+!uploads/images/.gitkeep
+
+uploads/archives/**
+!uploads/archives/
+!uploads/archives/.gitkeep

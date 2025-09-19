@@ -5,6 +5,8 @@ import { spawn } from 'child_process';
 const prisma = new PrismaClient();
 // Cuota por defecto para cuentas gratuitas de MEGA (MB). Se puede sobreescribir con MEGA_FREE_QUOTA_MB
 const DEFAULT_FREE_QUOTA_MB = Number(process.env.MEGA_FREE_QUOTA_MB) || 20480;
+// Cuota de transferencia por defecto (si no se puede leer de mega-df). Se puede sobreescribir con MEGA_FREE_BW_MB
+const DEFAULT_FREE_BW_MB = Number(process.env.MEGA_FREE_BW_MB) || 20480;
 
 // Ejecuta un comando y devuelve stdout/err con logs (sin exponer credenciales)
 function runCmd(cmd, args = [], { cwd } = {}) {
@@ -56,15 +58,14 @@ export const listAccounts = async (_req, res) => {
           suspended: true,
           storageUsedMB: true,
           storageTotalMB: true,
-          bandwidthUsedMB: true,
-          bandwidthPeriodAt: true,
           errors24h: true,
+          fileCount: true,
+          folderCount: true,
           lastCheckAt: true,
           createdAt: true,
           updatedAt: true,
         },
       }),
-      // prisma.megaAccount.count(), // para futura paginación
     ])
     return res.json(accounts)
   } catch (error) {
@@ -131,6 +132,7 @@ export const testAccount = async (req, res) => {
     const mkdirCmd = 'mega-mkdir';
     const dfCmd = 'mega-df';
     const duCmd = 'mega-du';
+    const findCmd = 'mega-find';
 
     // Limpiar sesiones previas
     try { await runCmd(logoutCmd, []); console.log('[ACCOUNTS] pre-logout ok'); } catch (e) { console.warn('[ACCOUNTS] pre-logout warn:', String(e.message).slice(0,200)); }
@@ -161,14 +163,15 @@ export const testAccount = async (req, res) => {
       try { await runCmd(mkdirCmd, ['-p', base]); console.log('[ACCOUNTS] mkdir ok'); } catch (e) { console.warn('[ACCOUNTS] mkdir warn:', String(e.message).slice(0,200)); }
     }
 
-    // Métricas con mega-df -h (la versión instalada no soporta --json)
+    // Métricas: SOLO almacenamiento (quitar banda). Intentar df primero, luego fallback a du.
     let storageUsedMB = 0, storageTotalMB = 0;
+    // Conteos
+    let fileCount = 0, folderCount = 0;
+
     try {
       const dfTxt = await runCmd(dfCmd, ['-h']);
       const txt = (dfTxt.out || dfTxt.err || '').toString();
-      // Patrones posibles
-      // EN: "Account storage: <used> / <total>", "Storage: <used> of <total>", generic "<used>/<total>"
-      // ES: "Almacenamiento de la cuenta: <used> de <total>", "Almacenamiento: <used> de <total>"
+      // Patrones de almacenamiento used/total (EN/ES)
       let m = txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i)
            || txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i)
            || txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i)
@@ -178,7 +181,19 @@ export const testAccount = async (req, res) => {
         storageUsedMB = parseSizeToMB(m[1]);
         storageTotalMB = parseSizeToMB(m[2]);
       }
-      console.log(`[ACCOUNTS] df -h usedMB=${storageUsedMB} totalMB=${storageTotalMB}`);
+      // Patrón con porcentaje: "X% of Y used" (EN/ES)
+      if (!storageTotalMB) {
+        const p = txt.match(/storage[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:of|de)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:used|usado)?/i)
+               || txt.match(/almacenamiento[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:de|of)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:usado|used)?/i);
+        if (p) {
+          storageTotalMB = parseSizeToMB(p[2]);
+          const pct = parseFloat(String(p[1]).replace(',', '.'));
+          if (!isNaN(pct) && isFinite(pct)) {
+            storageUsedMB = Math.round((pct / 100) * storageTotalMB);
+          }
+        }
+      }
+      console.log(`[ACCOUNTS] df -h storage usedMB=${storageUsedMB} totalMB=${storageTotalMB}`);
     } catch (e) {
       console.warn('[ACCOUNTS] df -h warn:', String(e.message).slice(0,200));
     }
@@ -196,40 +211,83 @@ export const testAccount = async (req, res) => {
           storageUsedMB = parseSizeToMB(m[1]);
           storageTotalMB = parseSizeToMB(m[2]);
         }
-        console.log(`[ACCOUNTS] df usedMB=${storageUsedMB} totalMB=${storageTotalMB}`);
+        if (!storageTotalMB) {
+          const p = txt.match(/storage[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:of|de)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:used|usado)?/i)
+                 || txt.match(/almacenamiento[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:de|of)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:usado|used)?/i);
+          if (p) {
+            storageTotalMB = parseSizeToMB(p[2]);
+            const pct = parseFloat(String(p[1]).replace(',', '.'));
+            if (!isNaN(pct) && isFinite(pct)) {
+              storageUsedMB = Math.round((pct / 100) * storageTotalMB);
+            }
+          }
+        }
+        console.log(`[ACCOUNTS] df storage usedMB=${storageUsedMB} totalMB=${storageTotalMB}`);
       } catch (e) {
         console.warn('[ACCOUNTS] df warn:', String(e.message).slice(0,200));
       }
     }
 
-    if (!storageTotalMB) {
+    // Fallback: si no se obtuvo used desde df, calcular con mega-du -h del folder base
+    if (!storageUsedMB) {
       try {
-        const duRes = await runCmd(duCmd, ['-h', base || '/']);
-        const lines = (duRes.out || '').trim().split(/\r?\n/).filter(Boolean);
-        const last = lines[lines.length - 1] || '';
-        const m = last.match(/([\d.,]+\s*[KMGT]?B)/i);
-        if (m) storageUsedMB = parseSizeToMB(m[1]);
-        console.log(`[ACCOUNTS] du usedMB=${storageUsedMB}`);
+        const duTxt = await runCmd(duCmd, ['-h', base || '/']);
+        const du = (duTxt.out || duTxt.err || '').toString();
+        const mm = du.match(/[\r\n]*\s*([\d.,]+\s*[KMGT]?B)/i) || du.match(/([\d.,]+\s*[KMGT]?B)/i);
+        if (mm) storageUsedMB = parseSizeToMB(mm[1]);
+        console.log(`[ACCOUNTS] du -h base usedMB=${storageUsedMB}`);
       } catch (e) {
-        console.warn('[ACCOUNTS] du warn:', String(e.message).slice(0,200));
+        console.warn('[ACCOUNTS] du -h warn:', String(e.message).slice(0,200));
       }
     }
 
-    // Fallback: todas las cuentas son gratuitas => usar cuota por defecto si el total no se obtuvo
+    // Conteo de archivos y carpetas usando mega-find (usar --type=...)
+    try {
+      // Archivos
+      try {
+        const f = await runCmd(findCmd, [base || '/', '--type=f']);
+        fileCount = (f.out || '').split(/\r?\n/).filter(Boolean).length;
+      } catch {
+        const f = await runCmd(findCmd, ['--type=f', base || '/']);
+        fileCount = (f.out || '').split(/\r?\n/).filter(Boolean).length;
+      }
+      // Carpetas
+      try {
+        const d = await runCmd(findCmd, [base || '/', '--type=d']);
+        folderCount = (d.out || '').split(/\r?\n/).filter(Boolean).length;
+      } catch {
+        const d = await runCmd(findCmd, ['--type=d', base || '/']);
+        folderCount = (d.out || '').split(/\r?\n/).filter(Boolean).length;
+      }
+      console.log(`[ACCOUNTS] counts files=${fileCount} folders=${folderCount}`);
+    } catch (e) {
+      console.warn('[ACCOUNTS] find warn:', String(e.message).slice(0,200));
+    }
+
+    // Fallbacks de totales y clamps
     if (!storageTotalMB || storageTotalMB <= 0) {
       storageTotalMB = DEFAULT_FREE_QUOTA_MB;
       console.log(`[ACCOUNTS] fallback totalMB to FREE QUOTA: ${storageTotalMB}`);
     }
-    // Evitar porcentajes > 100 si used > total
-    if (storageUsedMB > storageTotalMB) {
-      storageTotalMB = storageUsedMB;
-    }
+    if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB;
 
-    console.log(`[ACCOUNTS] update metrics id=${id} used=${storageUsedMB}MB total=${storageTotalMB}MB`);
-    const updated = await prisma.megaAccount.update({ where: { id }, data: { status: 'CONNECTED', statusMessage: null, lastCheckAt: new Date(), storageUsedMB, storageTotalMB } });
+    // Actualizar estado y métricas (sin ancho de banda)
+    console.log(`[ACCOUNTS] update metrics id=${id} used=${storageUsedMB}MB total=${storageTotalMB}MB files=${fileCount} folders=${folderCount}`);
+    const updated = await prisma.megaAccount.update({
+      where: { id },
+      data: {
+        status: 'CONNECTED',
+        statusMessage: null,
+        lastCheckAt: new Date(),
+        storageUsedMB,
+        storageTotalMB,
+        fileCount,
+        folderCount,
+      },
+    });
 
     console.log('[ACCOUNTS] testAccount OK');
-    return res.json({ message: 'OK', status: 'CONNECTED', account: updated })
+    return res.json({ message: 'OK', status: 'CONNECTED', account: updated });
   } catch (error) {
     console.error('[ACCOUNTS] Error testing account:', error);
     try {
@@ -299,6 +357,8 @@ export const getAccountDetail = async (req, res) => {
         statusMessage: acc.statusMessage,
         storageUsedMB: acc.storageUsedMB,
         storageTotalMB: acc.storageTotalMB,
+        fileCount: acc.fileCount,
+        folderCount: acc.folderCount,
         lastCheckAt: acc.lastCheckAt,
       },
       items,
@@ -319,4 +379,19 @@ export const logoutAccount = async (_req, res) => {
     console.error('[ACCOUNTS] Error logging out:', e);
     return res.status(500).json({ message: 'Error logging out', error: String(e.message) })
   }
-}
+};
+
+export const listAccountAssets = async (req, res) => {
+  try {
+    const id = Number(req.params.id)
+    const items = await prisma.asset.findMany({
+      where: { accountId: id },
+      orderBy: { id: 'desc' },
+      select: { id: true, title: true, slug: true, fileSizeB: true, archiveSizeB: true, status: true, createdAt: true }
+    })
+    return res.json({ count: items.length, items })
+  } catch (e) {
+    console.error('[ACCOUNTS] listAccountAssets error:', e)
+    return res.status(500).json({ message: 'Error listing assets for account' })
+  }
+};

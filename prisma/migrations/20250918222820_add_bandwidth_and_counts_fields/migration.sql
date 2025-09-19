@@ -1,0 +1,4 @@
+-- AlterTable
+ALTER TABLE `megaaccount` ADD COLUMN `bandwidthTotalMB` INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN `fileCount` INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN `folderCount` INTEGER NOT NULL DEFAULT 0;

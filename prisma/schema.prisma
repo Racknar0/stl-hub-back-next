@@ -87,14 +87,20 @@ model megaAccount {
   storageUsedMB     Int           @default(0)
   storageTotalMB    Int           @default(0)
   bandwidthUsedMB   Int           @default(0)
+  bandwidthTotalMB  Int           @default(0)
   bandwidthPeriodAt DateTime?
   errors24h         Int           @default(0)
+
+  // Conteos
+  fileCount         Int           @default(0)
+  folderCount       Int           @default(0)
 
   lastCheckAt       DateTime?
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
 
   credentials       accountCredential?
+  assets            asset[]
 }
 
 model accountCredential {
@@ -107,4 +113,60 @@ model accountCredential {
   updatedAt DateTime     @updatedAt
 
   account   megaAccount  @relation(fields: [accountId], references: [id])
+}
+
+enum AssetStatus {
+  DRAFT
+  PROCESSING
+  PUBLISHED
+  FAILED
+}
+
+model asset {
+  id           Int          @id @default(autoincrement())
+  title        String
+  slug         String       @unique
+  description  String?
+  category     String?
+  tags         Json?        // array de strings
+  isPremium    Boolean      @default(false)
+
+  // Enlace de MEGA (placeholder, se modificará más adelante)
+  megaLink     String?
+
+  // Archivo del asset (opcional)
+  archiveName  String?
+  archiveSizeB Int?
+  fileSizeB    Int?         // tamaño persistente del archivo original para mostrar info
+
+  // Imágenes asociadas (array de URLs o nombres)
+  images       Json?
+
+  status       AssetStatus  @default(DRAFT)
+
+  // Relación con la cuenta de MEGA
+  accountId    Int
+  account      megaAccount  @relation(fields: [accountId], references: [id])
+
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  @@index([accountId])
+}
+
+model category {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  slug        String   @unique
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model tag {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
