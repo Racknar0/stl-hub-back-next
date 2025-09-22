@@ -11,8 +11,14 @@ import {
   listAssets,
   uploadImages,
   uploadArchiveTemp,
-  updateAsset
+  updateAsset,
+  deleteAsset,
+  latestAssets,
+  searchAssets,
+  requestDownload,
+  mostDownloadedAssets,
 } from '../../controllers/asset.controller.js';
+import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
 
 const router = Router();
 
@@ -50,12 +56,21 @@ const uploadImagesMulter = multer({ storage: imageStorage });
 // Multer combinado para /upload (todo va a tmp)
 const uploadCombined = multer({ storage: archiveStorage });
 
-// Rutas
+// Rutas públicas
+router.get('/latest', latestAssets);
+router.get('/top', mostDownloadedAssets);
+router.get('/search', searchAssets);
+router.get('/:id', getAsset);
+router.post('/:id/request-download', requestDownload);
+
+// A partir de aquí, requieren admin
+router.use(requireAuth, requireAdmin)
+
 // GET /assets?q=texto&pageIndex=0&pageSize=25 para paginación del lado del servidor
 router.get('/', listAssets);
-router.get('/:id', getAsset);
 router.get('/:id/progress', getAssetProgress);
 router.put('/:id', updateAsset);
+router.delete('/:id', deleteAsset);
 
 // Flujo unificado: archivo + imágenes en una sola llamada
 router.post('/upload', uploadCombined.fields([

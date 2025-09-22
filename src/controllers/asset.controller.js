@@ -4,6 +4,7 @@ import fs from 'fs';
 import sharp from 'sharp';
 import { spawn } from 'child_process';
 import { decryptToJson } from '../utils/cryptoUtils.js';
+import jwt from 'jsonwebtoken'
 
 const prisma = new PrismaClient();
 
@@ -49,7 +50,7 @@ export const listAssets = async (req, res) => {
     const hasPagination = pageIndex !== undefined && pageSize !== undefined;
 
     const where = q
-      ? { title: { contains: String(q), mode: 'insensitive' } }
+      ? { title: { contains: String(q) } }
       : undefined;
 
     if (hasPagination) {
@@ -535,5 +536,283 @@ export async function enqueueToMegaReal(asset) {
   } finally {
     progressMap.delete(asset.id)
     try { await runCmd(logoutCmd, []); } catch {}
+  }
+}
+
+// DELETE /api/assets/:id
+export const deleteAsset = async (req, res) => {
+  const id = Number(req.params.id)
+  try {
+    const asset = await prisma.asset.findUnique({ where: { id } })
+    if (!asset) return res.status(404).json({ message: 'Asset not found' })
+
+    const cat = safeName(asset.category || 'uncategorized')
+    const imgDir = path.join(IMAGES_DIR, cat, asset.slug)
+    const archDir = path.join(ARCHIVES_DIR, cat, asset.slug)
+
+    // Borrar archivos locales (imágenes, thumbs y archivo)
+    try { if (fs.existsSync(imgDir)) fs.rmSync(imgDir, { recursive: true, force: true }) } catch (e) { console.warn('[ASSETS] rm images warn:', e.message) }
+    try { if (fs.existsSync(archDir)) fs.rmSync(archDir, { recursive: true, force: true }) } catch (e) { console.warn('[ASSETS] rm archives warn:', e.message) }
+    try { removeEmptyDirsUp(path.dirname(imgDir), IMAGES_DIR) } catch {}
+    try { removeEmptyDirsUp(path.dirname(archDir), ARCHIVES_DIR) } catch {}
+
+    // Eliminar de DB primero
+    await prisma.asset.delete({ where: { id } })
+
+    // Intentar eliminar en MEGA
+    let megaDeleted = false
+    try {
+      const acc = await prisma.megaAccount.findUnique({ where: { id: asset.accountId }, include: { credentials: true } })
+      if (!acc || !acc.credentials) throw new Error('No account/credentials')
+      const payload = decryptToJson(acc.credentials.encData, acc.credentials.encIv, acc.credentials.encTag)
+
+      const loginCmd = 'mega-login'
+      const rmCmd = 'mega-rm'
+      const logoutCmd = 'mega-logout'
+
+      const remoteBase = (acc.baseFolder || '/').replaceAll('\\', '/')
+      const remotePath = path.posix.join(remoteBase, cat, asset.slug)
+
+      try { await runCmd(logoutCmd, []) } catch {}
+      if (payload?.type === 'session' && payload.session) {
+        await runCmd(loginCmd, [payload.session])
+      } else if (payload?.username && payload?.password) {
+        await runCmd(loginCmd, [payload.username, payload.password])
+      } else {
+        throw new Error('Invalid credentials payload')
+      }
+
+      // Forzar borrado recursivo del folder del asset
+      await runCmd(rmCmd, ['-rf', remotePath])
+      megaDeleted = true
+      try { await runCmd(logoutCmd, []) } catch {}
+    } catch (e) {
+      console.warn('[ASSETS] mega delete warn:', e.message)
+    }
+
+    return res.json({ dbDeleted: true, megaDeleted })
+  } catch (e) {
+    console.error('[ASSETS] delete error:', e)
+    return res.status(500).json({ message: 'Error deleting asset' })
+  }
+}
+
+// Obtener últimas N novedades (publicadas)
+export const latestAssets = async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(50, Number(req.query.limit) || 20))
+    const items = await prisma.asset.findMany({
+      where: { status: 'PUBLISHED' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: limit,
+      select: { id: true, title: true, category: true, tags: true, images: true, megaLink: true, isPremium: true },
+    })
+    return res.json(items)
+  } catch (e) {
+    console.error('[ASSETS] latest error:', e)
+    return res.status(500).json({ message: 'Error getting latest assets' })
+  }
+}
+
+// Obtener más descargados (publicados)
+export const mostDownloadedAssets = async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(50, Number(req.query.limit) || 20))
+    // SQL crudo para evitar depender de client regenerado
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT id, title, category, tags, images, megaLink, isPremium, downloads
+       FROM asset
+       WHERE status = 'PUBLISHED'
+       ORDER BY downloads DESC, id DESC
+       LIMIT ?`,
+      limit
+    )
+    const items = rows.map((r) => {
+      const out = { ...r }
+      // Normalizar JSON
+      try { if (typeof out.tags === 'string') out.tags = JSON.parse(out.tags) } catch {}
+      try { if (typeof out.images === 'string') out.images = JSON.parse(out.images) } catch {}
+      return out
+    })
+    return res.json(items)
+  } catch (e) {
+    console.error('[ASSETS] mostDownloaded error:', e)
+    return res.status(500).json({ message: 'Error getting most downloaded assets' })
+  }
+}
+
+// Búsqueda pública con filtros por categorías, tags y texto libre
+export const searchAssets = async (req, res) => {
+  try {
+    const { q = '', categories = '', tags = '' } = req.query || {};
+
+    const qStr = String(q || '').trim();
+    const qLower = qStr.toLowerCase();
+
+    const catList = String(categories || '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+
+    const tagList = String(tags || '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+
+    console.log('[ASSETS][SEARCH] params:', { q: qStr, categories: catList, tags: tagList });
+
+    // Reducir universo por categoría en DB si se especifica
+    const where = {};
+    if (catList.length) where.category = { in: catList };
+
+    // Traer un set razonable y filtrar/ordenar en memoria
+    const itemsDb = await prisma.asset.findMany({
+      where,
+      orderBy: { id: 'desc' },
+      take: 1000,
+    });
+
+    console.log('[ASSETS][SEARCH] universe:', { where, dbCount: itemsDb.length });
+
+    const scored = [];
+    let filteredByTags = 0;
+    let dbgLoggedMatched = 0;
+    let dbgLoggedSkipped = 0;
+
+    for (const it of itemsDb) {
+      // Filtrar por tags explícitos (si se enviaron)
+      if (tagList.length) {
+        const itsTags = Array.isArray(it.tags) ? it.tags : [];
+        const itsLower = itsTags.map((t) => String(t).toLowerCase());
+        const some = tagList.some((t) => itsLower.includes(t));
+        if (!some) { filteredByTags++; continue; }
+      }
+
+      // Si no hay q, incluir tal cual (solo por categorías/tags)
+      if (!qLower) {
+        scored.push({ it, score: 0 });
+        continue;
+      }
+
+      // Campos a evaluar
+      const title = String(it.title || '');
+      const descr = String(it.description || '');
+      const cat = String(it.category || '');
+      const arch = String(it.archiveName || '');
+      const imgs = Array.isArray(it.images) ? it.images : [];
+      const tagsArr = Array.isArray(it.tags) ? it.tags : [];
+
+      const titleL = title.toLowerCase();
+      const descrL = descr.toLowerCase();
+      const catL = cat.toLowerCase();
+      const archL = arch.toLowerCase();
+      const imgsL = imgs.map((p) => String(p).toLowerCase());
+      const tagsL = tagsArr.map((t) => String(t).toLowerCase());
+
+      let score = 0;
+      let matched = false;
+      const reasons = [];
+
+      // Pesos: título > archivo > imagen > tag > categoría > descripción
+      if (titleL.includes(qLower)) { score += 100; matched = true; reasons.push('title'); }
+      if (archL && archL.includes(qLower)) { score += 90; matched = true; reasons.push('archive'); }
+      if (imgsL.some((p) => p.includes(qLower))) { score += 80; matched = true; reasons.push('image'); }
+      if (tagsL.includes(qLower)) { score += 70; matched = true; reasons.push('tag'); }
+      if (catL.includes(qLower)) { score += 50; matched = true; reasons.push('category'); }
+      if (descrL.includes(qLower)) { score += 30; matched = true; reasons.push('description'); }
+
+      if (!matched) {
+        if (dbgLoggedSkipped < 10) {
+          console.log('[ASSETS][SEARCH] skip(no match):', { id: it.id, title: it.title });
+          dbgLoggedSkipped++;
+        }
+        continue;
+      }
+
+      // bonus por empieza con
+      if (titleL.startsWith(qLower)) score += 10;
+
+      if (dbgLoggedMatched < 15) {
+        console.log('[ASSETS][SEARCH] match:', { id: it.id, title: it.title, score, reasons });
+        dbgLoggedMatched++;
+      }
+
+      scored.push({ it, score });
+    }
+
+    // Ordenar por score desc y desempatar por id desc
+    scored.sort((a, b) => (b.score - a.score) || (b.it.id - a.it.id));
+
+    // Limitar respuesta
+    const out = scored.slice(0, 200).map(({ it }) => it);
+
+    console.log('[ASSETS][SEARCH] result:', {
+      totalInDb: itemsDb.length,
+      filteredByTags,
+      matched: scored.length,
+      returned: out.length,
+      top: scored.slice(0, 5).map(s => ({ id: s.it.id, title: s.it.title, score: s.score }))
+    });
+
+    return res.json({ items: out });
+  } catch (e) {
+    console.error('[ASSETS] search error:', e);
+    return res.status(500).json({ message: 'Error searching assets' });
+  }
+};
+
+// Solicitud de descarga: valida acceso, incrementa contador y devuelve link
+export const requestDownload = async (req, res) => {
+  try {
+    const id = Number(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Invalid asset id' })
+
+    const asset = await prisma.asset.findUnique({ where: { id }, select: { id: true, status: true, isPremium: true, megaLink: true } })
+    if (!asset) return res.status(404).json({ message: 'Asset not found' })
+    if (asset.status !== 'PUBLISHED') return res.status(409).json({ message: 'Asset not available' })
+    if (!asset.megaLink) return res.status(409).json({ message: 'Download link not ready' })
+
+    let allowed = false
+    let userId = null
+    if (!asset.isPremium) {
+      // Free: permitido sin autenticación
+      allowed = true
+    } else {
+      // Premium: requiere token + suscripción activa o admin
+      try {
+        const auth = req.headers.authorization || ''
+        const token = auth.startsWith('Bearer ') ? auth.slice(7) : null
+        if (!token) return res.status(401).json({ message: 'Unauthorized' })
+        const secret = process.env.JWT_SECRET || 'dev-secret'
+        const payload = jwt.verify(token, secret)
+        userId = Number(payload?.id)
+        const roleId = Number(payload?.roleId)
+        if (!userId) return res.status(401).json({ message: 'Unauthorized' })
+        // Admin siempre permitido
+        if (roleId === 2) {
+          allowed = true
+        } else {
+          const now = new Date()
+          const sub = await prisma.subscription.findFirst({
+            where: { userId, status: 'ACTIVE', currentPeriodEnd: { gt: now } },
+            orderBy: { id: 'desc' }
+          })
+          allowed = !!sub
+          if (!allowed) return res.status(403).json({ message: 'Subscription required' })
+        }
+      } catch (e) {
+        return res.status(401).json({ message: 'Unauthorized' })
+      }
+    }
+
+    if (!allowed) return res.status(403).json({ message: 'Forbidden' })
+
+    // Incrementar contador de descargas de forma atómica por SQL crudo
+    await prisma.$executeRawUnsafe('UPDATE asset SET downloads = downloads + 1 WHERE id = ?', id)
+
+    return res.json({ ok: true, link: asset.megaLink })
+  } catch (e) {
+    console.error('[ASSETS] requestDownload error:', e)
+    return res.status(500).json({ message: 'Error processing download' })
   }
 }

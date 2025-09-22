@@ -144,6 +144,9 @@ model asset {
 
   status       AssetStatus  @default(DRAFT)
 
+  // Contador de descargas
+  downloads    Int          @default(0)
+
   // Relación con la cuenta de MEGA
   accountId    Int
   account      megaAccount  @relation(fields: [accountId], references: [id])

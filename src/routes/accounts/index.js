@@ -1,7 +1,10 @@
 import { Router } from 'express';
 import { createAccount, testAccount, listAccounts, updateAccount, getAccountDetail, logoutAccount, listAccountAssets } from '../../controllers/account.controller.js';
+import { requireAuth, requireAdmin } from '../../middlewares/auth.js';
 
 const router = Router();
+
+router.use(requireAuth, requireAdmin);
 
 router.get('/', listAccounts);
 router.get('/:id', getAccountDetail);
