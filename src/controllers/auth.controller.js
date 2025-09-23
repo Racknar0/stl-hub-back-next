@@ -160,14 +160,10 @@ export const resetPassword = async (req, res) => {
 // Revisión y corrección: registro por venta con suscripción
 export const registerUserSale = async (req, res) => {
   try {
-    const { email, password, type_subscription } = req.body;
+    const { email, password, type_subscription, daysToAdd } = req.body;
 
-    if (!email || !password || !type_subscription) {
-      return res.status(400).json({ message: 'Please provide email, password and subscription type' });
-    }
-
-    if (!Object.values(subscriptionTypes).includes(type_subscription)) {
-      return res.status(400).json({ message: 'Invalid subscription type' });
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Please provide email and password' });
     }
 
     const existingUser = await prisma.user.findUnique({ where: { email } });
@@ -181,20 +177,35 @@ export const registerUserSale = async (req, res) => {
     const now = new Date();
     const addMonths = (date, months) => { const d = new Date(date); d.setMonth(d.getMonth() + months); return d; };
     const addYears  = (date, years)  => { const d = new Date(date); d.setFullYear(d.getFullYear() + years); return d; };
+    const addDays   = (date, days)   => { const d = new Date(date); d.setDate(d.getDate() + days); return d; };
 
     let expirationDate;
-    switch (type_subscription) {
-      case subscriptionTypes.THREE_MONTHS:
-        expirationDate = addMonths(now, 3);
-        break;
-      case subscriptionTypes.SIX_MONTHS:
-        expirationDate = addMonths(now, 6);
-        break;
-      case subscriptionTypes.ONE_YEAR:
-        expirationDate = addYears(now, 1);
-        break;
-      default:
+    // Preferir daysToAdd si viene válido; si no, usar type_subscription (compatibilidad)
+    const days = Number(daysToAdd);
+    if (Number.isFinite(days) && days > 0) {
+      // Limitar razonable (máx ~10 años)
+      const safeDays = Math.min(days, 3650);
+      expirationDate = addDays(now, safeDays);
+    } else {
+      if (!type_subscription) {
+        return res.status(400).json({ message: 'Please provide daysToAdd or a valid subscription type' });
+      }
+      if (!Object.values(subscriptionTypes).includes(type_subscription)) {
         return res.status(400).json({ message: 'Invalid subscription type' });
+      }
+      switch (type_subscription) {
+        case subscriptionTypes.THREE_MONTHS:
+          expirationDate = addMonths(now, 3);
+          break;
+        case subscriptionTypes.SIX_MONTHS:
+          expirationDate = addMonths(now, 6);
+          break;
+        case subscriptionTypes.ONE_YEAR:
+          expirationDate = addYears(now, 1);
+          break;
+        default:
+          return res.status(400).json({ message: 'Invalid subscription type' });
+      }
     }
 
     // Transacción: crear usuario (activo) y su suscripción

@@ -7,7 +7,8 @@
     "start": "node app.js --env-file=.env",
     "dev": "nodemon --env-file=.env app.js",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "seed": "node ./seed/seed.js"
+    "seed": "node ./seed/seed.js",
+    "validate:last": "node ./src/utils/validateLastMeAccount.js"
   },
   "author": "",
   "license": "ISC",

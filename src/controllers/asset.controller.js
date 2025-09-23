@@ -952,6 +952,17 @@ export const requestDownload = async (req, res) => {
     if (!asset.isPremium) {
       // Free: permitido sin autenticación
       allowed = true
+      // Si viene token, capturar userId para registrar historial
+      try {
+        const auth = req.headers.authorization || ''
+        const token = auth.startsWith('Bearer ') ? auth.slice(7) : null
+        if (token) {
+          const secret = process.env.JWT_SECRET || 'dev-secret'
+          const payload = jwt.verify(token, secret)
+          const uid = Number(payload?.id)
+          if (uid) userId = uid
+        }
+      } catch {}
     } else {
       // Premium: requiere token + suscripción activa o admin
       try {
@@ -1012,10 +1023,12 @@ export const requestDownload = async (req, res) => {
       // Limitar a 20: borrar las más antiguas si hay más de 20
       const count = await prisma.downloadHistory.count({ where: { userId } });
       if (count > 20) {
+        // Borrar todo lo que esté por detrás de las 20 más recientes
         const old = await prisma.downloadHistory.findMany({
           where: { userId },
-          orderBy: { downloadedAt: 'asc' },
+          orderBy: { downloadedAt: 'desc' },
           skip: 20,
+          select: { id: true },
         });
         const idsToDelete = old.map(d => d.id);
         if (idsToDelete.length) {

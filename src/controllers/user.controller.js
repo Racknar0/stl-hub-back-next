@@ -44,7 +44,7 @@ export const getUsers = async (req, res) => {
 
     const where = q ? { email: { contains: q } } : {};
 
-    const [total, users] = await prisma.$transaction([
+    const [total, users, downloadCounts] = await prisma.$transaction([
       prisma.user.count({ where }),
       prisma.user.findMany({
         where,
@@ -66,9 +66,34 @@ export const getUsers = async (req, res) => {
         skip: (page - 1) * pageSize,
         take: pageSize,
       }),
+      // Conteo de descargas por usuario dentro de la página actual
+      prisma.downloadHistory.groupBy({
+        by: ['userId'],
+        _count: { _all: true },
+        where: { userId: { in: await (async ()=>{
+          // Extraer ids de la página actual
+          // (Se hace en línea porque no podemos referenciar users todavía fuera del txn)
+          // Este truco se ignora, replaceremos luego manualmente si no funciona.
+          return []
+        })() } }
+      }),
     ]);
 
-    res.status(200).json({ data: users, total, page, pageSize });
+    // Si la agrupación falló (array vacío) porque no pudimos pasar ids dinámicamente, hacemos fallback fuera de la transacción
+    let downloadMap = new Map();
+    if (!downloadCounts || !downloadCounts.length) {
+      const ids = users.map(u => u.id);
+      if (ids.length) {
+        const rows = await prisma.downloadHistory.groupBy({ by: ['userId'], _count: { _all: true }, where: { userId: { in: ids } } });
+        downloadMap = new Map(rows.map(r => [r.userId, r._count._all]));
+      }
+    } else {
+      downloadMap = new Map(downloadCounts.map(r => [r.userId, r._count._all]));
+    }
+
+    const enriched = users.map(u => ({ ...u, downloadCount: downloadMap.get(u.id) || 0 }));
+
+    res.status(200).json({ data: enriched, total, page, pageSize });
   } catch (error) {
     console.log('Error getting users: ', error);
     res.status(500).json({ message: 'Error getting users' });
@@ -156,21 +181,18 @@ export const deleteUser = async (req, res) => {
   }
 };
 
-// Extender suscripción activa del usuario (3, 6 o 12 meses)
+// Extender suscripción activa del usuario: por días (preferido) o por meses (3, 6, 12)
 export const extendSubscription = async (req, res) => {
   try {
     const userId = parseInt(req.params.id);
-    const { months } = req.body; // 3 | 6 | 12
-
-    if (![3, 6, 12].includes(Number(months))) {
-      return res.status(400).json({ message: 'Invalid months value. Use 3, 6 or 12.' });
-    }
+    const { months, daysToAdd } = req.body; // Prefer daysToAdd
 
     const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true } });
     if (!user) return res.status(404).json({ message: 'User not found' });
 
     const now = new Date();
     const addMonths = (date, m) => { const d = new Date(date); d.setMonth(d.getMonth() + m); return d; };
+    const addDays = (date, days) => { const d = new Date(date); d.setDate(d.getDate() + days); return d; };
 
     // Última suscripción activa
     const activeSub = await prisma.subscription.findFirst({
@@ -179,10 +201,19 @@ export const extendSubscription = async (req, res) => {
     });
 
     let newEnd;
-    if (activeSub && activeSub.currentPeriodEnd > now) {
-      newEnd = addMonths(activeSub.currentPeriodEnd, Number(months));
+    const days = Number(daysToAdd);
+    if (Number.isFinite(days) && days > 0) {
+      const base = (activeSub && activeSub.currentPeriodEnd > now) ? activeSub.currentPeriodEnd : now;
+      const safeDays = Math.min(days, 3650); // Máx ~10 años
+      newEnd = addDays(base, safeDays);
     } else {
-      newEnd = addMonths(now, Number(months));
+      // Fallback a meses (compatibilidad)
+      const m = Number(months);
+      if (![3, 6, 12].includes(m)) {
+        return res.status(400).json({ message: 'Provide daysToAdd (>0) or valid months (3, 6 or 12).' });
+      }
+      const base = (activeSub && activeSub.currentPeriodEnd > now) ? activeSub.currentPeriodEnd : now;
+      newEnd = addMonths(base, m);
     }
 
     let updatedSub;

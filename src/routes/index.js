@@ -7,6 +7,7 @@ import categoryRoutes from './categories/index.js';
 import tagRoutes from './tags/index.js';
 import reportsRoutes from './reports/index.js';
 import downloadsRoutes from './downloads/index.js';
+import meRoutes from './me/index.js';
 
 const router = express.Router();
 
@@ -19,5 +20,6 @@ router.use('/tags', tagRoutes);
 router.use('/admin/reports', reportsRoutes);
 
 router.use('/downloads', downloadsRoutes);
+router.use('/me', meRoutes);
 
 export default router;
