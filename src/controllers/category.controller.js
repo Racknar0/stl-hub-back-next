@@ -24,10 +24,10 @@ export async function getCategory(req, res) {
 }
 
 export async function createCategory(req, res) {
-  const { name, slug, description } = req.body || {};
+  const { name, slug, description, nameEn, slugEn } = req.body || {};
   if (!name || !slug) return res.status(400).json({ error: 'NAME_AND_SLUG_REQUIRED' });
   try {
-    const item = await prisma.category.create({ data: { name, slug, description } });
+    const item = await prisma.category.create({ data: { name, slug, description, nameEn, slugEn } });
     res.status(201).json(item);
   } catch (e) {
     console.error(e);
@@ -37,9 +37,9 @@ export async function createCategory(req, res) {
 
 export async function updateCategory(req, res) {
   const id = Number(req.params.id);
-  const { name, slug, description } = req.body || {};
+  const { name, slug, description, nameEn, slugEn } = req.body || {};
   try {
-    const item = await prisma.category.update({ where: { id }, data: { name, slug, description } });
+    const item = await prisma.category.update({ where: { id }, data: { name, slug, description, nameEn, slugEn } });
     res.json(item);
   } catch (e) {
     console.error(e);

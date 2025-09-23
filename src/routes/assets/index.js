@@ -17,6 +17,7 @@ import {
   searchAssets,
   requestDownload,
   mostDownloadedAssets,
+  randomizeFree,
 } from '../../controllers/asset.controller.js';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
 
@@ -65,6 +66,9 @@ router.post('/:id/request-download', requestDownload);
 
 // A partir de aquí, requieren admin
 router.use(requireAuth, requireAdmin)
+
+// Nuevo: randomizar freebies
+router.post('/randomize-free', randomizeFree)
 
 // GET /assets?q=texto&pageIndex=0&pageSize=25 para paginación del lado del servidor
 router.get('/', listAssets);

@@ -24,10 +24,10 @@ export async function getTag(req, res) {
 }
 
 export async function createTag(req, res) {
-  const { name, slug } = req.body || {};
+  const { name, slug, nameEn, slugEn } = req.body || {};
   if (!name || !slug) return res.status(400).json({ error: 'NAME_AND_SLUG_REQUIRED' });
   try {
-    const item = await prisma.tag.create({ data: { name, slug } });
+    const item = await prisma.tag.create({ data: { name, slug, nameEn, slugEn } });
     res.status(201).json(item);
   } catch (e) {
     console.error(e);
@@ -37,9 +37,9 @@ export async function createTag(req, res) {
 
 export async function updateTag(req, res) {
   const id = Number(req.params.id);
-  const { name, slug } = req.body || {};
+  const { name, slug, nameEn, slugEn } = req.body || {};
   try {
-    const item = await prisma.tag.update({ where: { id }, data: { name, slug } });
+    const item = await prisma.tag.update({ where: { id }, data: { name, slug, nameEn, slugEn } });
     res.json(item);
   } catch (e) {
     console.error(e);

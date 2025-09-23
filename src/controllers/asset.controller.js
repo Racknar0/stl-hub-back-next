@@ -43,15 +43,50 @@ function removeEmptyDirsUp(startDir, stopDir) {
   }
 }
 
+// helpers para parsear categorías múltiples (por id o slug)
+function parseCategoriesPayload(val) {
+  // admite: [1,2] o ["anime","cosplay"] o "anime,cosplay"
+  if (!val) return []
+  let arr = []
+  if (Array.isArray(val)) arr = val
+  else {
+    try { const j = JSON.parse(val); if (Array.isArray(j)) arr = j } catch { arr = String(val).split(',') }
+  }
+  return arr.map((v) => (typeof v === 'number' ? { id: v } : { slug: safeName(String(v)) })).filter(Boolean)
+}
+
+// Nueva: parseo para tags M:N por id o slug
+function parseTagsPayload(val) {
+  if (!val) return []
+  let arr = []
+  if (Array.isArray(val)) arr = val
+  else {
+    try { const j = JSON.parse(val); if (Array.isArray(j)) arr = j } catch { arr = String(val).split(',') }
+  }
+  return arr.map((v) => (typeof v === 'number' ? { id: v } : { slug: safeName(String(v)) })).filter(Boolean)
+}
+
 // Listar y obtener
 export const listAssets = async (req, res) => {
   try {
-    const { q = '', pageIndex, pageSize } = req.query;
+    const { q = '', pageIndex, pageSize, plan, isPremium } = req.query;
     const hasPagination = pageIndex !== undefined && pageSize !== undefined;
 
-    const where = q
-      ? { title: { contains: String(q) } }
-      : undefined;
+    // Construir filtro dinámico
+    const where = {};
+    if (q) {
+      where.title = { contains: String(q) };
+    }
+    // plan=free|premium o isPremium=true|false
+    const planStr = String(plan || '').toLowerCase();
+    if (planStr === 'free') where.isPremium = false;
+    else if (planStr === 'premium') where.isPremium = true;
+
+    if (isPremium !== undefined && isPremium !== null && String(isPremium).length) {
+      const b = String(isPremium).toLowerCase();
+      if (b === 'true') where.isPremium = true;
+      if (b === 'false') where.isPremium = false;
+    }
 
     if (hasPagination) {
       const take = Math.max(1, Math.min(1000, Number(pageSize) || 50));
@@ -61,7 +96,11 @@ export const listAssets = async (req, res) => {
       const [items, total] = await Promise.all([
         prisma.asset.findMany({
           where,
-          include: { account: { select: { alias: true } } },
+          include: {
+            account: { select: { alias: true } },
+            categories: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+            tags: { select: { id: true, slug: true, name: true, nameEn: true } },
+          },
           orderBy: { id: 'desc' },
           skip,
           take,
@@ -74,7 +113,11 @@ export const listAssets = async (req, res) => {
 
     const items = await prisma.asset.findMany({
       where,
-      include: { account: { select: { alias: true } } },
+      include: {
+        account: { select: { alias: true } },
+        categories: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+        tags: { select: { id: true, slug: true, name: true, nameEn: true } },
+      },
       orderBy: { id: 'desc' },
       take: 50,
     });
@@ -88,9 +131,21 @@ export const listAssets = async (req, res) => {
 export const getAsset = async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const item = await prisma.asset.findUnique({ where: { id } });
+    const item = await prisma.asset.findUnique({
+      where: { id },
+      include: {
+        account: { select: { alias: true, id: true } },
+        categories: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+        tags: { select: { slug: true, name: true, nameEn: true } },
+      },
+    });
     if (!item) return res.status(404).json({ message: 'Not found' });
-    return res.json(item);
+
+    // Preparar tags ES (slugs) y EN desde relación
+    const tagsEs = Array.isArray(item.tags) ? item.tags.map(t => t.slug) : [];
+    const tagsEn = Array.isArray(item.tags) ? item.tags.map(t => t.nameEn || t.name || t.slug) : [];
+
+    return res.json({ ...item, tagsEs, tagsEn });
   } catch (e) {
     console.error('[ASSETS] get error:', e);
     return res.status(500).json({ message: 'Error getting asset' });
@@ -103,20 +158,23 @@ export const updateAsset = async (req, res) => {
     const existing = await prisma.asset.findUnique({ where: { id } })
     if (!existing) return res.status(404).json({ message: 'Asset not found' })
 
-    const { title, category, tags, isPremium } = req.body
+    const { title, titleEn, categories, tags, isPremium } = req.body
     const data = {}
     if (title !== undefined) data.title = String(title)
-    if (category !== undefined) data.category = String(category)
+    if (titleEn !== undefined) data.titleEn = String(titleEn)
     if (typeof isPremium !== 'undefined') data.isPremium = Boolean(isPremium)
-    if (typeof tags !== 'undefined') {
-      try {
-        data.tags = Array.isArray(tags) ? tags : JSON.parse(tags)
-      } catch {
-        data.tags = undefined
-      }
+
+    const catsParsed = parseCategoriesPayload(categories)
+    if (catsParsed.length) {
+      data.categories = { set: [], connect: catsParsed }
     }
 
-    const updated = await prisma.asset.update({ where: { id }, data })
+    const tagsParsed = parseTagsPayload(tags)
+    if (tagsParsed.length) {
+      data.tags = { set: [], connect: tagsParsed }
+    }
+
+    const updated = await prisma.asset.update({ where: { id }, data, include: { categories: true, tags: true } })
     return res.json(updated)
   } catch (e) {
     console.error('[ASSETS] update error:', e)
@@ -139,7 +197,7 @@ export const uploadArchiveTemp = async (req, res) => {
 // 2) Crear asset en DB, mover archivo temporal a definitivo y generar estructura
 export const createAsset = async (req, res) => {
   try {
-    const { title, category, tags, isPremium, accountId, tempArchivePath, archiveOriginal } = req.body;
+    const { title, titleEn, categories, tags, isPremium, accountId, tempArchivePath, archiveOriginal } = req.body;
     if (!title) return res.status(400).json({ message: 'title required' });
     if (!accountId) return res.status(400).json({ message: 'accountId required' });
     const accId = Number(accountId);
@@ -147,13 +205,12 @@ export const createAsset = async (req, res) => {
     const slugBase = safeName(title);
     const slug = slugBase || `asset-${Date.now()}`;
 
-    // carpeta final: archives/category/slug
-    const finalDir = path.join(ARCHIVES_DIR, safeName(category || 'uncategorized'), slug);
+    // carpeta final de archivo: archives/slug (sin categoría legado)
+    const finalDir = path.join(ARCHIVES_DIR, slug);
     ensureDir(finalDir);
 
     let archiveName = null, archiveSizeB = null, megaLink = null;
 
-    // mover archivo si vino tempArchivePath
     if (tempArchivePath) {
       const absTemp = path.join(UPLOADS_DIR, tempArchivePath);
       const fname = archiveOriginal ? safeFileName(archiveOriginal) : path.basename(absTemp);
@@ -162,24 +219,32 @@ export const createAsset = async (req, res) => {
       archiveName = path.relative(UPLOADS_DIR, target);
       const sz = fs.statSync(path.resolve(target)).size;
       archiveSizeB = sz;
-      // tamaño persistente
-      megaLink = megaLink; // noop to keep order; we'll set fileSizeB in create
+      megaLink = megaLink;
     }
+
+    const baseData = {
+      title,
+      titleEn: titleEn ? String(titleEn) : undefined,
+      slug,
+      isPremium: Boolean(isPremium),
+      accountId: accId,
+      archiveName,
+      archiveSizeB,
+      fileSizeB: archiveSizeB ?? null,
+      megaLink,
+      status: 'DRAFT',
+    }
+
+    // Conectar categorías/tags si se enviaron
+    const catsParsed = parseCategoriesPayload(categories)
+    const tagsParsed = parseTagsPayload(tags)
 
     const created = await prisma.asset.create({
       data: {
-        title,
-        slug,
-        category,
-        tags: tags ? JSON.parse(tags) : undefined,
-        isPremium: Boolean(isPremium),
-        accountId: accId,
-        archiveName,
-        archiveSizeB,
-        fileSizeB: archiveSizeB ?? null,
-        megaLink,
-        status: 'DRAFT',
-      }
+        ...baseData,
+        ...(catsParsed.length ? { categories: { connect: catsParsed } } : {}),
+        ...(tagsParsed.length ? { tags: { connect: tagsParsed } } : {}),
+      },
     });
 
     return res.status(201).json(created);
@@ -198,29 +263,25 @@ export const uploadImages = async (req, res) => {
 
     const replacing = String(req.query?.replace || '').toLowerCase() === 'true'
 
-    const category = safeName(asset.category || 'uncategorized');
     const slug = asset.slug;
 
-    // carpeta imágenes: images/category/slug
-    const baseDir = path.join(IMAGES_DIR, category, slug);
+    // NUEVO: carpeta imágenes: images/slug (sin categoría)
+    const baseDir = path.join(IMAGES_DIR, slug);
     const thumbsDir = path.join(baseDir, 'thumbs');
     ensureDir(baseDir); ensureDir(thumbsDir);
 
     const files = req.files || [];
     const stored = [];
 
-    // Si se reemplaza, eliminar imágenes anteriores registradas en DB
     if (replacing) {
       const prev = Array.isArray(asset.images) ? asset.images : []
       for (const rel of prev) {
         try {
           const abs = path.join(UPLOADS_DIR, rel)
           if (fs.existsSync(abs)) fs.unlinkSync(abs)
-          // limpiar directorios vacíos ascendiendo
           removeEmptyDirsUp(path.dirname(abs), IMAGES_DIR)
         } catch (e) { console.warn('[ASSETS] replace cleanup warn:', e.message) }
       }
-      // limpiar thumbs
       try {
         if (fs.existsSync(thumbsDir)) {
           for (const f of fs.readdirSync(thumbsDir)) {
@@ -232,25 +293,31 @@ export const uploadImages = async (req, res) => {
 
     for (let i = 0; i < files.length; i++) {
       const f = files[i];
-      const ext = path.extname(f.originalname) || path.extname(f.filename) || '';
-      const name = `${Date.now()}_${i}${ext}`;
-      const dest = path.join(baseDir, name);
-      fs.renameSync(f.path, dest);
+      const outName = `${Date.now()}_${i}.webp`;
+      const dest = path.join(baseDir, outName);
+      try {
+        // Redimensionar a un ancho máximo de 700px manteniendo aspecto y sin ampliar
+        await sharp(f.path)
+          .rotate()
+          .resize({ width: 700, withoutEnlargement: true })
+          .webp({ quality: 80, effort: 6 })
+          .toFile(dest);
+      } finally {
+        try { fs.unlinkSync(f.path) } catch {}
+      }
       const rel = path.relative(UPLOADS_DIR, dest);
       stored.push(rel);
     }
 
-    // Generar thumbs: solo de las dos primeras imágenes disponibles
     const toThumb = stored.slice(0, 2);
     const thumbs = [];
     for (let i = 0; i < toThumb.length; i++) {
       const src = path.join(UPLOADS_DIR, toThumb[i]);
-      const out = path.join(thumbsDir, `thumb_${i + 1}.jpg`);
-      await sharp(src).resize(400, 400, { fit: 'inside' }).jpeg({ quality: 80 }).toFile(out);
+      const out = path.join(thumbsDir, `thumb_${i + 1}.webp`);
+      await sharp(src).resize(400, 400, { fit: 'inside' }).webp({ quality: 65, effort: 6 }).toFile(out);
       thumbs.push(path.relative(UPLOADS_DIR, out));
     }
 
-    // actualizar asset.images (guardar rutas relativas)
     const imagesJson = Array.isArray(asset.images) ? asset.images : [];
     const newImages = replacing ? stored : imagesJson.concat(stored);
 
@@ -273,23 +340,17 @@ export const enqueueUploadToMega = async (req, res) => {
     const asset = await prisma.asset.findUnique({ where: { id } });
     if (!asset) return res.status(404).json({ message: 'Asset not found' });
 
-    // Simular cola simple en memoria con spawn mega-cmd cuando corresponda
-    // Para demo: lanzar proceso en background y loguear progreso a consola
     const account = await prisma.megaAccount.findUnique({ where: { id: asset.accountId } });
     if (!account) return res.status(400).json({ message: 'Account not found' });
 
     const archiveAbs = asset.archiveName ? path.join(UPLOADS_DIR, asset.archiveName) : null;
     if (!archiveAbs || !fs.existsSync(archiveAbs)) return res.status(400).json({ message: 'Archive not found on server' });
 
-    // Construir destino remoto en MEGA
+    // Destino remoto en MEGA: raíz del baseFolder + slug (sin categoría)
     const remoteBase = account.baseFolder || '/';
-    const remoteCategory = safeName(asset.category || 'uncategorized');
-    const remotePath = path.posix.join(remoteBase.replaceAll('\\', '/'), remoteCategory, asset.slug);
+    const remotePath = path.posix.join(remoteBase.replaceAll('\\', '/'), asset.slug);
 
     console.log(`[ASSETS] enqueue upload asset id=${id} to MEGA ${remotePath}`);
-
-    // simulación/ejecución: mkdir y put con mega-cmd
-    // Nota: no guardamos megaLink todavía (placeholder)
 
     const child = spawn('powershell.exe', ['-NoProfile', '-Command', `Write-Host "Uploading to MEGA... ${asset.slug}"; Start-Sleep -s 1; Write-Host "25%"; Start-Sleep -s 1; Write-Host "50%"; Start-Sleep -s 1; Write-Host "75%"; Start-Sleep -s 1; Write-Host "100% done"`], { shell: false });
     child.stdout.on('data', d => console.log(`[MEGA-UP] ${d.toString().trim()}`));
@@ -304,7 +365,6 @@ export const enqueueUploadToMega = async (req, res) => {
       }
     });
 
-    // responder inmediatamente (encolado)
     await prisma.asset.update({ where: { id }, data: { status: 'PROCESSING' } });
     return res.json({ message: 'Enqueued', status: 'PROCESSING' });
   } catch (e) {
@@ -317,7 +377,7 @@ export const enqueueUploadToMega = async (req, res) => {
 export const createAssetFull = async (req, res) => {
   let cleanupPaths = [];
   try {
-    const { title, category, tags, isPremium, accountId } = req.body;
+    const { title, titleEn, categories, tags, isPremium, accountId } = req.body;
     if (!title) return res.status(400).json({ message: 'title required' });
     if (!accountId) return res.status(400).json({ message: 'accountId required' });
     const accId = Number(accountId);
@@ -328,56 +388,66 @@ export const createAssetFull = async (req, res) => {
 
     const slugBase = safeName(title);
     const slug = slugBase || `asset-${Date.now()}`;
-    const cat = safeName(category || 'uncategorized');
 
-    // construir carpetas definitivas
-    const archDir = path.join(ARCHIVES_DIR, cat, slug);
-    const imgDir = path.join(IMAGES_DIR, cat, slug);
+    // carpetas definitivas
+    const archDir = path.join(ARCHIVES_DIR, slug); // archivo: sin carpeta por categoría
+    const imgDir = path.join(IMAGES_DIR, slug); // imágenes solo por slug
     const thumbsDir = path.join(imgDir, 'thumbs');
     ensureDir(archDir); ensureDir(imgDir); ensureDir(thumbsDir);
 
-    // mover archivo principal desde tmp -> destino conservando nombre original (sanitizado)
     const targetName = safeFileName(archiveFile.originalname || archiveFile.filename);
     const archiveTarget = path.join(archDir, targetName);
     fs.renameSync(archiveFile.path, archiveTarget);
 
-    // mover imágenes desde tmp -> destino y recolectar rutas
     const imagesRel = [];
     for (let i = 0; i < imageFiles.length; i++) {
       const f = imageFiles[i];
-      const extI = path.extname(f.originalname) || path.extname(f.filename) || '';
-      const dest = path.join(imgDir, `${Date.now()}_${i}${extI}`);
-      fs.renameSync(f.path, dest);
-      imagesRel.push(path.relative(UPLOADS_DIR, dest));
+      const out = path.join(imgDir, `${Date.now()}_${i}.webp`);
+      try {
+        // Redimensionar a un ancho máximo de 700px manteniendo aspecto y sin ampliar
+        await sharp(f.path)
+          .rotate()
+          .resize({ width: 700, withoutEnlargement: true })
+          .webp({ quality: 80, effort: 6 })
+          .toFile(out);
+      } finally {
+        try { fs.unlinkSync(f.path) } catch {}
+      }
+      imagesRel.push(path.relative(UPLOADS_DIR, out));
     }
 
-    // thumbs de las dos primeras
     const thumbs = [];
     for (let i = 0; i < Math.min(2, imagesRel.length); i++) {
       const src = path.join(UPLOADS_DIR, imagesRel[i]);
-      const out = path.join(thumbsDir, `thumb_${i + 1}.jpg`);
-      await sharp(src).resize(400, 400, { fit: 'inside' }).jpeg({ quality: 80 }).toFile(out);
+      const out = path.join(thumbsDir, `thumb_${i + 1}.webp`);
+      await sharp(src).resize(400, 400, { fit: 'inside' }).webp({ quality: 65, effort: 6 }).toFile(out);
       thumbs.push(path.relative(UPLOADS_DIR, out));
     }
 
-    // crear asset
+    const baseData = {
+      title,
+      titleEn: titleEn ? String(titleEn) : undefined,
+      slug,
+      isPremium: Boolean(isPremium),
+      accountId: accId,
+      archiveName: path.relative(UPLOADS_DIR, archiveTarget),
+      archiveSizeB: fs.statSync(archiveTarget).size,
+      fileSizeB: fs.statSync(archiveTarget).size,
+      images: imagesRel,
+      status: 'PROCESSING',
+    }
+
+    const catsParsed = parseCategoriesPayload(categories)
+    const tagsParsed = parseTagsPayload(tags)
+
     const created = await prisma.asset.create({
       data: {
-        title,
-        slug,
-        category: cat,
-        tags: tags ? JSON.parse(tags) : undefined,
-        isPremium: Boolean(isPremium),
-        accountId: accId,
-        archiveName: path.relative(UPLOADS_DIR, archiveTarget),
-        archiveSizeB: fs.statSync(archiveTarget).size,
-        fileSizeB: fs.statSync(archiveTarget).size,
-        images: imagesRel,
-        status: 'PROCESSING',
-      }
+        ...baseData,
+        ...(catsParsed.length ? { categories: { connect: catsParsed } } : {}),
+        ...(tagsParsed.length ? { tags: { connect: tagsParsed } } : {}),
+      },
     });
 
-    // encolar subida a mega real con credenciales
     enqueueToMegaReal(created).catch(err => console.error('[MEGA-UP] async error:', err));
 
     return res.status(201).json(created);
@@ -410,6 +480,46 @@ async function runCmd(cmd, args = [], options = {}) {
   })
 }
 
+// Helper: Auto-aceptar términos de MEGA cuando aparece el prompt
+function attachAutoAcceptTerms(child, label = 'MEGA') {
+  let answered = false
+  let sawCopyright = false
+
+  const ACCEPT_REGEXES = [
+    /Do you accept\s+these\s+terms\??/i,
+    /Do you accept.*terms\??/i,
+    /Acepta[s]? .*t[ée]rminos\??/i,
+  ]
+  const COPYRIGHT_REGEXES = [
+    /MEGA respects the copyrights/i,
+    /You are strictly prohibited from using the MEGA cloud service/i,
+    /copyright/i,
+  ]
+
+  const maybeAnswer = (s) => {
+    if (answered) return
+    if (COPYRIGHT_REGEXES.some(r => r.test(s))) {
+      sawCopyright = true
+    }
+    if (ACCEPT_REGEXES.some(r => r.test(s))) {
+      try { child.stdin.write('Yes\r\n'); answered = true; console.log(`[${label}] answered YES to terms`) } catch (err) { console.error(`[${label}] failed writing YES:`, err) }
+      return
+    }
+    if (!answered && sawCopyright && /:\s*$/.test(s)) {
+      try { child.stdin.write('Yes\r\n'); answered = true; console.log(`[${label}] answered YES (fallback)`) } catch (err) { console.error(`[${label}] failed writing YES (fallback):`, err) }
+    }
+  }
+
+  const onData = (buf, isErr = false) => {
+    const s = buf.toString()
+    ;(isErr ? console.error : console.log)(`[${label}] ${s.trim()}`)
+    maybeAnswer(s)
+  }
+
+  child.stdout.on('data', (d) => onData(d, false))
+  child.stderr.on('data', (d) => onData(d, true))
+}
+
 export async function enqueueToMegaReal(asset) {
   const acc = await prisma.megaAccount.findUnique({ where: { id: asset.accountId }, include: { credentials: true } });
   if (!acc) throw new Error('Account not found');
@@ -422,8 +532,7 @@ export async function enqueueToMegaReal(asset) {
   const logoutCmd = 'mega-logout';
 
   const remoteBase = (acc.baseFolder || '/').replaceAll('\\', '/');
-  const remoteCategory = safeName(asset.category || 'uncategorized');
-  const remotePath = path.posix.join(remoteBase, remoteCategory, asset.slug);
+  const remotePath = path.posix.join(remoteBase, asset.slug); // NUEVO: sin categoría
 
   const localArchive = asset.archiveName ? path.join(UPLOADS_DIR, asset.archiveName) : null;
 
@@ -438,13 +547,10 @@ export async function enqueueToMegaReal(asset) {
 
   const parseAndSetProgress = (buf) => {
     const txt = buf.toString();
-    // Caso: mensaje de finalización
     if (/upload finished/i.test(txt)) {
       progressMap.set(asset.id, 100)
       return
     }
-    // Buscar la última ocurrencia del porcentaje dentro del chunk
-    // Formatos típicos: "(66/70 MB:  94.89 %)" o "94.89 %"
     let last = null
     const re1 = /:\s*([0-9]{1,3}(?:\.[0-9]+)?)\s*%/g
     const re2 = /([0-9]{1,3}(?:\.[0-9]+)?)\s*%/g
@@ -475,40 +581,31 @@ export async function enqueueToMegaReal(asset) {
 
     if (!localArchive || !fs.existsSync(localArchive)) throw new Error('Local archive not found');
 
-    // Subir con streaming de progreso
+    // Subir con streaming de progreso + auto-aceptación de términos
     await new Promise((resolve, reject) => {
-      const child = spawn(putCmd, [localArchive, remotePath], { shell: true });
-      let answered = false
-      const maybeAnswer = (s) => {
-        if (!answered && /Do you accept these terms\?/i.test(s)) {
-          try { child.stdin.write('Yes\n'); answered = true } catch {}
-        }
-      }
-      child.stdout.on('data', (d) => { const s = d.toString(); console.log(`[MEGA] ${s.trim()}`); parseAndSetProgress(d); maybeAnswer(s) });
-      child.stderr.on('data', (d) => { const s = d.toString(); console.error(`[MEGA] ${s.trim()}`); parseAndSetProgress(d); maybeAnswer(s) });
-      child.on('close', (code) => code === 0 ? resolve() : reject(new Error(`${putCmd} exited ${code}`)));
+      const child = spawn(putCmd, [localArchive, remotePath], { shell: true })
+      attachAutoAcceptTerms(child, 'MEGA PUT')
+      // Solo parsear progreso aquí para evitar logs duplicados
+      child.stdout.on('data', (d) => { parseAndSetProgress(d) })
+      child.stderr.on('data', (d) => { parseAndSetProgress(d) })
+      child.on('close', (code) => code === 0 ? resolve() : reject(new Error(`${putCmd} exited ${code}`)))
     })
 
     progressMap.set(asset.id, 100)
 
-    // Intentar exportar link público del archivo en MEGA
+    // Intentar exportar link público del archivo en MEGA (con auto-aceptación)
     let publicLink = null
     try {
       const remoteFilePath = path.posix.join(remotePath, path.basename(localArchive))
       const out = await new Promise((resolve, reject) => {
         let buffer = ''
-        let answered = false
         const child = spawn('mega-export', ['-a', remoteFilePath], { shell: true })
-        const maybeAnswer = (s) => {
-          if (!answered && /Do you accept estos términos\?/i.test(s)) {
-            try { child.stdin.write('Yes\n'); answered = true } catch {}
-          }
-        }
-        child.stdout.on('data', (d) => { const s = d.toString(); buffer += s; console.log(`[MEGA] ${s.trim()}`); maybeAnswer(s) })
-        child.stderr.on('data', (d) => { const s = d.toString(); buffer += s; console.error(`[MEGA] ${s.trim()}`); maybeAnswer(s) })
+        attachAutoAcceptTerms(child, 'MEGA EXPORT')
+        child.stdout.on('data', (d) => { buffer += d.toString() })
+        child.stderr.on('data', (d) => { buffer += d.toString() })
         child.on('close', (code) => code === 0 ? resolve(buffer) : reject(new Error(`mega-export exited ${code}`)))
       })
-      const m = String(out).match(/https?:\/\/mega\.nz\/[\S]+/i)
+      const m = String(out).match(/https?:\/\/mega\.nz\/\S+/i)
       if (m) publicLink = m[0]
     } catch (e) {
       console.warn('[MEGA-UP] export warn:', e.message)
@@ -523,7 +620,6 @@ export async function enqueueToMegaReal(asset) {
       console.warn('[MEGA-UP] rmdir warn:', e.message)
     }
 
-    // Imprimir link público si se obtuvo
     if (publicLink) console.log(`*******************************  [MEGA-UP] public link: ${publicLink}`);
 
     await prisma.asset.update({ where: { id: asset.id }, data: { status: 'PUBLISHED', archiveName: null, archiveSizeB: null, megaLink: publicLink || undefined } });
@@ -546,9 +642,8 @@ export const deleteAsset = async (req, res) => {
     const asset = await prisma.asset.findUnique({ where: { id } })
     if (!asset) return res.status(404).json({ message: 'Asset not found' })
 
-    const cat = safeName(asset.category || 'uncategorized')
-    const imgDir = path.join(IMAGES_DIR, cat, asset.slug)
-    const archDir = path.join(ARCHIVES_DIR, cat, asset.slug)
+    const imgDir = path.join(IMAGES_DIR, asset.slug) // imágenes por slug
+    const archDir = path.join(ARCHIVES_DIR, asset.slug) // archivo por slug
 
     // Borrar archivos locales (imágenes, thumbs y archivo)
     try { if (fs.existsSync(imgDir)) fs.rmSync(imgDir, { recursive: true, force: true }) } catch (e) { console.warn('[ASSETS] rm images warn:', e.message) }
@@ -571,7 +666,7 @@ export const deleteAsset = async (req, res) => {
       const logoutCmd = 'mega-logout'
 
       const remoteBase = (acc.baseFolder || '/').replaceAll('\\', '/')
-      const remotePath = path.posix.join(remoteBase, cat, asset.slug)
+      const remotePath = path.posix.join(remoteBase, asset.slug) // NUEVO: sin categoría
 
       try { await runCmd(logoutCmd, []) } catch {}
       if (payload?.type === 'session' && payload.session) {
@@ -605,9 +700,25 @@ export const latestAssets = async (req, res) => {
       where: { status: 'PUBLISHED' },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: limit,
-      select: { id: true, title: true, category: true, tags: true, images: true, megaLink: true, isPremium: true },
+      select: {
+        id: true,
+        title: true,
+        titleEn: true,
+        images: true,
+        megaLink: true,
+        isPremium: true,
+        categories: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+        tags: { select: { slug: true, name: true, nameEn: true } },
+      },
     })
-    return res.json(items)
+
+    const enriched = items.map(it => {
+      const tagsEs = Array.isArray(it.tags) ? it.tags.map(t => t.slug) : []
+      const tagsEn = Array.isArray(it.tags) ? it.tags.map(t => t.nameEn || t.name || t.slug) : []
+      return { ...it, tagsEs, tagsEn }
+    })
+
+    return res.json(enriched)
   } catch (e) {
     console.error('[ASSETS] latest error:', e)
     return res.status(500).json({ message: 'Error getting latest assets' })
@@ -618,23 +729,30 @@ export const latestAssets = async (req, res) => {
 export const mostDownloadedAssets = async (req, res) => {
   try {
     const limit = Math.max(1, Math.min(50, Number(req.query.limit) || 20))
-    // SQL crudo para evitar depender de client regenerado
-    const rows = await prisma.$queryRawUnsafe(
-      `SELECT id, title, category, tags, images, megaLink, isPremium, downloads
-       FROM asset
-       WHERE status = 'PUBLISHED'
-       ORDER BY downloads DESC, id DESC
-       LIMIT ?`,
-      limit
-    )
-    const items = rows.map((r) => {
-      const out = { ...r }
-      // Normalizar JSON
-      try { if (typeof out.tags === 'string') out.tags = JSON.parse(out.tags) } catch {}
-      try { if (typeof out.images === 'string') out.images = JSON.parse(out.images) } catch {}
-      return out
+    const items = await prisma.asset.findMany({
+      where: { status: 'PUBLISHED' },
+      orderBy: [{ downloads: 'desc' }, { id: 'desc' }],
+      take: limit,
+      select: {
+        id: true,
+        title: true,
+        titleEn: true,
+        images: true,
+        megaLink: true,
+        isPremium: true,
+        downloads: true,
+        categories: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+        tags: { select: { slug: true, name: true, nameEn: true } },
+      },
     })
-    return res.json(items)
+
+    const enriched = items.map(it => {
+      const tagsEs = Array.isArray(it.tags) ? it.tags.map(t => t.slug) : []
+      const tagsEn = Array.isArray(it.tags) ? it.tags.map(t => t.nameEn || t.name || t.slug) : []
+      return { ...it, tagsEs, tagsEn }
+    })
+
+    return res.json(enriched)
   } catch (e) {
     console.error('[ASSETS] mostDownloaded error:', e)
     return res.status(500).json({ message: 'Error getting most downloaded assets' })
@@ -644,124 +762,120 @@ export const mostDownloadedAssets = async (req, res) => {
 // Búsqueda pública con filtros por categorías, tags y texto libre
 export const searchAssets = async (req, res) => {
   try {
-    const { q = '', categories = '', tags = '' } = req.query || {};
+    const { q = '', categories = '', tags = '', order = '' } = req.query || {};
 
     const qStr = String(q || '').trim();
     const qLower = qStr.toLowerCase();
+    const qSlug = qLower.replace(/[^a-z0-9-_]+/g, '-');
 
-    const catList = String(categories || '')
+    const catListRaw = String(categories || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const catList = catListRaw.map((s) => safeName(s));
+
+    const tagTokens = String(tags || '')
       .split(',')
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean);
 
-    const tagList = String(tags || '')
-      .split(',')
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean);
+    let resolvedTagSlugsSet = new Set();
+    if (tagTokens.length) {
+      try {
+        const rows = await prisma.tag.findMany({
+          where: { OR: [ { slug: { in: tagTokens } }, { slugEn: { in: tagTokens } } ] },
+          select: { slug: true },
+        });
+        for (const r of rows) resolvedTagSlugsSet.add(String(r.slug).toLowerCase());
+        for (const t of tagTokens) resolvedTagSlugsSet.add(t);
+      } catch (e) {
+        resolvedTagSlugsSet = new Set(tagTokens);
+      }
+    }
 
-    console.log('[ASSETS][SEARCH] params:', { q: qStr, categories: catList, tags: tagList });
+    const where = { status: 'PUBLISHED' };
+    const andArr = [];
+    if (catList.length) {
+      andArr.push({ OR: [
+        { categories: { some: { slug: { in: catList } } } },
+        { categories: { some: { slugEn: { in: catList } } } },
+      ]});
+    }
+    const tagList = Array.from(resolvedTagSlugsSet);
+    if (tagList.length) {
+      andArr.push({ tags: { some: { slug: { in: tagList } } } });
+    }
+    if (andArr.length) where.AND = andArr;
 
-    // Reducir universo por categoría en DB si se especifica
-    const where = {};
-    if (catList.length) where.category = { in: catList };
-
-    // Traer un set razonable y filtrar/ordenar en memoria
     const itemsDb = await prisma.asset.findMany({
       where,
       orderBy: { id: 'desc' },
       take: 1000,
+      include: {
+        categories: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+        tags: { select: { slug: true, slugEn: true, name: true, nameEn: true } },
+      },
     });
-
-    console.log('[ASSETS][SEARCH] universe:', { where, dbCount: itemsDb.length });
 
     const scored = [];
-    let filteredByTags = 0;
-    let dbgLoggedMatched = 0;
-    let dbgLoggedSkipped = 0;
-
     for (const it of itemsDb) {
-      // Filtrar por tags explícitos (si se enviaron)
-      if (tagList.length) {
-        const itsTags = Array.isArray(it.tags) ? it.tags : [];
-        const itsLower = itsTags.map((t) => String(t).toLowerCase());
-        const some = tagList.some((t) => itsLower.includes(t));
-        if (!some) { filteredByTags++; continue; }
-      }
+      if (!qLower) { scored.push({ it, score: 0 }); continue; }
 
-      // Si no hay q, incluir tal cual (solo por categorías/tags)
-      if (!qLower) {
-        scored.push({ it, score: 0 });
-        continue;
-      }
-
-      // Campos a evaluar
       const title = String(it.title || '');
+      const titleEn = String(it.titleEn || '');
       const descr = String(it.description || '');
-      const cat = String(it.category || '');
       const arch = String(it.archiveName || '');
       const imgs = Array.isArray(it.images) ? it.images : [];
+
       const tagsArr = Array.isArray(it.tags) ? it.tags : [];
+      const catsArr = Array.isArray(it.categories) ? it.categories : [];
 
       const titleL = title.toLowerCase();
+      const titleEnL = titleEn.toLowerCase();
       const descrL = descr.toLowerCase();
-      const catL = cat.toLowerCase();
       const archL = arch.toLowerCase();
       const imgsL = imgs.map((p) => String(p).toLowerCase());
-      const tagsL = tagsArr.map((t) => String(t).toLowerCase());
+
+      const tagsTexts = tagsArr.flatMap(t => [t.slug, t.slugEn, t.name, t.nameEn].filter(Boolean).map(String));
+      const catsTexts = catsArr.flatMap(c => [c.slug, c.slugEn, c.name, c.nameEn].filter(Boolean).map(String));
+      const tagsL = tagsTexts.map(x => x.toLowerCase());
+      const catsL = catsTexts.map(x => x.toLowerCase());
 
       let score = 0;
-      let matched = false;
-      const reasons = [];
+      if (titleL.includes(qLower)) score += 120;
+      if (titleEnL.includes(qLower)) score += 115;
+      if (archL && archL.includes(qLower)) score += 90;
+      if (imgsL.some((p) => p.includes(qLower))) score += 85;
+      if (tagsL.some((t) => t.includes(qLower))) score += 75;
+      if (catsL.some((c) => c.includes(qLower))) score += 55;
+      if (descrL.includes(qLower)) score += 35;
+      if (titleL.startsWith(qLower) || titleEnL.startsWith(qLower)) score += 10;
 
-      // Pesos: título > archivo > imagen > tag > categoría > descripción
-      if (titleL.includes(qLower)) { score += 100; matched = true; reasons.push('title'); }
-      if (archL && archL.includes(qLower)) { score += 90; matched = true; reasons.push('archive'); }
-      if (imgsL.some((p) => p.includes(qLower))) { score += 80; matched = true; reasons.push('image'); }
-      if (tagsL.includes(qLower)) { score += 70; matched = true; reasons.push('tag'); }
-      if (catL.includes(qLower)) { score += 50; matched = true; reasons.push('category'); }
-      if (descrL.includes(qLower)) { score += 30; matched = true; reasons.push('description'); }
-
-      if (!matched) {
-        if (dbgLoggedSkipped < 10) {
-          console.log('[ASSETS][SEARCH] skip(no match):', { id: it.id, title: it.title });
-          dbgLoggedSkipped++;
-        }
-        continue;
-      }
-
-      // bonus por empieza con
-      if (titleL.startsWith(qLower)) score += 10;
-
-      if (dbgLoggedMatched < 15) {
-        console.log('[ASSETS][SEARCH] match:', { id: it.id, title: it.title, score, reasons });
-        dbgLoggedMatched++;
-      }
-
-      scored.push({ it, score });
+      if (score > 0) scored.push({ it, score });
     }
 
-    // Ordenar por score desc y desempatar por id desc
-    scored.sort((a, b) => (b.score - a.score) || (b.it.id - a.it.id));
+    if (String(order).toLowerCase() === 'downloads') {
+      scored.sort((a,b)=> (b.it.downloads - a.it.downloads) || (b.it.id - a.it.id))
+    } else {
+      scored.sort((a, b) => (b.score - a.score) || (b.it.id - a.it.id));
+    }
 
-    // Limitar respuesta
     const out = scored.slice(0, 200).map(({ it }) => it);
 
-    console.log('[ASSETS][SEARCH] result:', {
-      totalInDb: itemsDb.length,
-      filteredByTags,
-      matched: scored.length,
-      returned: out.length,
-      top: scored.slice(0, 5).map(s => ({ id: s.it.id, title: s.it.title, score: s.score }))
+    const enriched = out.map((it) => {
+      const tagsEs = Array.isArray(it.tags) ? it.tags.map(t => t.slug) : [];
+      const tagsEn = Array.isArray(it.tags) ? it.tags.map(t => t.nameEn || t.name || t.slug) : [];
+      return { ...it, tagsEs, tagsEn };
     });
 
-    return res.json({ items: out });
+    return res.json({ items: enriched });
   } catch (e) {
     console.error('[ASSETS] search error:', e);
     return res.status(500).json({ message: 'Error searching assets' });
   }
 };
 
-// Solicitud de descarga: valida acceso, incrementa contador y devuelve link
+// Solicitud de descarga
 export const requestDownload = async (req, res) => {
   try {
     const id = Number(req.params.id)
@@ -814,5 +928,43 @@ export const requestDownload = async (req, res) => {
   } catch (e) {
     console.error('[ASSETS] requestDownload error:', e)
     return res.status(500).json({ message: 'Error processing download' })
+  }
+}
+
+// Randomizar freebies: poner todos los publicados como premium y luego seleccionar N aleatorios para dejarlos gratis
+export const randomizeFree = async (req, res) => {
+  try {
+    let n = Number(req.body?.count ?? req.query?.count ?? 0)
+    if (!Number.isFinite(n) || n < 0) n = 0
+
+    const where = { status: 'PUBLISHED' }
+
+    // Total de assets publicados
+    const total = await prisma.asset.count({ where })
+    if (total === 0) return res.json({ total: 0, selected: 0 })
+
+    // Paso 1: marcar todos como premium
+    await prisma.asset.updateMany({ where, data: { isPremium: true } })
+
+    // Paso 2: seleccionar N aleatorios para dejar free
+    if (n > 0) {
+      const rows = await prisma.asset.findMany({ where, select: { id: true } })
+      const ids = rows.map(r => r.id)
+      // Fisher-Yates shuffle parcial
+      for (let i = ids.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1))
+        ;[ids[i], ids[j]] = [ids[j], ids[i]]
+      }
+      const pick = ids.slice(0, Math.min(n, ids.length))
+      if (pick.length) {
+        await prisma.asset.updateMany({ where: { id: { in: pick } }, data: { isPremium: false } })
+      }
+      return res.json({ total, selected: pick.length })
+    }
+
+    return res.json({ total, selected: 0 })
+  } catch (e) {
+    console.error('[ASSETS] randomizeFree error:', e)
+    return res.status(500).json({ message: 'Error randomizing free assets' })
   }
 }

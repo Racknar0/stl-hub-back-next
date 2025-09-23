@@ -125,10 +125,9 @@ enum AssetStatus {
 model asset {
   id           Int          @id @default(autoincrement())
   title        String
+  titleEn      String?      // nombre en inglés
   slug         String       @unique
   description  String?
-  category     String?
-  tags         Json?        // array de strings
   isPremium    Boolean      @default(false)
 
   // Enlace de MEGA (placeholder, se modificará más adelante)
@@ -151,6 +150,12 @@ model asset {
   accountId    Int
   account      megaAccount  @relation(fields: [accountId], references: [id])
 
+  // Relación muchas-a-muchas con categorías
+  categories   category[]
+
+  // Nueva relación muchas-a-muchas con tags
+  tags         tag[]
+
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
 
@@ -160,8 +165,11 @@ model asset {
 model category {
   id          Int      @id @default(autoincrement())
   name        String   @unique
+  nameEn      String?  // sinónimo en inglés
   slug        String   @unique
+  slugEn      String?  @unique
   description String?
+  assets      asset[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 }
@@ -169,7 +177,13 @@ model category {
 model tag {
   id        Int      @id @default(autoincrement())
   name      String   @unique
+  nameEn    String?  // adjetivo en inglés
   slug      String   @unique
+  slugEn    String?  @unique
+
+  // Relación inversa M:N con assets
+  assets    asset[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
