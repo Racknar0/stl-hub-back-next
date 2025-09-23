@@ -90,6 +90,17 @@ function parseTagsPayload(val) {
   return arr.map((v) => (typeof v === 'number' ? { id: v } : { slug: safeName(String(v)) })).filter(Boolean)
 }
 
+// Generar slug único (hasta maxTries variantes) evitando crear archivos/directorios basura con slug repetido
+async function generateUniqueSlug(base, maxTries = 50) {
+  const slugBase = base || 'asset'
+  for (let i = 0; i < maxTries; i++) {
+    const candidate = i === 0 ? slugBase : `${slugBase}-${i}`
+    const exists = await prisma.asset.findUnique({ where: { slug: candidate }, select: { id: true } })
+    if (!exists) return candidate
+  }
+  throw Object.assign(new Error('No unique slug available'), { code: 'SLUG_EXHAUSTED' })
+}
+
 // Listar y obtener
 export const listAssets = async (req, res) => {
   try {
@@ -240,9 +251,13 @@ export const createAsset = async (req, res) => {
     if (!title) return res.status(400).json({ message: 'title required' });
     if (!accountId) return res.status(400).json({ message: 'accountId required' });
     const accId = Number(accountId);
-
-    const slugBase = safeName(title);
-    const slug = slugBase || `asset-${Date.now()}`;
+    let slug
+    try {
+      slug = await generateUniqueSlug(safeName(title));
+    } catch (e) {
+      if (e.code === 'SLUG_EXHAUSTED') return res.status(409).json({ code: 'SLUG_CONFLICT', message: 'No hay slug disponible', base: safeName(title) })
+      throw e
+    }
 
     // carpeta final de archivo: archives/slug (sin categoría legado)
     const finalDir = path.join(ARCHIVES_DIR, slug);
@@ -278,18 +293,25 @@ export const createAsset = async (req, res) => {
     const catsParsed = parseCategoriesPayload(categories)
     const tagsParsed = parseTagsPayload(tags)
 
-    const created = await prisma.asset.create({
-      data: {
-        ...baseData,
-        ...(catsParsed.length ? { categories: { connect: catsParsed } } : {}),
-        ...(tagsParsed.length ? { tags: { connect: tagsParsed } } : {}),
-      },
-    });
-
-    return res.status(201).json(created);
+    try {
+      const created = await prisma.asset.create({
+        data: {
+          ...baseData,
+          ...(catsParsed.length ? { categories: { connect: catsParsed } } : {}),
+          ...(tagsParsed.length ? { tags: { connect: tagsParsed } } : {}),
+        },
+      });
+      return res.status(201).json(created);
+    } catch (e) {
+      if (e?.code === 'P2002') {
+        return res.status(409).json({ code: 'SLUG_EXISTS', message: 'El slug ya existe', slug });
+      }
+      throw e
+    }
   } catch (e) {
     console.error('[ASSETS] create error:', e);
-    return res.status(500).json({ message: 'Error creating asset' });
+    if (e?.code === 'SLUG_CONFLICT') return res.status(409).json({ code: 'SLUG_CONFLICT', message: 'No hay slug disponible' })
+    return res.status(500).json({ message: 'Error creating asset', error: e.message });
   }
 };
 
@@ -428,8 +450,13 @@ export const createAssetFull = async (req, res) => {
     const imageFiles = (req.files?.images || []);
     if (!archiveFile) return res.status(400).json({ message: 'archive required' });
 
-    const slugBase = safeName(title);
-    const slug = slugBase || `asset-${Date.now()}`;
+    let slug
+    try {
+      slug = await generateUniqueSlug(safeName(title));
+    } catch (e) {
+      if (e.code === 'SLUG_EXHAUSTED') return res.status(409).json({ code: 'SLUG_CONFLICT', message: 'No hay slug disponible', base: safeName(title) })
+      throw e
+    }
 
     // carpetas definitivas
     const archDir = path.join(ARCHIVES_DIR, slug); // archivo: sin carpeta por categoría
@@ -482,24 +509,31 @@ export const createAssetFull = async (req, res) => {
     const catsParsed = parseCategoriesPayload(categories)
     const tagsParsed = parseTagsPayload(tags)
 
-    const created = await prisma.asset.create({
-      data: {
-        ...baseData,
-        ...(catsParsed.length ? { categories: { connect: catsParsed } } : {}),
-        ...(tagsParsed.length ? { tags: { connect: tagsParsed } } : {}),
-      },
-    });
+    let created
+    try {
+      created = await prisma.asset.create({
+        data: {
+          ...baseData,
+          ...(catsParsed.length ? { categories: { connect: catsParsed } } : {}),
+          ...(tagsParsed.length ? { tags: { connect: tagsParsed } } : {}),
+        },
+      });
+    } catch (e) {
+      if (e?.code === 'P2002') {
+        return res.status(409).json({ code: 'SLUG_EXISTS', message: 'El slug ya existe', slug });
+      }
+      throw e
+    }
 
     enqueueToMegaReal(created).catch(err => console.error('[MEGA-UP] async error:', err));
 
-    // Limpieza best-effort de temporales
     setTimeout(() => cleanTempDir(), 0)
-
     return res.status(201).json(created);
   } catch (e) {
     console.error('[ASSETS] createFull error:', e);
     try { cleanupPaths.forEach(p => { if (p && fs.existsSync(p)) fs.unlinkSync(p) }) } catch {}
-    return res.status(500).json({ message: 'Error creating asset' });
+    if (e?.code === 'SLUG_CONFLICT') return res.status(409).json({ code: 'SLUG_CONFLICT', message: 'No hay slug disponible' })
+    return res.status(500).json({ message: 'Error creating asset', error: e.message });
   }
 };
 
@@ -667,7 +701,32 @@ export async function enqueueToMegaReal(asset) {
 
     if (publicLink) console.log(`*******************************  [MEGA-UP] public link: ${publicLink}`);
 
-    await prisma.asset.update({ where: { id: asset.id }, data: { status: 'PUBLISHED', archiveName: null, archiveSizeB: null, megaLink: publicLink || undefined } });
+    // Devuelve la ruta dentro de archives/... sin el prefijo "archives/"
+    function stripArchivesPrefix(absPath) {
+      // Si está dentro de ARCHIVES_DIR, saca la ruta relativa a esa carpeta
+      const relFromArchives = path.relative(ARCHIVES_DIR, absPath);
+      if (!relFromArchives.startsWith('..')) {
+        // Ej.: "back-spinal-atack-on-titan\back_spinal_atack_on_titan.rar"
+        return relFromArchives;
+      }
+      // Fallback: relativo a UPLOADS y quitar "archives/" o "archives\"
+      const relFromUploads = path.relative(UPLOADS_DIR, absPath);
+      return relFromUploads.replace(/^archives[\\/]/i, '');
+    }
+
+    // --- uso ---
+    const nameWithoutPrefix = stripArchivesPrefix(localArchive);
+
+    await prisma.asset.update({
+      where: { id: asset.id },
+      data: {
+        status: 'PUBLISHED',
+        // Ejemplo final deseado:
+        // "back-spinal-atack-on-titan\back_spinal_atack_on_titan.rar"
+        archiveName: nameWithoutPrefix,
+        megaLink: publicLink || undefined,
+      }
+    });
 
     console.log(`[MEGA-UP] done asset id=${asset.id}`);
   } catch (e) {

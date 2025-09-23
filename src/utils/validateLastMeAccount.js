@@ -15,6 +15,9 @@ import path from 'path';
   Resultado:
     - Actualiza status, lastCheckAt, storageUsedMB, storageTotalMB, fileCount, folderCount
     - Devuelve un resumen en consola (JSON)
+
+    Forzar una cuenta específica:
+    $env:MEGA_ACCOUNT_ID=12; npm run validate:last
 */
 
 const prisma = new PrismaClient();
