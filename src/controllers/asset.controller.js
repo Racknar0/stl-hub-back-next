@@ -23,6 +23,30 @@ function safeFileName(originalName) {
   const base = path.basename(originalName, ext).replace(/[^a-zA-Z0-9-_]+/g, '_').slice(0, 120) || 'file';
   return `${base}${ext}`;
 }
+// Limpieza de archivos temporales antiguos en uploads/tmp
+function cleanTempDir(maxAgeMs = 20 * 60 * 1000) {
+  try {
+    const now = Date.now()
+    if (!fs.existsSync(TEMP_DIR)) return
+    const names = fs.readdirSync(TEMP_DIR)
+    for (const name of names) {
+      const p = path.join(TEMP_DIR, name)
+      try {
+        const st = fs.statSync(p)
+        if (st.isFile()) {
+          const age = now - st.mtimeMs
+          if (age > maxAgeMs) {
+            fs.unlinkSync(p)
+          }
+        }
+      } catch (e) {
+        // continuar
+      }
+    }
+  } catch (e) {
+    console.warn('[CLEANUP] temp dir cleanup warn:', e.message)
+  }
+}
 function removeEmptyDirsUp(startDir, stopDir) {
   try {
     let dir = path.resolve(startDir)
@@ -145,7 +169,22 @@ export const getAsset = async (req, res) => {
     const tagsEs = Array.isArray(item.tags) ? item.tags.map(t => t.slug) : [];
     const tagsEn = Array.isArray(item.tags) ? item.tags.map(t => t.nameEn || t.name || t.slug) : [];
 
-    return res.json({ ...item, tagsEs, tagsEn });
+    // Solo exponer megaLink si el solicitante es admin
+    let isAdmin = false;
+    try {
+      const auth = req.headers.authorization || '';
+      const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+      if (token) {
+        const secret = process.env.JWT_SECRET || 'dev-secret';
+        const payload = jwt.verify(token, secret);
+        isAdmin = Number(payload?.roleId) === 2;
+      }
+    } catch {}
+
+    const { megaLink, ...rest } = item;
+    const payload = isAdmin ? { ...item, tagsEs, tagsEn } : { ...rest, tagsEs, tagsEn };
+
+    return res.json(payload);
   } catch (e) {
     console.error('[ASSETS] get error:', e);
     return res.status(500).json({ message: 'Error getting asset' });
@@ -326,6 +365,9 @@ export const uploadImages = async (req, res) => {
       data: { images: newImages },
     });
 
+    // Limpieza best-effort de temporales
+    setTimeout(() => cleanTempDir(), 0)
+
     return res.json({ images: newImages, thumbs, replaced: replacing });
   } catch (e) {
     console.error('[ASSETS] upload images error:', e);
@@ -449,6 +491,9 @@ export const createAssetFull = async (req, res) => {
     });
 
     enqueueToMegaReal(created).catch(err => console.error('[MEGA-UP] async error:', err));
+
+    // Limpieza best-effort de temporales
+    setTimeout(() => cleanTempDir(), 0)
 
     return res.status(201).json(created);
   } catch (e) {
@@ -705,7 +750,6 @@ export const latestAssets = async (req, res) => {
         title: true,
         titleEn: true,
         images: true,
-        megaLink: true,
         isPremium: true,
         categories: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
         tags: { select: { slug: true, name: true, nameEn: true } },
@@ -738,7 +782,6 @@ export const mostDownloadedAssets = async (req, res) => {
         title: true,
         titleEn: true,
         images: true,
-        megaLink: true,
         isPremium: true,
         downloads: true,
         categories: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
@@ -762,7 +805,7 @@ export const mostDownloadedAssets = async (req, res) => {
 // Búsqueda pública con filtros por categorías, tags y texto libre
 export const searchAssets = async (req, res) => {
   try {
-    const { q = '', categories = '', tags = '', order = '' } = req.query || {};
+    const { q = '', categories = '', tags = '', order = '', plan, isPremium } = req.query || {};
 
     const qStr = String(q || '').trim();
     const qLower = qStr.toLowerCase();
@@ -794,6 +837,16 @@ export const searchAssets = async (req, res) => {
     }
 
     const where = { status: 'PUBLISHED' };
+    // Filtro por plan o isPremium: plan=free|premium o isPremium=true|false
+    const planStr = String(plan || '').toLowerCase();
+    if (planStr === 'free') where.isPremium = false;
+    else if (planStr === 'premium') where.isPremium = true;
+    if (isPremium !== undefined && String(isPremium).length) {
+      const b = String(isPremium).toLowerCase();
+      if (b === 'true') where.isPremium = true;
+      if (b === 'false') where.isPremium = false;
+    }
+
     const andArr = [];
     if (catList.length) {
       andArr.push({ OR: [
@@ -809,9 +862,15 @@ export const searchAssets = async (req, res) => {
 
     const itemsDb = await prisma.asset.findMany({
       where,
-      orderBy: { id: 'desc' },
+      orderBy: String(order).toLowerCase() === 'downloads' ? [{ downloads: 'desc' }, { id: 'desc' }] : { id: 'desc' },
       take: 1000,
-      include: {
+      select: {
+        id: true,
+        title: true,
+        titleEn: true,
+        images: true,
+        isPremium: true,
+        downloads: true,
         categories: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
         tags: { select: { slug: true, slugEn: true, name: true, nameEn: true } },
       },
@@ -854,18 +913,20 @@ export const searchAssets = async (req, res) => {
       if (score > 0) scored.push({ it, score });
     }
 
-    if (String(order).toLowerCase() === 'downloads') {
-      scored.sort((a,b)=> (b.it.downloads - a.it.downloads) || (b.it.id - a.it.id))
-    } else {
+    if (qLower) {
       scored.sort((a, b) => (b.score - a.score) || (b.it.id - a.it.id));
+    } else if (String(order).toLowerCase() === 'downloads') {
+      scored.sort((a,b)=> (b.it.downloads - a.it.downloads) || (b.it.id - a.it.id))
     }
 
-    const out = scored.slice(0, 200).map(({ it }) => it);
+    const out = (qLower ? scored.map(({ it }) => it) : itemsDb).slice(0, 200);
 
     const enriched = out.map((it) => {
+      const rest = { ...it };
+      delete rest.megaLink;
       const tagsEs = Array.isArray(it.tags) ? it.tags.map(t => t.slug) : [];
       const tagsEn = Array.isArray(it.tags) ? it.tags.map(t => t.nameEn || t.name || t.slug) : [];
-      return { ...it, tagsEs, tagsEn };
+      return { ...rest, tagsEs, tagsEn };
     });
 
     return res.json({ items: enriched });
@@ -907,12 +968,20 @@ export const requestDownload = async (req, res) => {
           allowed = true
         } else {
           const now = new Date()
-          const sub = await prisma.subscription.findFirst({
-            where: { userId, status: 'ACTIVE', currentPeriodEnd: { gt: now } },
-            orderBy: { id: 'desc' }
+          // Buscar la última suscripción (activa o expirada) para informar fecha si aplica
+          const lastSub = await prisma.subscription.findFirst({
+            where: { userId },
+            orderBy: { id: 'desc' },
           })
-          allowed = !!sub
-          if (!allowed) return res.status(403).json({ message: 'Subscription required' })
+          if (!lastSub) {
+            return res.status(403).json({ code: 'NO_SUB', message: 'Subscription required' })
+          }
+          const end = new Date(lastSub.currentPeriodEnd)
+          const isActive = lastSub.status === 'ACTIVE' && end > now
+          if (!isActive) {
+            return res.status(403).json({ code: 'EXPIRED', message: 'Subscription expired', expiredAt: end.toISOString() })
+          }
+          allowed = true
         }
       } catch (e) {
         return res.status(401).json({ message: 'Unauthorized' })
@@ -953,18 +1022,16 @@ export const randomizeFree = async (req, res) => {
       // Fisher-Yates shuffle parcial
       for (let i = ids.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1))
-        ;[ids[i], ids[j]] = [ids[j], ids[i]]
+        const tmp = ids[i]; ids[i] = ids[j]; ids[j] = tmp
       }
       const pick = ids.slice(0, Math.min(n, ids.length))
-      if (pick.length) {
-        await prisma.asset.updateMany({ where: { id: { in: pick } }, data: { isPremium: false } })
-      }
+      await prisma.asset.updateMany({ where: { id: { in: pick } }, data: { isPremium: false } })
       return res.json({ total, selected: pick.length })
     }
 
     return res.json({ total, selected: 0 })
   } catch (e) {
     console.error('[ASSETS] randomizeFree error:', e)
-    return res.status(500).json({ message: 'Error randomizing free assets' })
+    return res.status(500).json({ message: 'Error randomizing freebies' })
   }
 }
