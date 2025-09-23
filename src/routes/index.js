@@ -6,6 +6,7 @@ import assetRoutes from './assets/index.js';
 import categoryRoutes from './categories/index.js';
 import tagRoutes from './tags/index.js';
 import reportsRoutes from './reports/index.js';
+import downloadsRoutes from './downloads/index.js';
 
 const router = express.Router();
 
@@ -16,5 +17,7 @@ router.use('/assets', assetRoutes);
 router.use('/categories', categoryRoutes);
 router.use('/tags', tagRoutes);
 router.use('/admin/reports', reportsRoutes);
+
+router.use('/downloads', downloadsRoutes);
 
 export default router;

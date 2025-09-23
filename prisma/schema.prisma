@@ -208,3 +208,15 @@ model BrokenReport {
   @@index([createdAt(sort: Desc)])
   @@index([assetId])
 }
+
+// Historial de descargas por usuario (máx 20 por usuario)
+model DownloadHistory {
+  id           Int      @id @default(autoincrement())
+  userId       Int      // No FK, solo referencia
+  assetId      Int      // No FK, solo referencia
+  assetTitle   String?  // Copia el título del asset al momento de la descarga
+  downloadedAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([downloadedAt(sort: Desc)])
+}

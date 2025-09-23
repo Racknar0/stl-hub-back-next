@@ -993,6 +993,37 @@ export const requestDownload = async (req, res) => {
     // Incrementar contador de descargas de forma atómica por SQL crudo
     await prisma.$executeRawUnsafe('UPDATE asset SET downloads = downloads + 1 WHERE id = ?', id)
 
+    // Registrar historial de descarga si el usuario está logueado
+    if (userId) {
+      // Obtener título actual del asset (puede ser null si se borra luego)
+      let assetTitle = null;
+      try {
+        const assetObj = await prisma.asset.findUnique({ where: { id }, select: { title: true } });
+        assetTitle = assetObj?.title || null;
+      } catch {}
+      // Insertar registro
+      await prisma.downloadHistory.create({
+        data: {
+          userId,
+          assetId: id,
+          assetTitle,
+        }
+      });
+      // Limitar a 20: borrar las más antiguas si hay más de 20
+      const count = await prisma.downloadHistory.count({ where: { userId } });
+      if (count > 20) {
+        const old = await prisma.downloadHistory.findMany({
+          where: { userId },
+          orderBy: { downloadedAt: 'asc' },
+          skip: 20,
+        });
+        const idsToDelete = old.map(d => d.id);
+        if (idsToDelete.length) {
+          await prisma.downloadHistory.deleteMany({ where: { id: { in: idsToDelete } } });
+        }
+      }
+    }
+
     return res.json({ ok: true, link: asset.megaLink })
   } catch (e) {
     console.error('[ASSETS] requestDownload error:', e)
