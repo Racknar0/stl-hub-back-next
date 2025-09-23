@@ -4,8 +4,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-const PORT = process.env.PORT || 3000;
-const API_URL = process.env.API_URL || 'no url';
+const PORT = process.env.PORT || 3001;
 
 const app = express();
 
@@ -23,5 +22,5 @@ app.use('/api', routes);
 
 
 app.listen(PORT, () => {
-    console.log(`Server is online in url ${API_URL}/api`);
+    console.log(`Server listening on http://localhost:${PORT}/api`);
 });

@@ -187,3 +187,24 @@ model tag {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+// Reportes de links rotos
+enum BrokenReportStatus {
+  NEW
+  IN_PROGRESS
+  RESOLVED
+  REJECTED
+}
+
+model BrokenReport {
+  id        Int                 @id @default(autoincrement())
+  assetId   Int
+  note      String?
+  status    BrokenReportStatus  @default(NEW)
+  createdAt DateTime            @default(now())
+  ip        String?
+  ua        String?
+
+  @@index([createdAt(sort: Desc)])
+  @@index([assetId])
+}
