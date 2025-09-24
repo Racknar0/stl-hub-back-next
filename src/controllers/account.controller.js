@@ -406,6 +406,27 @@ export const removeBackupFromMain = async (req, res) => {
   }
 };
 
+export const listBackupCandidates = async (req, res) => {
+  try {
+    const mainId = Number(req.params.id);
+    const main = await prisma.megaAccount.findUnique({ where: { id: mainId }, select: { id: true, type: true } });
+    if (!main) return res.status(404).json({ message: 'Cuenta main no encontrada' });
+    if (main.type !== 'main') return res.status(400).json({ message: 'Solo cuentas type=main pueden listar candidatos' });
+    const existing = await prisma.megaAccountBackup.findMany({ where: { mainAccountId: mainId }, select: { backupAccountId: true } });
+    const existingIds = new Set(existing.map(e => e.backupAccountId));
+    const candidates = await prisma.megaAccount.findMany({
+      where: { type: 'backup', id: { not: mainId } },
+      select: { id: true, alias: true, email: true, type: true, status: true, suspended: true, lastCheckAt: true },
+      orderBy: { alias: 'asc' }
+    });
+    const filtered = candidates.filter(c => !existingIds.has(c.id) && !c.suspended);
+    return res.json({ count: filtered.length, items: filtered });
+  } catch (e) {
+    console.error('[ACCOUNTS] listBackupCandidates error', e);
+    return res.status(500).json({ message: 'Error listando candidatos backup' });
+  }
+};
+
 export const logoutAccount = async (_req, res) => {
   try {
     console.log('[ACCOUNTS] logout request');
