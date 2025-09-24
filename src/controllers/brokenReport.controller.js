@@ -17,6 +17,27 @@ export const createBrokenReport = async (req, res) => {
       select: { id: true, assetId: true, status: true, createdAt: true },
     })
 
+    // Notificación de reporte de link caído
+    try {
+      // Buscar el asset y la cuenta asociada
+      const asset = await prisma.asset.findUnique({ where: { id: assetId }, select: { title: true, accountId: true } })
+      let account = null
+      let accountEmail = '--'
+      if (asset?.accountId) {
+        account = await prisma.megaAccount.findUnique({ where: { id: asset.accountId }, select: { email: true } })
+        accountEmail = account?.email || '--'
+      }
+      await prisma.notification.create({
+        data: {
+          title: 'Reporte de link caído',
+          body: `Se reportó el asset "${asset?.title || 'Desconocido'}" (assetId=${assetId}) como caído. Cuenta asociada: id=${asset?.accountId || '--'}, email=${accountEmail}. Nota: ${note || '(sin nota)'}`,
+          status: 'UNREAD',
+          type: 'REPORT',
+          typeStatus: 'PENDING'
+        }
+      })
+    } catch(e){ console.warn('[NOTIF][BROKEN] No se pudo crear notificación: '+e.message) }
+
     return res.status(201).json({ ok: true, data: created })
   } catch (e) {
     console.error('createBrokenReport error', e)

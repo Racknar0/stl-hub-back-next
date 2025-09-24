@@ -8,6 +8,7 @@ import tagRoutes from './tags/index.js';
 import reportsRoutes from './reports/index.js';
 import downloadsRoutes from './downloads/index.js';
 import meRoutes from './me/index.js';
+import notificationsRoutes from './notifications/index.js';
 
 const router = express.Router();
 
@@ -18,6 +19,7 @@ router.use('/assets', assetRoutes);
 router.use('/categories', categoryRoutes);
 router.use('/tags', tagRoutes);
 router.use('/admin/reports', reportsRoutes);
+router.use('/admin/notifications', notificationsRoutes);
 
 router.use('/downloads', downloadsRoutes);
 router.use('/me', meRoutes);

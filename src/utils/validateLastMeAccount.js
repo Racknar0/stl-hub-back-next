@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { decryptToJson } from './cryptoUtils.js';
 import { spawn } from 'child_process';
+import { log } from './logger.js';
 import { fileURLToPath } from 'url';
 import path from 'path';
 
@@ -27,7 +28,7 @@ const DEFAULT_FREE_QUOTA_MB = Number(process.env.MEGA_FREE_QUOTA_MB) || 20480;
 function runCmd(cmd, args = [], { cwd } = {}) {
   const maskArgs = (c, a) => (c && c.toLowerCase().includes('mega-login') ? ['<hidden>'] : a);
   const printable = `${cmd} ${(maskArgs(cmd, args) || []).join(' ')}`.trim();
-  console.log(`[MEGA] > ${printable}`);
+  log.verbose(`Ejecutar: ${printable}`);
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { cwd, shell: true });
     let out = '', err = '';
@@ -71,12 +72,12 @@ export async function runValidateLastMeAccount() {
       });
     }
     if (!account) {
-      console.log('[VALIDATE-LAST] No hay cuentas para validar');
+  log.info('Validación: no hay cuentas disponibles');
       return { ok: true, skipped: true, reason: 'NO_ACCOUNTS' };
     }
     if (!account.credentials) throw new Error('La cuenta no posee credenciales almacenadas');
 
-    console.log(`[VALIDATE-LAST] Validando cuenta id=${account.id} alias=${account.alias} lastCheckAt=${account.lastCheckAt}`);
+  log.info(`Validando cuenta id=${account.id} alias=${account.alias} lastCheckAt=${account.lastCheckAt}`);
 
     const payload = decryptToJson(account.credentials.encData, account.credentials.encIv, account.credentials.encTag);
 
@@ -134,7 +135,7 @@ export async function runValidateLastMeAccount() {
         }
       }
     } catch (e) {
-      console.warn('[VALIDATE-LAST] df -h warn:', String(e.message).slice(0,200));
+  log.warn('df -h advertencia: ' + String(e.message).slice(0,200));
     }
 
     if (!storageTotalMB) {
@@ -151,7 +152,7 @@ export async function runValidateLastMeAccount() {
           storageTotalMB = parseSizeToMB(m[2]);
         }
       } catch (e) {
-        console.warn('[VALIDATE-LAST] df warn:', String(e.message).slice(0,200));
+  log.warn('df advertencia: ' + String(e.message).slice(0,200));
       }
     }
 
@@ -162,7 +163,7 @@ export async function runValidateLastMeAccount() {
         const mm = txt.match(/[\r\n]*\s*([\d.,]+\s*[KMGT]?B)/i) || txt.match(/([\d.,]+\s*[KMGT]?B)/i);
         if (mm) storageUsedMB = parseSizeToMB(mm[1]);
       } catch (e) {
-        console.warn('[VALIDATE-LAST] du -h warn:', String(e.message).slice(0,200));
+  log.warn('du -h advertencia: ' + String(e.message).slice(0,200));
       }
     }
 
@@ -183,7 +184,7 @@ export async function runValidateLastMeAccount() {
         folderCount = (d.out || '').split(/\r?\n/).filter(Boolean).length;
       }
     } catch (e) {
-      console.warn('[VALIDATE-LAST] find warn:', String(e.message).slice(0,200));
+  log.warn('find advertencia: ' + String(e.message).slice(0,200));
     }
 
     if (!storageTotalMB || storageTotalMB <= 0) storageTotalMB = DEFAULT_FREE_QUOTA_MB;
@@ -202,10 +203,10 @@ export async function runValidateLastMeAccount() {
       },
     });
 
-    console.log('[VALIDATE-LAST] OK', JSON.stringify({ id: updated.id, alias: updated.alias, storageUsedMB, storageTotalMB, fileCount, folderCount }, null, 2));
+  log.info('Validación OK ' + JSON.stringify({ id: updated.id, alias: updated.alias, storageUsedMB, storageTotalMB, fileCount, folderCount }));
     return { ok: true, accountId: updated.id, alias: updated.alias, storageUsedMB, storageTotalMB, fileCount, folderCount };
   } catch (e) {
-    console.error('[VALIDATE-LAST] ERROR', e.message);
+  log.error('Error en validación: ' + e.message);
     if (account?.id) {
       try {
         await prisma.megaAccount.update({ where: { id: account.id }, data: { status: 'ERROR', statusMessage: String(e.message).slice(0,500), lastCheckAt: new Date() } });
@@ -221,7 +222,7 @@ export async function runValidateLastMeAccount() {
 // Ejecución directa CLI
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   runValidateLastMeAccount().then(r => {
-    console.log('[VALIDATE-LAST] Resultado:', JSON.stringify(r));
+  log.info('Resultado validación: ' + JSON.stringify(r));
     if (!r.ok) process.exitCode = 1;
   });
 }

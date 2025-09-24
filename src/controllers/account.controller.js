@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { encryptJson, decryptToJson } from '../utils/cryptoUtils.js';
+import { log, isVerbose } from '../utils/logger.js';
 import { spawn } from 'child_process';
 import { withMegaLock } from '../utils/megaQueue.js';
 import path from 'path';
@@ -14,11 +15,18 @@ const DEFAULT_FREE_BW_MB = Number(process.env.MEGA_FREE_BW_MB) || 20480;
 // Límite máximo de captura para evitar RangeError por acumulación de salida
 const MAX_CMD_CAPTURE_BYTES = (Number(process.env.MEGA_MAX_CAPTURE_KB) || 1024) * 1024; // 1MB por defecto
 
+// Lista de comandos cuyos logs siempre estarán silenciados salvo errores (login/logout)
+const QUIET_MEGA_CMDS = new Set(['mega-login', 'mega-logout']);
+
 // Ejecuta un comando y devuelve stdout/err con logs (sin exponer credenciales) limitando tamaño
 function runCmd(cmd, args = [], { cwd, maxBytes } = {}) {
   const maskArgs = (c, a) => (c && c.toLowerCase().includes('mega-login') ? ['<hidden>'] : a);
   const printable = `${cmd} ${(maskArgs(cmd, args) || []).join(' ')}`.trim();
-  console.log(`[MEGA] > ${printable}`);
+  if (cmd === 'mega-login') log.info('[MEGA][LOGIN] iniciando (accounts controller)')
+  if (cmd === 'mega-logout') log.info('[MEGA][LOGOUT] iniciando (accounts controller)')
+  const quiet = QUIET_MEGA_CMDS.has(cmd);
+  const verbose = typeof isVerbose === 'function' && isVerbose();
+  if (!quiet && verbose) log.verbose(`Ejecutando comando: ${printable}`);
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { cwd, shell: true });
     let out = '', err = '';
@@ -42,12 +50,16 @@ function runCmd(cmd, args = [], { cwd, maxBytes } = {}) {
     });
     child.on('close', (code) => {
       if (code === 0) {
-        if (out?.trim()) console.log(`[MEGA] < ${cmd} ok (${out.length} chars out${truncatedOut ? ' TRUNCATED' : ''})`);
-        else if (err?.trim()) console.log(`[MEGA] < ${cmd} ok (stderr ${err.length} chars${truncatedErr ? ' TRUNCATED' : ''})`);
-        else console.log(`[MEGA] < ${cmd} ok (no output)`);
+        if (cmd === 'mega-login') log.info('[MEGA][LOGIN][OK] (accounts controller)')
+        if (cmd === 'mega-logout') log.info('[MEGA][LOGOUT][OK] (accounts controller)')
+        if (!quiet && verbose) log.verbose(`OK comando: ${cmd}`);
         return resolve({ out, err, truncatedOut, truncatedErr });
       }
-      console.error(`[MEGA] x ${cmd} exit ${code}. err:`, (err || out || '').slice(0, 500));
+      // Manejo especial: mega-mkdir code 54 = ya existe -> silenciar si no verbose
+      const msg = (err || out || '').slice(0, 500);
+      if (!(cmd === 'mega-mkdir' && /already exists/i.test(msg)) || verbose) {
+        log.error(`Error comando ${cmd} code=${code} msg=${msg}`);
+      }
       reject(new Error(err || out || `${cmd} exited with code ${code}`));
     });
   });
@@ -55,37 +67,50 @@ function runCmd(cmd, args = [], { cwd, maxBytes } = {}) {
 
 // Ejecuta comando con timeout (mata el proceso si excede)
 async function runCmdWithTimeout(cmd, args = [], timeoutMs = 15000, options = {}) {
-  const maskArgs = (c, a) => (c && c.toLowerCase().includes('mega-login') ? ['<hidden>'] : a)
-  const printable = `${cmd} ${(maskArgs(cmd, args) || []).join(' ')}`.trim()
-  console.log(`[MEGA] > ${printable} (timeout ${timeoutMs}ms)`)
+  const maskArgs = (c, a) => (c && c.toLowerCase().includes('mega-login') ? ['<hidden>'] : a);
+  const printable = `${cmd} ${(maskArgs(cmd, args) || []).join(' ')}`.trim();
+  if (cmd === 'mega-login') log.info('[MEGA][LOGIN] iniciando (accounts controller)')
+  if (cmd === 'mega-logout') log.info('[MEGA][LOGOUT] iniciando (accounts controller)')
+  const quiet = QUIET_MEGA_CMDS.has(cmd);
+  const verbose = typeof isVerbose === 'function' && isVerbose();
+  if (!quiet && verbose) log.verbose(`Ejecutando (timeout ${timeoutMs}ms): ${printable}`);
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { shell: true, cwd: options.cwd })
-    let out = '', err = ''
-    const limit = options.maxBytes || MAX_CMD_CAPTURE_BYTES
-    let truncatedOut = false, truncatedErr = false
+    const child = spawn(cmd, args, { shell: true, cwd: options.cwd });
+    let out = '', err = '';
+    const limit = options.maxBytes || MAX_CMD_CAPTURE_BYTES;
+    let truncatedOut = false, truncatedErr = false;
     const to = setTimeout(() => {
       try { child.kill('SIGKILL') } catch {}
-      console.warn(`[MEGA] x ${cmd} timeout tras ${timeoutMs}ms`)
-      reject(new Error(`${cmd} timeout`))
-    }, timeoutMs)
+      log.warn(`Timeout comando ${cmd} tras ${timeoutMs}ms`);
+      reject(new Error(`${cmd} timeout`));
+    }, timeoutMs);
     child.stdout.on('data', d => {
       if (!truncatedOut) {
         if (out.length + d.length <= limit) out += d.toString();
-        else { const slice = limit - out.length; if (slice > 0) out += d.toString().slice(0, slice); truncatedOut = true }
+        else { const slice = limit - out.length; if (slice > 0) out += d.toString().slice(0, slice); truncatedOut = true; }
       }
-    })
+    });
     child.stderr.on('data', d => {
       if (!truncatedErr) {
         if (err.length + d.length <= limit) err += d.toString();
-        else { const slice = limit - err.length; if (slice > 0) err += d.toString().slice(0, slice); truncatedErr = true }
+        else { const slice = limit - err.length; if (slice > 0) err += d.toString().slice(0, slice); truncatedErr = true; }
       }
-    })
+    });
     child.on('close', code => {
-      clearTimeout(to)
-      if (code === 0) return resolve({ out, err, truncatedOut, truncatedErr })
-      reject(new Error(err || out || `${cmd} exited ${code}`))
-    })
-  })
+      clearTimeout(to);
+      if (code === 0) {
+        if (cmd === 'mega-login') log.info('[MEGA][LOGIN][OK] (accounts controller)')
+        if (cmd === 'mega-logout') log.info('[MEGA][LOGOUT][OK] (accounts controller)')
+        if (!quiet && verbose) log.verbose(`OK comando: ${cmd}`);
+        return resolve({ out, err, truncatedOut, truncatedErr });
+      }
+      const msg = (err || out || '').slice(0, 400);
+      if (!(cmd === 'mega-mkdir' && /already exists/i.test(msg)) || verbose) {
+        log.error(`Error comando ${cmd} code=${code} msg=${msg}`);
+      }
+      reject(new Error(err || out || `${cmd} exited ${code}`));
+    });
+  });
 }
 
 // Subida con progreso leyendo stderr/stdout incremental de mega-put
@@ -151,6 +176,10 @@ function parseSizeToMB(str) {
   const factor = unit === 'KB' ? 1/1024 : unit === 'MB' ? 1 : unit === 'GB' ? 1024 : unit === 'TB' ? 1024*1024 : 1/(1024*1024);
   return Math.round(num * factor);
 }
+
+// Flag central para habilitar/deshabilitar exportación de links públicos en sincronizaciones
+// Requerimiento del usuario: NO generar ni guardar links públicos durante backups.
+const ENABLE_PUBLIC_LINK_EXPORT = false;
 
 export const listAccounts = async (_req, res) => {
   try {
@@ -235,11 +264,12 @@ export const testAccount = async (req, res) => {
   let didLogin = false;
   try {
     const id = Number(req.params.id);
-    console.log(`[ACCOUNTS] testAccount id=${id}`);
+  log.info(`Prueba cuenta iniciada id=${id}`);
     const acc = await prisma.megaAccount.findUnique({ where: { id }, include: { credentials: true } });
     if (!acc) return res.status(404).json({ message: 'Account not found' });
     if (!acc.credentials) return res.status(400).json({ message: 'No credentials stored for this account' });
-    console.log(`[ACCOUNTS] account alias=${acc.alias} email=${acc.email} base=${acc.baseFolder}`);
+  // Datos básicos (una sola línea)
+  log.verbose(`Cuenta alias=${acc.alias} email=${acc.email} base=${acc.baseFolder}`);
 
     const payload = decryptToJson(acc.credentials.encData, acc.credentials.encIv, acc.credentials.encTag);
 
@@ -257,23 +287,22 @@ export const testAccount = async (req, res) => {
       // Login
       try {
         if (payload?.type === 'session' && payload.session) {
-          console.log('[ACCOUNTS] login with session');
+          // login session
           await runCmd(loginCmd, [payload.session]);
         } else if (payload?.username && payload?.password) {
-          console.log('[ACCOUNTS] login with user');
+          // login user/pass
           await runCmd(loginCmd, [payload.username, payload.password]);
         } else {
           throw new Error('Invalid credentials payload');
         }
-        didLogin = true; console.log('[ACCOUNTS] login ok');
+        didLogin = true;
       } catch (e) {
-        const msg = String(e.message || '').toLowerCase();
-        console.error('[ACCOUNTS] login error:', msg);
+  const msg = String(e.message || '').toLowerCase();
+  log.error(`Login fallido: ${msg}`);
         if (!msg.includes('already logged in')) { throw e }
       }
-      console.log(`[ACCOUNTS] ensure base folder: ${base}`);
       if (base && base !== '/') {
-        try { await runCmd(mkdirCmd, ['-p', base]); console.log('[ACCOUNTS] mkdir ok'); } catch (e) { console.warn('[ACCOUNTS] mkdir warn:', String(e.message).slice(0,200)); }
+        try { await runCmd(mkdirCmd, ['-p', base]); } catch (e) { /* silencio mkdir */ }
       }
     }, 'ACCOUNTS-TEST')
 
@@ -379,14 +408,10 @@ export const testAccount = async (req, res) => {
     }
 
     // Fallbacks de totales y clamps
-    if (!storageTotalMB || storageTotalMB <= 0) {
-      storageTotalMB = DEFAULT_FREE_QUOTA_MB;
-      console.log(`[ACCOUNTS] fallback totalMB to FREE QUOTA: ${storageTotalMB}`);
-    }
+    if (!storageTotalMB || storageTotalMB <= 0) storageTotalMB = DEFAULT_FREE_QUOTA_MB;
     if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB;
 
-    // Actualizar estado y métricas (sin ancho de banda)
-    console.log(`[ACCOUNTS] update metrics id=${id} used=${storageUsedMB}MB total=${storageTotalMB}MB files=${fileCount} folders=${folderCount}`);
+    log.verbose(`Métricas crudas id=${id} used=${storageUsedMB}MB total=${storageTotalMB}MB archivos=${fileCount} carpetas=${folderCount}`);
     const updated = await prisma.megaAccount.update({
       where: { id },
       data: {
@@ -400,17 +425,17 @@ export const testAccount = async (req, res) => {
       },
     });
 
-    console.log('[ACCOUNTS] testAccount OK');
+  log.info(`Prueba cuenta OK id=${id} usado=${storageUsedMB}MB total=${storageTotalMB}MB archivos=${fileCount} carpetas=${folderCount}`);
     return res.json({ message: 'OK', status: 'CONNECTED', account: updated });
   } catch (error) {
-    console.error('[ACCOUNTS] Error testing account:', error);
+  log.error('Error probando cuenta', error.message);
     try {
       const id = Number(req.params.id);
       await prisma.megaAccount.update({ where: { id }, data: { status: 'ERROR', statusMessage: String(error.message).slice(0, 500), lastCheckAt: new Date() } });
     } catch {}
     return res.status(500).json({ message: 'Error testing account', error: String(error.message) });
   } finally {
-    try { await withMegaLock(() => runCmd('mega-logout', []), 'ACCOUNTS-TEST-LOGOUT'); console.log('[ACCOUNTS] final logout ok'); } catch (e) { console.warn('[ACCOUNTS] final logout warn:', String(e.message).slice(0,200)); }
+  try { await withMegaLock(() => runCmd('mega-logout', []), 'ACCOUNTS-TEST-LOGOUT'); } catch {}
   }
 };
 
@@ -563,263 +588,417 @@ export const listAccountAssets = async (req, res) => {
 
 // Sincroniza todos los assets publicados de una cuenta main hacia sus backups (solo los faltantes)
 export const syncMainToBackups = async (req, res) => {
-  const mainId = Number(req.params.id)
+  const mainId = Number(req.params.id);
   try {
-    if (!mainId) return res.status(400).json({ message: 'Invalid id' })
+    if (!mainId) return res.status(400).json({ message: 'Invalid id' });
     const main = await prisma.megaAccount.findUnique({
       where: { id: mainId },
       include: { credentials: true, backups: { include: { backupAccount: { include: { credentials: true } } } } }
-    })
-    if (!main) return res.status(404).json({ message: 'Cuenta main no encontrada' })
-    if (main.type !== 'main') return res.status(400).json({ message: 'La cuenta no es de tipo main' })
-    const backupAccounts = (main.backups || []).map(b => b.backupAccount).filter(a => a && a.type === 'backup' && a.credentials)
-    if (!backupAccounts.length) return res.json({ ok: true, message: 'No hay backups asociados', actions: [] })
+    });
+    if (!main) return res.status(404).json({ message: 'Cuenta main no encontrada' });
+    if (main.type !== 'main') return res.status(400).json({ message: 'La cuenta no es de tipo main' });
 
+    const backupAccounts = (main.backups || [])
+      .map(b => b.backupAccount)
+      .filter(a => a && a.type === 'backup' && a.credentials);
+
+    if (!backupAccounts.length) {
+      return res.json({ ok: true, message: 'No hay backups asociados', actions: [] });
+    }
+
+    // 1. Leer assets publicados (MAIN)
     const assets = await prisma.asset.findMany({
       where: { accountId: mainId, status: 'PUBLISHED' },
       select: { id: true, slug: true, archiveName: true, megaLink: true }
-    })
-    if (!assets.length) return res.json({ ok: true, message: 'La cuenta main no tiene assets publicados', actions: [] })
+    });
 
-    console.log(`[SYNC] === INICIO sync main->backups mainId=${mainId} assetsPublicados=${assets.length} backups=${backupAccounts.length} ===`)
-    const assetIds = assets.map(a => a.id)
-    const backupIds = backupAccounts.map(b => b.id)
-    const replicas = await prisma.assetReplica.findMany({ where: { assetId: { in: assetIds }, accountId: { in: backupIds } } })
-    const replicaIndex = new Map()
-    for (const r of replicas) replicaIndex.set(`${r.assetId}:${r.accountId}`, r)
+    const logSync = (m, level='info') => {
+      if(level==='error') return log.error(m);
+      if(level==='warn') return log.warn(m);
+      if(level==='verbose') return log.verbose(m);
+      return log.info(m);
+    };
+    logSync(`Sincronización iniciada main=${mainId} assets_publicados=${assets.length} backups=${backupAccounts.length}`);
 
-    const neededPerBackup = new Map()
-    const scanStats = new Map()
+    if (!assets.length) {
+      return res.json({ ok: true, message: 'La cuenta main no tiene assets publicados', actions: [] });
+    }
+
+  logSync('Escaneando cuentas backup');
+    const assetIds = assets.map(a => a.id);
+    const backupIds = backupAccounts.map(b => b.id);
+    const replicas = await prisma.assetReplica.findMany({
+      where: { assetId: { in: assetIds }, accountId: { in: backupIds } }
+    });
+    const replicaIndex = new Map();
+    for (const r of replicas) replicaIndex.set(`${r.assetId}:${r.accountId}`, r);
+
+    // 2. Escanear cada backup para ver QUÉ FALTA (único criterio)
+    const neededPerBackup = new Map(); // backupId -> assets[]
+    const scanStats = new Map();       // backupId -> { existing, missing, createdReplicaRows }
+
+    // Helper (nuevo): exportar link público con reintentos (mitiga timing tras mega-put)
+    async function exportLinkWithRetries(remoteFile, ctx, attempts = 3, waitMs = 1500) {
+      let lastErr = null;
+      for (let i = 1; i <= attempts; i++) {
+        try {
+          const exp = await runCmdWithTimeout('mega-export', ['-a', remoteFile], 15000);
+            const all = (exp.out + exp.err) || '';
+            const m = all.match(/https?:\/\/mega\.nz\/\S+/i);
+            if (m) {
+              if (i > 1) logSync(`(IGNORADO LINK) intento=${i} ${ctx}`);
+              return m[0];
+            }
+            lastErr = new Error('No se detectó link en salida');
+        } catch (e) {
+          lastErr = e; // silencioso
+        }
+        if (i < attempts) await new Promise(r => setTimeout(r, waitMs));
+      }
+      return null;
+    }
+
+    // (Se reemplaza helper anterior exportPublicLink por esta función adaptadora para escaneo)
+    async function exportPublicLink(remoteFile, ctx) {
+      return await exportLinkWithRetries(remoteFile, ctx, 3, 1200);
+    }
+
     for (const b of backupAccounts) {
-      const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
-      const baseB = (b.baseFolder || '/').replaceAll('\\', '/')
-      console.log(`[SYNC][SCAN] inicio backup=${b.id} base=${baseB}`)
+      const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag);
+      const baseB = (b.baseFolder || '/').replaceAll('\\', '/');
+  logSync(`Backup ${b.id}: escaneo en base ${baseB}`, 'verbose');
       await withMegaLock(async () => {
-        try { await runCmd('mega-logout', []) } catch {}
-        if (payloadB?.type === 'session' && payloadB.session) await runCmd('mega-login', [payloadB.session])
-        else if (payloadB?.username && payloadB?.password) await runCmd('mega-login', [payloadB.username, payloadB.password])
-        else throw new Error('Credenciales backup inválidas para escaneo')
-        try { await runCmd('mega-mkdir', ['-p', baseB]) } catch {}
-        scanStats.set(b.id, { existing: 0, missing: 0, createdReplicaRows: 0 })
+        try { await runCmd('mega-logout', []); } catch {}
+        if (payloadB?.type === 'session' && payloadB.session) await runCmd('mega-login', [payloadB.session]);
+        else if (payloadB?.username && payloadB?.password) await runCmd('mega-login', [payloadB.username, payloadB.password]);
+        else throw new Error('Credenciales backup inválidas para escaneo');
+
+        try { await runCmd('mega-mkdir', ['-p', baseB]); } catch {}
+
+        scanStats.set(b.id, { existing: 0, missing: 0, createdReplicaRows: 0 });
+
         for (const a of assets) {
-          if (!a.archiveName) continue
-          const fileName = path.basename(a.archiveName)
-          const remoteFolder = path.posix.join(baseB, a.slug)
-          const remoteFile = path.posix.join(remoteFolder, fileName)
-          let exists = false
+          if (!a.archiveName) continue;
+            // Comprobación remota directa
+          const fileName = path.basename(a.archiveName);
+          const remoteFolder = path.posix.join(baseB, a.slug);
+          const remoteFile = path.posix.join(remoteFolder, fileName);
+          let exists = false;
           try {
-            const ls = await runCmd('mega-ls', [remoteFile])
-            const txt = (ls.out || ls.err || '').toString()
-            if (txt.toLowerCase().includes(fileName.toLowerCase())) exists = true
-            else exists = true
-          } catch { exists = false }
+            const ls = await runCmd('mega-ls', [remoteFile]);
+            const txt = (ls.out || ls.err || '').toString();
+            if (txt.toLowerCase().includes(fileName.toLowerCase())) exists = true;
+            else exists = true; // si mega-ls no falla pero no contiene nombre, asumimos existencia (MEGAcmd a veces lista sin formato)
+          } catch { exists = false; }
+
           if (exists) {
-            const key = `${a.id}:${b.id}`
-            if (!replicaIndex.has(key)) {
+            const key = `${a.id}:${b.id}`;
+            const remoteFileForExport = remoteFile; // ya definido arriba
+            const existingReplica = replicaIndex.get(key);
+
+            if (!existingReplica) {
+              // No generar link público (deshabilitado)
+              let publicLink = null;
               try {
-                const created = await prisma.assetReplica.create({ data: { assetId: a.id, accountId: b.id, status: 'COMPLETED', remotePath: remoteFolder, startedAt: new Date(), finishedAt: new Date() } })
-                replicaIndex.set(key, created)
-                scanStats.get(b.id).createdReplicaRows++
-                console.log(`[SYNC][SCAN] replica DB creada asset=${a.id} backup=${b.id}`)
-              } catch (e) {
-                console.warn('[SYNC][SCAN] warn creando replica faltante asset=' + a.id + ' backup=' + b.id + ' : ' + e.message)
-              }
-            }
-            scanStats.get(b.id).existing++
-            if (scanStats.get(b.id).existing <= 5) console.log(`[SYNC][SCAN] existe asset=${a.id} backup=${b.id}`)
-          } else {
-            if (!neededPerBackup.has(b.id)) neededPerBackup.set(b.id, [])
-            neededPerBackup.get(b.id).push(a)
-            scanStats.get(b.id).missing++
-            if (scanStats.get(b.id).missing <= 5) console.log(`[SYNC][SCAN] falta asset=${a.id} backup=${b.id}`)
-          }
-        }
-        try { await runCmd('mega-logout', []) } catch {}
-      }, `SYNC-SCAN-${b.id}`)
-      const st = scanStats.get(b.id)
-      console.log(`[SYNC][SCAN] resumen backup=${b.id} existing=${st.existing} missing=${st.missing} createdReplicaRows=${st.createdReplicaRows}`)
-    }
-
-    const totalUploads = Array.from(neededPerBackup.values()).reduce((acc, list) => acc + list.length, 0)
-    if (!totalUploads) {
-      console.log('[SYNC] No hay uploads necesarios tras escaneo físico')
-      return res.json({ ok: true, message: 'Todos los assets ya están físicamente replicados', actions: [], scan: Array.from(scanStats.entries()).map(([backupId, s]) => ({ backupId, ...s })) })
-    }
-
-    const UPLOADS_DIR = path.resolve('uploads')
-    const SYNC_DIR = path.join(UPLOADS_DIR, 'sync-cache', `main-${mainId}`)
-    fs.mkdirSync(SYNC_DIR, { recursive: true })
-
-    function localArchivePath(a) {
-      if (!a.archiveName) return null
-      return path.join(UPLOADS_DIR, a.archiveName.startsWith('archives') ? a.archiveName : path.join('archives', a.archiveName))
-    }
-
-    const assetsToDownload = []
-    const neededAssetSet = new Set()
-    for (const list of neededPerBackup.values()) for (const a of list) neededAssetSet.add(a.id)
-    const neededAssets = assets.filter(a => neededAssetSet.has(a.id))
-    for (const a of neededAssets) {
-      const localPath = localArchivePath(a)
-      if (!localPath) continue
-      if (!fs.existsSync(localPath)) assetsToDownload.push(a)
-    }
-    console.log(`[SYNC][DOWNLOAD] faltanLocal=${assetsToDownload.length} deFaltantes=${neededAssets.length}`)
-
-    const safeMkdir = async (remotePath) => {
-      try { await runCmd('mega-mkdir', ['-p', remotePath]) } catch (e) {
-        const msg = String(e.message || '')
-        if (!/54/.test(msg) && !/exists/i.test(msg)) throw e
-      }
-    }
-
-    if (assetsToDownload.length) {
-      const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
-      const base = (main.baseFolder || '/').replaceAll('\\', '/')
-      await withMegaLock(async () => {
-        try { await runCmd('mega-logout', []) } catch {}
-        if (payload?.type === 'session' && payload.session) await runCmd('mega-login', [payload.session])
-        else if (payload?.username && payload?.password) await runCmd('mega-login', [payload.username, payload.password])
-        else throw new Error('Credenciales main inválidas')
-        await safeMkdir(base)
-        for (const a of assetsToDownload) {
-          const fileName = path.basename(a.archiveName)
-          const remoteFolder = path.posix.join(base, a.slug)
-          const remoteFile = path.posix.join(remoteFolder, fileName)
-          const slugDir = path.join(SYNC_DIR, a.slug)
-          try { fs.mkdirSync(slugDir, { recursive: true }) } catch {}
-          const destLocal = path.join(slugDir, fileName)
-          console.log(`[SYNC][DOWNLOAD] asset=${a.id} remoteFile=${remoteFile} -> ${destLocal}`)
-          try { await runCmd('mega-get', [remoteFile, destLocal]); console.log(`[SYNC][DOWNLOAD] OK asset=${a.id}`) } catch (e) { console.warn('[SYNC][DOWNLOAD] WARN asset=' + a.id + ' : ' + e.message) }
-        }
-        try { await runCmd('mega-logout', []) } catch {}
-      }, `SYNC-DOWNLOAD-${mainId}`)
-    }
-
-    const actions = []
-    const perBackupUploadStats = []
-    const totalPlanned = totalUploads
-    let globalDone = 0
-    // Conteo de subidas pendientes por asset (solo para los que realmente faltan en backups)
-    const remainingUploads = new Map()
-    for (const list of neededPerBackup.values()) {
-      for (const a of list) {
-        remainingUploads.set(a.id, (remainingUploads.get(a.id) || 0) + 1)
-      }
-    }
-    let cleanedCount = 0
-    for (const b of backupAccounts) {
-      const list = neededPerBackup.get(b.id) || []
-      if (!list.length) continue
-      console.log(`[SYNC][UPLOAD] inicio backup=${b.id} pendientes=${list.length} globalDone=${globalDone}/${totalPlanned}`)
-      let ok = 0, fail = 0, idx = 0
-      const payload = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
-      const base = (b.baseFolder || '/').replaceAll('\\', '/')
-      await withMegaLock(async () => {
-        try { await runCmd('mega-logout', []) } catch {}
-        if (payload?.type === 'session' && payload.session) await runCmd('mega-login', [payload.session])
-        else if (payload?.username && payload?.password) await runCmd('mega-login', [payload.username, payload.password])
-        else throw new Error('Credenciales backup inválidas')
-        await safeMkdir(base)
-        for (const a of list) {
-          idx++
-          const fileName = path.basename(a.archiveName || '')
-          if (!fileName) continue
-          const remoteFolder = path.posix.join(base, a.slug)
-          await safeMkdir(remoteFolder)
-          const localPathOrig = localArchivePath(a)
-          let localToUse = localPathOrig && fs.existsSync(localPathOrig) ? localPathOrig : null
-          if (!localToUse) {
-            const cached = path.join(SYNC_DIR, a.slug, fileName)
-            if (fs.existsSync(cached)) localToUse = cached
-          }
-          if (!localToUse) { console.warn('[SYNC][UPLOAD] no local file for asset', a.id); fail++; continue }
-          console.log(`[SYNC][UPLOAD] asset=${a.id} -> backup=${b.id} (${idx}/${list.length}) global(${globalDone}/${totalPlanned})`)
-          try {
-            await runMegaPutWithProgress(localToUse, remoteFolder, { assetId: a.id, backupId: b.id, index: idx, total: list.length, globalDone, totalPlanned })
-            ok++
-          } catch (e) { console.warn('[SYNC][SUBIDA] WARN asset=' + a.id + ' backup=' + b.id + ' : ' + e.message); fail++; continue }
-          let publicLink = null
-          try {
-            const remoteFile = path.posix.join(remoteFolder, path.basename(localToUse))
-            console.log(`[SYNC][EXPORT] iniciando asset=${a.id} backup=${b.id}`)
-            const exp = await runCmdWithTimeout('mega-export', ['-a', remoteFile], 15000)
-            const all = (exp.out + exp.err) || ''
-            const m = all.match(/https?:\/\/mega\.nz\/\S+/i)
-            if (m) publicLink = m[0]
-            console.log(`[SYNC][EXPORT] ok asset=${a.id} backup=${b.id}`)
-          } catch (e) { console.warn('[SYNC][EXPORT] aviso asset=' + a.id + ' backup=' + b.id + ' : ' + e.message) }
-          const existing = replicas.find(r => r.assetId === a.id && r.accountId === b.id)
-          if (!existing) {
-            await prisma.assetReplica.create({ data: { assetId: a.id, accountId: b.id, status: 'COMPLETED', megaLink: publicLink || undefined, remotePath: path.posix.join(base, a.slug), startedAt: new Date(), finishedAt: new Date() } })
-          } else {
-            await prisma.assetReplica.update({ where: { id: existing.id }, data: { status: 'COMPLETED', megaLink: publicLink || existing.megaLink || undefined, remotePath: path.posix.join(base, a.slug), finishedAt: new Date() } })
-          }
-          actions.push({ backupId: b.id, assetId: a.id, status: 'COMPLETED' })
-          globalDone++
-          // Decrementar contador y limpiar cache si ya no se necesita
-          if (remainingUploads.has(a.id)) {
-            const left = remainingUploads.get(a.id) - 1
-            remainingUploads.set(a.id, left)
-            if (left <= 0) {
-              const fileNameCached = path.basename(a.archiveName || '')
-              if (fileNameCached) {
-                const cachedPath = path.join(SYNC_DIR, a.slug, fileNameCached)
-                try {
-                  if (fs.existsSync(cachedPath)) {
-                    fs.unlinkSync(cachedPath)
-                    cleanedCount++
-                    console.log(`[SYNC][CLEAN] cache eliminado asset=${a.id} path=${cachedPath}`)
-                    // Intentar limpiar carpeta slug si queda vacía
-                    const slugDir = path.join(SYNC_DIR, a.slug)
-                    try { if (fs.existsSync(slugDir) && fs.readdirSync(slugDir).length === 0) fs.rmdirSync(slugDir) } catch {}
+                const created = await prisma.assetReplica.create({
+                  data: {
+                    assetId: a.id,
+                    accountId: b.id,
+                    status: 'COMPLETED',
+                    megaLink: ENABLE_PUBLIC_LINK_EXPORT ? (publicLink || undefined) : undefined,
+                    remotePath: remoteFolder,
+                    startedAt: new Date(),
+                    finishedAt: new Date()
                   }
-                } catch (e) {
-                  console.warn('[SYNC][CLEAN] warn al borrar cache asset=' + a.id + ' : ' + e.message)
-                }
+                });
+                replicaIndex.set(key, created);
+                replicas.push(created); // mantener arreglo coherente
+                scanStats.get(b.id).createdReplicaRows++;
+                console.log(`[SYNC][SCAN] replica DB creada asset=${a.id} backup=${b.id} link=SKIPPED`);
+              } catch (e) {
+                console.warn(`[SYNC][SCAN] warn creando replica faltante asset=${a.id} backup=${b.id} : ${e.message}`);
               }
+            } else if (!existingReplica.megaLink && ENABLE_PUBLIC_LINK_EXPORT) {
+              // Bloque de completar link omitido por desactivación
             }
+            scanStats.get(b.id).existing++;
+          } else {
+            if (!neededPerBackup.has(b.id)) neededPerBackup.set(b.id, []);
+            neededPerBackup.get(b.id).push(a);
+            scanStats.get(b.id).missing++;
           }
         }
-        try { await runCmd('mega-logout', []) } catch {}
-      }, `SYNC-BACKUP-${b.id}`)
-      console.log(`[SYNC][UPLOAD] fin backup=${b.id} ok=${ok} fail=${fail} globalDone=${globalDone}/${totalPlanned}`)
-      perBackupUploadStats.push({ backupId: b.id, pending: list.length, ok, fail })
+        try { await runCmd('mega-logout', []); } catch {}
+      }, `SYNC-SCAN-${b.id}`);
+
+      const st = scanStats.get(b.id);
+  logSync(`Backup ${b.id}: archivos presentes=${st.existing} faltantes=${st.missing}`);
     }
-  console.log(`[SYNC] === FIN sync mainId=${mainId} planUploads=${totalUploads} realizadas=${actions.length} ===`)
-  console.log(`[SYNC][FIN] Sincronización completada mainId=${mainId} uploadsRealizadas=${actions.length} backups=${backupAccounts.length}`)
-    // Limpieza final de la carpeta de sincronización si está vacía (a menos que se pida conservar)
-    let cleanedCacheDir = false
-    let remainingCacheFilesCount = 0
-    try {
-      if (fs.existsSync(SYNC_DIR)) {
-        const keep = /^(1|true|yes)$/i.test(String(process.env.SYNC_CACHE_KEEP || ''))
-        const remaining = fs.readdirSync(SYNC_DIR)
-        remainingCacheFilesCount = remaining.length
-        if (keep) {
-          console.log(`[SYNC][CLEAN] se conserva SYNC_DIR por SYNC_CACHE_KEEP restante=${remaining.length}`)
-        } else if (remaining.length === 0) {
-          try { fs.rmdirSync(SYNC_DIR) } catch {}
-          cleanedCacheDir = true
-          console.log(`[SYNC][CLEAN] carpeta vacía eliminada SYNC_DIR=${SYNC_DIR}`)
-          // Intentar eliminar el contenedor main-* si quedó vacío (ya es la misma carpeta en este diseño)
-          const parent = path.dirname(SYNC_DIR)
-          try {
-            const restParent = fs.readdirSync(parent)
-            if (restParent.length === 0) {
-              try { fs.rmdirSync(parent) } catch {}
-            }
-          } catch {}
-        } else {
-          console.log(`[SYNC][CLEAN] carpeta no vacía, se mantiene archivos=${remaining.length}`)
+
+    // 3. Calcular total de subidas planeadas (pares asset-backup faltantes)
+    const totalUploads = Array.from(neededPerBackup.values())
+      .reduce((acc, list) => acc + list.length, 0);
+
+    if (!totalUploads) {
+      console.log('[SYNC] No hay uploads necesarios (todos los assets ya existen en backups).');
+      return res.json({
+        ok: true,
+        message: 'Todos los assets ya están replicados',
+        actions: [],
+        scan: Array.from(scanStats.entries()).map(([backupId, s]) => ({ backupId, ...s })),
+        perBackup: [],
+        cleanedCacheFiles: 0,
+        cleanedCacheDir: true,
+        remainingCacheFiles: 0,
+        totalUploads,
+        performed: 0
+      });
+    }
+
+  logSync(`Total combinaciones faltantes (asset x backup) = ${totalUploads}`);
+
+    // 4. Conjunto único de assets faltantes (independiente de cuántos backups los requieren)
+    const uniqueMissingAssetIds = new Set();
+    for (const list of neededPerBackup.values()) {
+      for (const a of list) uniqueMissingAssetIds.add(a.id);
+    }
+    const uniqueMissingAssets = assets.filter(a => uniqueMissingAssetIds.has(a.id));
+  logSync(`Assets únicos a descargar: ${uniqueMissingAssets.length}`);
+
+    const UPLOADS_DIR = path.resolve('uploads'); // (solo para consistencia de paths si se quisiera usar; no se reutiliza local permanente)
+    const SYNC_DIR = path.join(UPLOADS_DIR, 'sync-cache', `main-${mainId}`);
+    fs.mkdirSync(SYNC_DIR, { recursive: true });
+
+    const safeMkdir = async remotePath => {
+      try { await runCmd('mega-mkdir', ['-p', remotePath]); }
+      catch (e) {
+        const msg = String(e.message || '');
+        if (!/54/.test(msg) && !/exists/i.test(msg)) throw e;
+      }
+    };
+
+    // 5. Descargar SIEMPRE desde la cuenta main cada asset faltante (no se inspecciona disco previo)
+    const payloadMain = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag);
+    await withMegaLock(async () => {
+      try { await runCmd('mega-logout', []); } catch {}
+      if (payloadMain?.type === 'session' && payloadMain.session) await runCmd('mega-login', [payloadMain.session]);
+      else if (payloadMain?.username && payloadMain?.password) await runCmd('mega-login', [payloadMain.username, payloadMain.password]);
+      else throw new Error('Credenciales main inválidas para descarga');
+
+      const baseMain = (main.baseFolder || '/').replaceAll('\\', '/');
+      await safeMkdir(baseMain);
+
+      let idx = 0;
+      for (const a of uniqueMissingAssets) {
+        idx++;
+        if (!a.archiveName) continue;
+        const fileName = path.basename(a.archiveName);
+        const remoteFolder = path.posix.join(baseMain, a.slug);
+        const remoteFile = path.posix.join(remoteFolder, fileName);
+        const slugDir = path.join(SYNC_DIR, a.slug);
+        try { fs.mkdirSync(slugDir, { recursive: true }); } catch {}
+        const destLocal = path.join(slugDir, fileName);
+  logSync(`Descarga ${idx}/${uniqueMissingAssets.length} asset ${a.id} (${a.slug})`,'verbose');
+        try {
+          await runCmd('mega-get', [remoteFile, destLocal]);
+          logSync(`Asset ${a.id} descargado`,'verbose');
+        } catch (e) {
+          logSync(`Error descargando asset ${a.id}: ${e.message}`,'warn');
         }
       }
-    } catch (e2) {
-      console.warn('[SYNC][CLEAN] error al evaluar limpieza final: ' + e2.message)
+      try { await runCmd('mega-logout', []); } catch {}
+    }, `SYNC-DOWNLOAD-${mainId}`);
+
+    // 6. Subir a cada backup únicamente lo que le falta
+    const actions = [];
+    const perBackupUploadStats = [];
+    const totalPlanned = totalUploads;
+    let globalDone = 0;
+
+    for (const b of backupAccounts) {
+      const list = neededPerBackup.get(b.id) || [];
+      if (!list.length) continue;
+
+  logSync(`Backup ${b.id}: subidas pendientes ${list.length}`);
+      let ok = 0, fail = 0, idx = 0;
+      const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag);
+      const baseB = (b.baseFolder || '/').replaceAll('\\', '/');
+
+      await withMegaLock(async () => {
+        try { await runCmd('mega-logout', []); } catch {}
+        if (payloadB?.type === 'session' && payloadB.session) await runCmd('mega-login', [payloadB.session]);
+        else if (payloadB?.username && payloadB?.password) await runCmd('mega-login', [payloadB.username, payloadB.password]);
+        else throw new Error('Credenciales backup inválidas');
+
+        await safeMkdir(baseB);
+
+        for (const a of list) {
+          idx++;
+          if (!a.archiveName) { fail++; continue; }
+          const fileName = path.basename(a.archiveName);
+          const remoteFolder = path.posix.join(baseB, a.slug);
+          await safeMkdir(remoteFolder);
+          const localPath = path.join(SYNC_DIR, a.slug, fileName); // siempre usamos el descargado recién
+          if (!fs.existsSync(localPath)) {
+            console.warn(`[SYNC][UPLOAD] archivo temporal no encontrado asset=${a.id} esperado=${localPath}`);
+            fail++;
+            continue;
+          }
+          logSync(`Subida ${idx}/${list.length} asset ${a.id} -> backup ${b.id}`,'verbose');
+          try {
+            await runCmd('mega-put', [localPath, remoteFolder]);
+            ok++;
+          } catch (e) {
+            logSync(`Error subiendo asset ${a.id} a backup ${b.id}: ${e.message}`,'warn');
+            fail++;
+            continue;
+          }
+          // No generar link público (deshabilitado)
+          let publicLink = null;
+          const remoteFile = path.posix.join(remoteFolder, fileName); // mantenido para posible futura reactivación
+
+          const existing = replicas.find(r => r.assetId === a.id && r.accountId === b.id);
+          if (!existing) {
+            await prisma.assetReplica.create({
+              data: {
+                assetId: a.id,
+                accountId: b.id,
+                status: 'COMPLETED',
+                megaLink: ENABLE_PUBLIC_LINK_EXPORT ? (publicLink || undefined) : undefined,
+                remotePath: path.posix.join(baseB, a.slug),
+                startedAt: new Date(),
+                finishedAt: new Date()
+              }
+            });
+          } else {
+            await prisma.assetReplica.update({
+              where: { id: existing.id },
+              data: {
+                status: 'COMPLETED',
+                // Sin generación de link; se conserva el existente si hubiera
+                megaLink: ENABLE_PUBLIC_LINK_EXPORT ? (publicLink || existing.megaLink || undefined) : existing.megaLink || undefined,
+                remotePath: path.posix.join(baseB, a.slug),
+                finishedAt: new Date()
+              }
+            });
+          }
+          actions.push({ backupId: b.id, assetId: a.id, status: 'COMPLETED', newLink: false });
+          globalDone++;
+        }
+      }, `SYNC-BACKUP-${b.id}`);
+
+  logSync(`Backup ${b.id}: subidas OK=${ok} errores=${fail}`);
+      perBackupUploadStats.push({ backupId: b.id, pending: list.length, ok, fail });
     }
-    return res.json({ ok: true, totalUploads, performed: actions.length, actions, scan: Array.from(scanStats.entries()).map(([backupId, s]) => ({ backupId, ...s })), perBackup: perBackupUploadStats, cleanedCacheFiles: cleanedCount, cleanedCacheDir, remainingCacheFiles: remainingCacheFilesCount })
+
+  logSync(`Sincronización finalizada plan=${totalUploads} ejecutadas=${actions.length}`);
+
+    // 7. Limpieza TOTAL (no se conserva nada si SYNC_CACHE_KEEP no es true)
+    let cleanedCacheFiles = 0;
+    let cleanedCacheDir = false;
+    let remainingCacheFiles = 0;
+    try {
+      const keep = /^(1|true|yes)$/i.test(String(process.env.SYNC_CACHE_KEEP || ''));
+      if (fs.existsSync(SYNC_DIR)) {
+        const allFiles = [];
+        (function walk(dir) {
+          for (const f of fs.readdirSync(dir)) {
+            const p = path.join(dir, f);
+            const st = fs.statSync(p);
+            if (st.isDirectory()) walk(p);
+            else allFiles.push(p);
+          }
+        })(SYNC_DIR);
+        remainingCacheFiles = allFiles.length;
+
+        if (!keep) {
+          cleanedCacheFiles = remainingCacheFiles;
+          try {
+            fs.rmSync(SYNC_DIR, { recursive: true, force: true });
+            cleanedCacheDir = true;
+            remainingCacheFiles = 0;
+            logSync('Directorio temporal eliminado','verbose');
+          } catch (e) {
+            logSync('Error eliminando cache: ' + e.message,'warn');
+          }
+        } else {
+          logSync(`Cache conservada (SYNC_CACHE_KEEP) archivos=${remainingCacheFiles}`);
+        }
+      }
+    } catch (e) {
+  logSync('Error en limpieza final: ' + e.message,'warn');
+    }
+
+    return res.json({
+      ok: true,
+      totalUploads,
+      performed: actions.length,
+      actions,
+      scan: Array.from(scanStats.entries()).map(([backupId, s]) => ({ backupId, ...s })),
+      perBackup: perBackupUploadStats,
+      cleanedCacheFiles,
+      cleanedCacheDir,
+      remainingCacheFiles
+    });
   } catch (e) {
-    console.error('[SYNC] main->backups error:', e)
-    return res.status(500).json({ message: 'Error sincronizando', error: e.message })
+  logSync('Error general en sincronización: ' + e.message,'error');
+    return res.status(500).json({ message: 'Error sincronizando', error: e.message });
   }
+};
+
+// (Añadir cerca de otras constantes)
+const MEGA_EXPORT_ATTEMPTS = Number(process.env.MEGA_EXPORT_ATTEMPTS || 5);
+const MEGA_EXPORT_BASE_TIMEOUT_MS = Number(process.env.MEGA_EXPORT_BASE_TIMEOUT_MS || 20000);
+
+// Helper: sleep
+const wait = ms => new Promise(r => setTimeout(r, ms));
+
+// Nuevo helper robusto: obtiene o crea link público con reintentos y backoff
+async function getOrCreatePublicLink(remoteFile, ctx) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= MEGA_EXPORT_ATTEMPTS; attempt++) {
+    const timeout = Math.round(MEGA_EXPORT_BASE_TIMEOUT_MS * (1 + (attempt - 1) * 0.6)); // creciente
+    try {
+      // 1. Intentar leer link existente (sin -a)
+      try {
+        console.log(`[SYNC][EXPORT][TRY-GET] intento=${attempt}/${MEGA_EXPORT_ATTEMPTS} timeout=${timeout}ms ${ctx}`);
+        const exp = await runCmdWithTimeout('mega-export', [remoteFile], timeout);
+        const raw = (exp.out + exp.err) || '';
+        const mGet = raw.match(/https?:\/\/mega\.nz\/\S+/i);
+        if (mGet) {
+          console.log(`[SYNC][EXPORT][FOUND] link existente ${ctx}`);
+          return mGet[0];
+        }
+      } catch (e1) {
+        // Registrar pero continuar a creación
+        console.warn(`[SYNC][EXPORT][NO-EXISTE] ${ctx} intento=${attempt}: ${e1.message}`);
+      }
+
+      // 2. Crear link (-a)
+        console.log(`[SYNC][EXPORT][CREATE] intento=${attempt}/${MEGA_EXPORT_ATTEMPTS} timeout=${timeout}ms ${ctx}`);
+      const expCreate = await runCmdWithTimeout('mega-export', ['-a', remoteFile], timeout);
+      const all = (expCreate.out + expCreate.err) || '';
+      const m = all.match(/https?:\/\/mega\.nz\/\S+/i);
+      if (m) {
+        console.log(`[SYNC][EXPORT][OK] creado ${ctx}`);
+        return m[0];
+      }
+      lastErr = new Error('Salida sin link');
+    } catch (e) {
+      lastErr = e;
+      console.warn(`[SYNC][EXPORT][WARN] intento=${attempt}/${MEGA_EXPORT_ATTEMPTS} ${ctx}: ${e.message}`);
+    }
+    if (attempt < MEGA_EXPORT_ATTEMPTS) {
+      const backoff = 1000 + attempt * 1500;
+      console.log(`[SYNC][EXPORT][WAIT] ${backoff}ms antes de reintentar ${ctx}`);
+      await wait(backoff);
+    }
+  }
+  console.warn(`[SYNC][EXPORT][FAIL] sin link tras ${MEGA_EXPORT_ATTEMPTS} intentos ${ctx} lastErr=${lastErr?.message}`);
+  return null;
+}
+
+// Adaptador para llamadas desde escaneo (mantiene nombre previo para mínimo cambio)
+async function exportPublicLink(remoteFile, ctx) {
+  return await getOrCreatePublicLink(remoteFile, ctx);
 }

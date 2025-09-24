@@ -18,6 +18,31 @@ const UPLOADS_DIR = path.resolve('uploads');
 const TEMP_DIR = path.join(UPLOADS_DIR, 'tmp');
 const IMAGES_DIR = path.join(UPLOADS_DIR, 'images');
 const ARCHIVES_DIR = path.join(UPLOADS_DIR, 'archives');
+const SYNC_CACHE_DIR = path.join(UPLOADS_DIR, 'sync-cache');
+
+function purgeDirContents(dir) {
+  try {
+    if (!fs.existsSync(dir)) return;
+    const entries = fs.readdirSync(dir);
+    for (const name of entries) {
+      const p = path.join(dir, name);
+      try {
+        const st = fs.statSync(p);
+        if (st.isDirectory()) fs.rmSync(p, { recursive: true, force: true });
+        else fs.unlinkSync(p);
+      } catch (e) {
+        console.warn('[CLEANUP] purge warn:', e.message);
+      }
+    }
+  } catch (e) {
+    console.warn('[CLEANUP] purge root warn:', e.message);
+  }
+}
+
+function preUploadCleanup() {
+  purgeDirContents(TEMP_DIR);
+  purgeDirContents(SYNC_CACHE_DIR);
+}
 
 function ensureDir(p) { if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true }); }
 function safeName(s) { return String(s || '').trim().toLowerCase().replace(/[^a-z0-9-_]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 120); }
@@ -598,7 +623,11 @@ function attachAutoAcceptTerms(child, label = 'MEGA') {
 
   const onData = (buf, isErr = false) => {
     const s = buf.toString()
-    ;(isErr ? console.error : console.log)(`[${label}] ${s.trim()}`)
+    const trimmed = s.trim()
+    // Filtrar barras ASCII de transferencia para que no aparezcan como errores en el front
+    if (/TRANSFERRING|Fetching nodes/i.test(trimmed)) return
+    if (isErr) console.warn(`[${label}] ${trimmed}`)
+    else console.log(`[${label}] ${trimmed}`)
     maybeAnswer(s)
   }
 
@@ -611,60 +640,79 @@ export async function enqueueToMegaReal(asset) {
   if (!acc) throw new Error('Account not found')
   if (!acc.credentials) throw new Error('No credentials stored')
 
+  // Limpieza previa (evitar acumulación de archivos temporales entre subidas)
+  preUploadCleanup()
+
   const payload = decryptToJson(acc.credentials.encData, acc.credentials.encIv, acc.credentials.encTag)
   const loginCmd = 'mega-login'
   const mkdirCmd = 'mega-mkdir'
   const putCmd = 'mega-put'
+  const exportCmd = 'mega-export'
   const logoutCmd = 'mega-logout'
   const remoteBase = (acc.baseFolder || '/').replaceAll('\\', '/')
   const remotePath = path.posix.join(remoteBase, asset.slug)
   const localArchive = asset.archiveName ? path.join(UPLOADS_DIR, asset.archiveName) : null
-  console.log(`[MEGA-UP] start asset id=${asset.id} to ${remotePath}`)
+  // Inicio subida principal (log limpio)
+  console.log(`[UPLOAD] Inicia subida asset=${asset.id} destino=${remotePath}`)
 
+  let lastLoggedMain = -1
   const parseProgress = (buf) => {
-    const txt = buf.toString()
-    let last = null
-    const re = /([0-9]{1,3}(?:\.[0-9]+)?)\s*%/g
-    let m
-    while ((m = re.exec(txt)) !== null) last = m[1]
+    const txt = buf.toString();
+    let last = null;
+    const re = /([0-9]{1,3}(?:\.[0-9]+)?)\s*%/g;
+    let m;
+    while ((m = re.exec(txt)) !== null) last = m[1];
     if (last !== null) {
-      const p = Math.max(0, Math.min(100, parseFloat(last)))
-      progressMap.set(asset.id, p)
+      const p = Math.max(0, Math.min(100, parseFloat(last)));
+      const prev = progressMap.get(asset.id) || 0;
+      if (p === 100 || p >= prev + 1) progressMap.set(asset.id, p);
+      if (p === 100 || p >= lastLoggedMain + 5) { // cada 5%
+        lastLoggedMain = p
+        console.log(`[PROGRESO] asset=${asset.id} main ${p}%`)
+      }
     }
-    if (/upload finished/i.test(txt)) progressMap.set(asset.id, 100)
-  }
+    if (/upload finished/i.test(txt)) {
+      progressMap.set(asset.id, 100);
+      if (lastLoggedMain !== 100) console.log(`[PROGRESO] asset=${asset.id} main 100%`)
+    }
+  };
 
   try {
-    progressMap.set(asset.id, 0)
+  progressMap.set(asset.id, 0)
     await withMegaLock(async () => {
-      try { await runCmd(logoutCmd, []) } catch {}
-      if (payload?.type === 'session' && payload.session) await runCmd(loginCmd, [payload.session])
-      else if (payload?.username && payload?.password) await runCmd(loginCmd, [payload.username, payload.password])
+  const ctx = `accId=${acc.id} alias=${acc.alias||'--'} email=${acc.email||'--'}`
+  try { await runCmd(logoutCmd, []); console.log(`[MEGA][LOGOUT][PREV][OK] upload main ${ctx}`) } catch { console.log(`[MEGA][LOGOUT][PREV][WARN] upload main ${ctx}`) }
+  if (payload?.type === 'session' && payload.session) { console.log(`[MEGA][LOGIN] main session ${ctx}`); await runCmd(loginCmd, [payload.session]) }
+  else if (payload?.username && payload?.password) { console.log(`[MEGA][LOGIN] main user/pass ${ctx}`); await runCmd(loginCmd, [payload.username, payload.password]) }
       else throw new Error('Invalid credentials payload')
+  console.log(`[MEGA][LOGIN][OK] main upload ${ctx}`)
   // Crear carpeta (ignorar si ya existe)
   await safeMkdir(remotePath)
       if (!localArchive || !fs.existsSync(localArchive)) throw new Error('Local archive not found')
       await new Promise((resolve, reject) => {
-        const child = spawn(putCmd, [localArchive, remotePath], { shell: true })
-        attachAutoAcceptTerms(child, 'MEGA PUT')
-        child.stdout.on('data', d => parseProgress(d))
-        child.stderr.on('data', d => parseProgress(d))
-        child.on('close', code => code === 0 ? resolve() : reject(new Error(`${putCmd} exited ${code}`)))
-      })
-      let publicLink = null
+        const child = spawn(putCmd, [localArchive, remotePath], { shell: true });
+        attachAutoAcceptTerms(child, 'MEGA PUT');
+        child.stdout.on('data', d => parseProgress(d));
+        child.stderr.on('data', d => parseProgress(d));
+        child.on('close', code => code === 0 ? resolve() : reject(new Error(`${putCmd} exited ${code}`)));
+      });
+      // Generar link público nuevamente (requerido)
+      let publicLink = null;
       try {
-        const remoteFilePath = path.posix.join(remotePath, path.basename(localArchive))
+        const remoteFile = path.posix.join(remotePath, path.basename(localArchive))
         const out = await new Promise((resolve, reject) => {
-          let buffer = ''
-          const child = spawn('mega-export', ['-a', remoteFilePath], { shell: true })
-          attachAutoAcceptTerms(child, 'MEGA EXPORT')
-          child.stdout.on('data', d => buffer += d.toString())
-          child.stderr.on('data', d => buffer += d.toString())
-          child.on('close', code => code === 0 ? resolve(buffer) : reject(new Error('export failed')))
+          let buf = ''
+          const child = spawn(exportCmd, ['-a', remoteFile], { shell: true })
+          attachAutoAcceptTerms(child, 'UPLOAD EXPORT')
+          child.stdout.on('data', d => buf += d.toString())
+          child.stderr.on('data', d => buf += d.toString())
+          child.on('close', code => code === 0 ? resolve(buf) : reject(new Error('export failed')))
         })
         const m = String(out).match(/https?:\/\/mega\.nz\/\S+/i)
-        if (m) publicLink = m[0]
-      } catch (e) { console.warn('[MEGA-UP] export warn:', e.message) }
+        if (m) { publicLink = m[0]; console.log(`[UPLOAD] link generado ${publicLink}`) }
+      } catch (e) {
+        console.warn('[UPLOAD] export warn:', e.message)
+      }
       function stripArchivesPrefix(absPath) {
         const relFromArchives = path.relative(ARCHIVES_DIR, absPath)
         if (!relFromArchives.startsWith('..')) return relFromArchives
@@ -674,14 +722,14 @@ export async function enqueueToMegaReal(asset) {
       const nameWithoutPrefix = stripArchivesPrefix(localArchive)
       await prisma.asset.update({ where: { id: asset.id }, data: { status: 'PUBLISHED', archiveName: nameWithoutPrefix, megaLink: publicLink || undefined } })
     }, 'MAIN-UPLOAD')
-    console.log(`[MEGA-UP] done asset id=${asset.id}`)
+  console.log(`[UPLOAD] Finalizada asset=${asset.id} 100%`)
   } catch (e) {
-    console.error('[MEGA-UP] error:', e)
+  console.error('[UPLOAD] Error asset=' + asset.id + ' msg=' + e.message)
     await prisma.asset.update({ where: { id: asset.id }, data: { status: 'FAILED' } })
     throw e
   } finally {
     progressMap.delete(asset.id)
-    try { await runCmd(logoutCmd, []) } catch {}
+  try { await runCmd(logoutCmd, []); console.log(`[MEGA][LOGOUT][OK] main upload end accId=${acc.id}`) } catch { console.log(`[MEGA][LOGOUT][WARN] main upload end accId=${acc.id}`) }
   }
 
   try { replicateAssetToBackupsSequential(asset.id).catch(err => console.error('[REPLICA] async error:', err)) } catch (e) { console.error('[REPLICA] schedule error:', e.message) }
@@ -720,6 +768,8 @@ async function replicateAssetToBackupsSequential(assetId) {
     if (!replica || replica.status !== 'PENDING') continue
     console.log(`[REPLICA] start asset=${asset.id} -> backupAccount=${b.id}`)
     try {
+      // Limpieza previa antes de cada réplica
+      preUploadCleanup()
       await prisma.assetReplica.update({ where: { id: replica.id }, data: { status: 'PROCESSING', startedAt: new Date() } })
       if (!b.credentials) throw new Error('No credentials stored for backup')
       const payload = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
@@ -732,10 +782,12 @@ async function replicateAssetToBackupsSequential(assetId) {
       const remotePath = path.posix.join(remoteBase, asset.slug)
       let publicLink = null
       await withMegaLock(async () => {
-        try { await runCmd(logoutCmd, []) } catch {}
-        if (payload?.type === 'session' && payload.session) await runCmd(loginCmd, [payload.session])
-        else if (payload?.username && payload?.password) await runCmd(loginCmd, [payload.username, payload.password])
+  const rctx = `replica accId=${b.id} alias=${b.alias||'--'} email=${b.email||'--'}`
+  try { await runCmd(logoutCmd, []); console.log(`[MEGA][LOGOUT][PREV][OK] ${rctx}`) } catch { console.log(`[MEGA][LOGOUT][PREV][WARN] ${rctx}`) }
+  if (payload?.type === 'session' && payload.session) { console.log(`[MEGA][LOGIN] replica session ${rctx}`); await runCmd(loginCmd, [payload.session]) }
+  else if (payload?.username && payload?.password) { console.log(`[MEGA][LOGIN] replica user/pass ${rctx}`); await runCmd(loginCmd, [payload.username, payload.password]) }
         else throw new Error('Invalid credentials')
+  console.log(`[MEGA][LOGIN][OK] ${rctx}`)
   await safeMkdir(remotePath)
         const fileName = path.basename(archiveAbs)
         await new Promise((resolve, reject) => {
@@ -752,7 +804,10 @@ async function replicateAssetToBackupsSequential(assetId) {
               const p = Math.max(0, Math.min(100, parseFloat(last)))
               if (p !== lastLogged) {
                 lastLogged = p
-                console.log(`[REPLICA] asset=${asset.id} backupAccount=${b.id} progreso ${p}%`)
+                if (p === 100 || p >= lastLogged + 5) {
+                  lastLogged = p
+                  console.log(`[PROGRESO] asset=${asset.id} backup=${b.id} ${p}%`)
+                }
                 replicaProgressMap.set(`${asset.id}:${b.id}`, p)
               }
             }
@@ -776,7 +831,7 @@ async function replicateAssetToBackupsSequential(assetId) {
         } catch (e) {
           console.warn('[REPLICA] export warn:', e.message)
         }
-        try { await runCmd(logoutCmd, []) } catch {}
+  try { await runCmd(logoutCmd, []); console.log(`[MEGA][LOGOUT][OK] replica accId=${b.id}`) } catch { console.log(`[MEGA][LOGOUT][WARN] replica accId=${b.id}`) }
       }, `REPLICA-${b.id}`)
       replicaProgressMap.set(`${asset.id}:${b.id}`, 100)
       await prisma.assetReplica.update({ where: { id: replica.id }, data: { status: 'COMPLETED', finishedAt: new Date(), megaLink: publicLink || undefined, remotePath } })
@@ -832,17 +887,41 @@ export const getFullProgress = async (req, res) => {
         .map(b => ({ accountId: b.id, alias: b.alias }))
     } catch (err) { console.warn('[ASSETS] expectedReplicas warn:', err.message) }
     const mainProgress = progressMap.get(id) ?? (asset.status === 'PUBLISHED' ? 100 : 0)
-    const replicas = await prisma.assetReplica.findMany({ where: { assetId: id }, include: { account: { select: { id: true, alias: true } } } })
-    const replicaItems = replicas.map(r => {
-      const inMem = replicaProgressMap.get(`${id}:${r.accountId}`)
-      let p = inMem ?? (r.status === 'COMPLETED' ? 100 : 0)
-      if (r.status === 'FAILED') p = 100
-      return { id: r.id, accountId: r.accountId, alias: r.account.alias, status: r.status, progress: p }
-    })
+    const replicasDb = await prisma.assetReplica.findMany({ where: { assetId: id }, include: { account: { select: { id: true, alias: true } } } })
+    const replicaMap = new Map(replicasDb.map(r => [r.accountId, r]))
+    let replicaItems
+    if (expectedReplicas.length) {
+      replicaItems = expectedReplicas.map(exp => {
+        const r = replicaMap.get(exp.accountId)
+        if (r) {
+          const inMem = replicaProgressMap.get(`${id}:${r.accountId}`)
+          let p = inMem ?? (r.status === 'COMPLETED' ? 100 : 0)
+          if (r.status === 'FAILED') p = 100
+          return { id: r.id, accountId: r.accountId, alias: r.account.alias, status: r.status, progress: p }
+        }
+        return { id: null, accountId: exp.accountId, alias: exp.alias, status: 'PENDING', progress: 0 }
+      })
+    } else {
+      // fallback: no expected list, use whatever exists
+      replicaItems = replicasDb.map(r => {
+        const inMem = replicaProgressMap.get(`${id}:${r.accountId}`)
+        let p = inMem ?? (r.status === 'COMPLETED' ? 100 : 0)
+        if (r.status === 'FAILED') p = 100
+        return { id: r.id, accountId: r.accountId, alias: r.account.alias, status: r.status, progress: p }
+      })
+    }
     const totalTargets = 1 + replicaItems.length
     const perTarget = [mainProgress, ...replicaItems.map(r => r.progress)]
     const overallPercent = perTarget.length ? Math.round(perTarget.reduce((a,b) => a + b, 0) / perTarget.length) : mainProgress
-    const allDone = (asset.status === 'PUBLISHED' || asset.status === 'FAILED') && replicaItems.every(r => ['COMPLETED','FAILED'].includes(r.status))
+    let allDone
+    if (!replicaItems.length) {
+      allDone = (asset.status === 'PUBLISHED' || asset.status === 'FAILED')
+    } else {
+      const replicasFinished = replicaItems.every(r => ['COMPLETED','FAILED'].includes(r.status))
+      // sólo done si todas las esperadas están (placeholder id null no bloquea) y terminaron
+      const haveAll = replicaItems.filter(r => r.status !== 'PENDING').length === expectedReplicas.length || expectedReplicas.length === 0
+      allDone = (asset.status === 'PUBLISHED' || asset.status === 'FAILED') && replicasFinished && haveAll
+    }
     return res.json({ main: { status: asset.status, progress: mainProgress }, replicas: replicaItems, totalTargets, overallPercent, allDone, expectedReplicas })
   } catch (e) {
     console.error('[ASSETS] fullProgress error:', e)

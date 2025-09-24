@@ -1,8 +1,10 @@
 import express from 'express';
 import routes from './src/routes/index.js';
+import { installConsoleHook, logsSSEHandler } from './src/utils/logStream.js';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { log } from './src/utils/logger.js';
 
 const PORT = process.env.PORT || 3001;
 
@@ -20,7 +22,13 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 app.use('/api', routes);
 
+// Hook de consola (una sola vez)
+installConsoleHook();
+
+// Endpoint SSE para logs
+app.get('/api/logs/stream', logsSSEHandler);
+
 
 app.listen(PORT, () => {
-    console.log(`Server listening on http://localhost:${PORT}/api`);
+    log.info(`Servidor iniciado en http://localhost:${PORT}/api`);
 });

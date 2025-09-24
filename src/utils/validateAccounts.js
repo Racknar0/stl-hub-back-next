@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import { log } from './logger.js';
 
 // Cargar variables de entorno (si existen)
 dotenv.config();
@@ -70,13 +71,13 @@ export async function runAccountValidation(options = { toggleUserActive: true })
 const __filename = fileURLToPath(import.meta.url);
 if (process.argv[1] === __filename) {
   (async () => {
-    console.log('[ACCOUNT-VALIDATION] Iniciando validación...');
+  log.info('Validación de cuentas iniciada');
     try {
       const result = await runAccountValidation();
-      console.log('[ACCOUNT-VALIDATION] Resumen:', JSON.stringify(result, null, 2));
+  log.info('Resumen validación cuentas: ' + JSON.stringify(result));
       process.exit(0);
     } catch (e) {
-      console.error('[ACCOUNT-VALIDATION] Error:', e);
+  log.error('Error validación cuentas: ' + (e?.message || e));
       process.exit(1);
     } finally {
       await prisma.$disconnect();

@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE `notification` ADD COLUMN `typeStatus` ENUM('SUCCESS', 'PENDING', 'ERROR') NOT NULL DEFAULT 'PENDING';

@@ -1,5 +1,7 @@
 // Cola serial para operaciones MEGAcmd
 import { spawn } from 'child_process';
+
+const VERBOSE_MEGA = /^(1|true|yes)$/i.test(String(process.env.MEGA_VERBOSE || ''));
 let chain = Promise.resolve();
 let active = 0;
 const listeners = new Set();
@@ -7,14 +9,14 @@ let pendingLogoutTimer = null;
 
 export function withMegaLock(fn, label = 'MEGA') {
   const run = async () => {
-    active++; emit();
-    console.log(`[MEGA-LOCK] ACQUIRE (${active}) -> ${label}`);
+  active++; emit();
+  if (VERBOSE_MEGA) console.log(`[MEGA-LOCK] ACQUIRE (${active}) -> ${label}`);
     try {
       const res = await fn();
       return res;
     } finally {
-      active = Math.max(0, active - 1);
-      console.log(`[MEGA-LOCK] RELEASE (${active}) <- ${label}`);
+  active = Math.max(0, active - 1);
+  if (VERBOSE_MEGA) console.log(`[MEGA-LOCK] RELEASE (${active}) <- ${label}`);
       emit();
       // Programar mega-logout forzado si la cola queda vacía (seguridad de sesión)
       if (active === 0) {
@@ -23,9 +25,14 @@ export function withMegaLock(fn, label = 'MEGA') {
           if (active === 0) {
             try {
               const child = spawn('mega-logout', [], { shell: true });
-              child.stdout.on('data', d => console.log('[MEGA-AUTO-LOGOUT]', d.toString().trim()));
-              child.stderr.on('data', d => console.log('[MEGA-AUTO-LOGOUT]', d.toString().trim()));
-            } catch (e) { console.warn('[MEGA-AUTO-LOGOUT] warn:', e.message); }
+              if (VERBOSE_MEGA) {
+                child.stdout.on('data', d => console.log('[MEGA-AUTO-LOGOUT]', d.toString().trim()));
+                child.stderr.on('data', d => console.log('[MEGA-AUTO-LOGOUT]', d.toString().trim()));
+              } else {
+                child.stdout.on('data', () => {});
+                child.stderr.on('data', () => {});
+              }
+            } catch (e) { if (VERBOSE_MEGA) console.warn('[MEGA-AUTO-LOGOUT] warn:', e.message); }
           }
         }, 2000);
       }

@@ -1,3 +1,5 @@
+
+
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
@@ -273,4 +275,37 @@ model DownloadHistory {
 
   @@index([userId])
   @@index([downloadedAt(sort: Desc)])
+}
+
+// Notificaciones internas (solo admin por ahora)
+enum NotificationStatus {
+  UNREAD
+  READ
+}
+
+// Tipos de notificación
+enum NotificationType {
+  AUTOMATION
+  SALES
+  REPORT
+}
+
+// Estado visual de la notificación
+enum NotificationTypeStatus {
+  SUCCESS
+  PENDING
+  ERROR
+}
+
+model Notification {
+  id          Int                @id @default(autoincrement())
+  title       String
+  body        String?
+  status      NotificationStatus @default(UNREAD)
+  type        NotificationType   @default(AUTOMATION)
+  typeStatus  NotificationTypeStatus @default(PENDING)
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  @@index([status])
 }
