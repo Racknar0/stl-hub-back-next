@@ -46,13 +46,13 @@ export const listAccounts = async (_req, res) => {
   try {
     const [accounts] = await Promise.all([
       prisma.megaAccount.findMany({
-        orderBy: { priority: 'asc' },
+        orderBy: { id: 'asc' },
         select: {
           id: true,
           alias: true,
           email: true,
           baseFolder: true,
-          priority: true,
+          type: true,
           status: true,
           statusMessage: true,
           suspended: true,
@@ -76,12 +76,12 @@ export const listAccounts = async (_req, res) => {
 
 export const createAccount = async (req, res) => {
   try {
-    const { alias, email, baseFolder, priority = 1, credentials } = req.body;
-    console.log(`[ACCOUNTS] create alias=${alias} email=${email} base=${baseFolder} priority=${priority}`);
+  const { alias, email, baseFolder, type = 'main', credentials } = req.body;
+  console.log(`[ACCOUNTS] create alias=${alias} email=${email} base=${baseFolder} type=${type}`);
     if (!alias || !email || !baseFolder || !credentials) {
       return res.status(400).json({ message: 'alias, email, baseFolder y credentials son requeridos' });
     }
-    const account = await prisma.megaAccount.create({ data: { alias, email, baseFolder, priority, status: 'ERROR' } });
+  const account = await prisma.megaAccount.create({ data: { alias, email, baseFolder, type, status: 'ERROR' } });
     const payload = { type: credentials.type || 'login', username: credentials.username, password: credentials.password, session: credentials.session };
     const enc = encryptJson(payload);
     await prisma.accountCredential.create({ data: { accountId: account.id, encData: enc.encData, encIv: enc.encIv, encTag: enc.encTag } });
@@ -96,13 +96,13 @@ export const createAccount = async (req, res) => {
 export const updateAccount = async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const { alias, email, baseFolder, priority, suspended, status } = req.body;
+  const { alias, email, baseFolder, type, suspended, status } = req.body;
 
     const data = {};
     if (alias !== undefined) data.alias = alias;
     if (email !== undefined) data.email = email;
     if (baseFolder !== undefined) data.baseFolder = baseFolder;
-    if (priority !== undefined) data.priority = Number(priority);
+  if (type !== undefined) data.type = type;
     if (suspended !== undefined) data.suspended = Boolean(suspended);
     if (status !== undefined) data.status = status; // validar enum en frontend o con zod/express-validator
 
@@ -303,7 +303,7 @@ export const testAccount = async (req, res) => {
 export const getAccountDetail = async (req, res) => {
   try {
     const id = Number(req.params.id)
-    const acc = await prisma.megaAccount.findUnique({ where: { id }, include: { credentials: true }})
+    const acc = await prisma.megaAccount.findUnique({ where: { id }, include: { credentials: true, backups: { include: { backupAccount: true } }, assignedAsBackup: { include: { mainAccount: true } } } })
     if (!acc) return res.status(404).json({ message: 'Account not found' })
     if (!acc.credentials) return res.status(400).json({ message: 'No credentials stored for this account' })
 
@@ -352,7 +352,7 @@ export const getAccountDetail = async (req, res) => {
         alias: acc.alias,
         email: acc.email,
         baseFolder: acc.baseFolder,
-        priority: acc.priority,
+        type: acc.type,
         status: acc.status,
         statusMessage: acc.statusMessage,
         storageUsedMB: acc.storageUsedMB,
@@ -360,6 +360,8 @@ export const getAccountDetail = async (req, res) => {
         fileCount: acc.fileCount,
         folderCount: acc.folderCount,
         lastCheckAt: acc.lastCheckAt,
+        backups: acc.backups.map(b => ({ id: b.backupAccount.id, alias: b.backupAccount.alias, type: b.backupAccount.type })),
+        mains: acc.assignedAsBackup.map(b => ({ id: b.mainAccount.id, alias: b.mainAccount.alias, type: b.mainAccount.type })),
       },
       items,
       itemsCount: items.length,
@@ -367,6 +369,40 @@ export const getAccountDetail = async (req, res) => {
   } catch (e) {
     console.error('Error getting account detail:', e)
     return res.status(500).json({ message: 'Error getting account detail' })
+  }
+};
+
+export const addBackupToMain = async (req, res) => {
+  try {
+    const mainId = Number(req.params.id);
+    const { backupAccountId } = req.body;
+    if (!backupAccountId) return res.status(400).json({ message: 'backupAccountId requerido' });
+    if (mainId === Number(backupAccountId)) return res.status(400).json({ message: 'No se puede asignar la misma cuenta como backup' });
+    const main = await prisma.megaAccount.findUnique({ where: { id: mainId }, select: { id: true, type: true } });
+    const backup = await prisma.megaAccount.findUnique({ where: { id: Number(backupAccountId) }, select: { id: true, type: true } });
+    if (!main || !backup) return res.status(404).json({ message: 'Cuenta main o backup no encontrada' });
+    // Opcional: exigir que main sea type=main
+    if (main.type !== 'main') return res.status(400).json({ message: 'Solo cuentas type=main pueden tener backups' });
+    await prisma.megaAccountBackup.create({ data: { mainAccountId: mainId, backupAccountId: Number(backupAccountId) } });
+    return res.json({ ok: true });
+  } catch (e) {
+    if (String(e.message).includes('Unique constraint')) {
+      return res.status(409).json({ message: 'Ya existe la relación' });
+    }
+    console.error('[ACCOUNTS] addBackupToMain error', e);
+    return res.status(500).json({ message: 'Error asignando backup' });
+  }
+};
+
+export const removeBackupFromMain = async (req, res) => {
+  try {
+    const mainId = Number(req.params.id);
+    const backupId = Number(req.params.backupId);
+    await prisma.megaAccountBackup.deleteMany({ where: { mainAccountId: mainId, backupAccountId: backupId } });
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[ACCOUNTS] removeBackupFromMain error', e);
+    return res.status(500).json({ message: 'Error removiendo backup' });
   }
 };
 

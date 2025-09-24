@@ -78,7 +78,7 @@ model megaAccount {
   alias             String        @unique
   email             String
   baseFolder        String
-  priority          Int           @default(1)
+  type              AccountType   @default(main)
   status            AccountStatus @default(ERROR)
   statusMessage     String?
   suspended         Boolean       @default(false)
@@ -101,6 +101,26 @@ model megaAccount {
 
   credentials       accountCredential?
   assets            asset[]
+  // Relaciones de backups (self-relation many-to-many a través de megaAccountBackup)
+  backups           megaAccountBackup[]    @relation("MainAccountBackups")      // Este account (main) -> backups
+  assignedAsBackup  megaAccountBackup[]    @relation("BackupOfMainAccounts")    // Este account (backup) -> mains
+}
+
+model megaAccountBackup {
+  id              Int         @id @default(autoincrement())
+  mainAccountId   Int
+  backupAccountId Int
+  mainAccount     megaAccount @relation("MainAccountBackups", fields: [mainAccountId], references: [id], onDelete: Cascade)
+  backupAccount   megaAccount @relation("BackupOfMainAccounts", fields: [backupAccountId], references: [id], onDelete: Cascade)
+  createdAt       DateTime    @default(now())
+
+  @@unique([mainAccountId, backupAccountId])
+  @@index([backupAccountId])
+}
+
+enum AccountType {
+  main
+  backup
 }
 
 model accountCredential {
