@@ -44,30 +44,36 @@ function parseSizeToMB(str) {
 
 export const listAccounts = async (_req, res) => {
   try {
-    const [accounts] = await Promise.all([
-      prisma.megaAccount.findMany({
-        orderBy: { id: 'asc' },
-        select: {
-          id: true,
-          alias: true,
-          email: true,
-          baseFolder: true,
-          type: true,
-          status: true,
-          statusMessage: true,
-          suspended: true,
-          storageUsedMB: true,
-          storageTotalMB: true,
-          errors24h: true,
-          fileCount: true,
-          folderCount: true,
-          lastCheckAt: true,
-          createdAt: true,
-          updatedAt: true,
-        },
-      }),
-    ])
-    return res.json(accounts)
+    const accounts = await prisma.megaAccount.findMany({
+      orderBy: { id: 'asc' },
+      include: {
+        backups: { include: { backupAccount: { select: { id: true, alias: true, type: true, status: true } } } },
+        assignedAsBackup: { include: { mainAccount: { select: { id: true, alias: true, type: true, status: true } } } },
+      },
+    });
+
+    const mapped = accounts.map(a => ({
+      id: a.id,
+      alias: a.alias,
+      email: a.email,
+      baseFolder: a.baseFolder,
+      type: a.type,
+      status: a.status,
+      statusMessage: a.statusMessage,
+      suspended: a.suspended,
+      storageUsedMB: a.storageUsedMB,
+      storageTotalMB: a.storageTotalMB,
+      errors24h: a.errors24h,
+      fileCount: a.fileCount,
+      folderCount: a.folderCount,
+      lastCheckAt: a.lastCheckAt,
+      createdAt: a.createdAt,
+      updatedAt: a.updatedAt,
+      backups: (a.backups || []).map(b => ({ id: b.backupAccount.id, alias: b.backupAccount.alias, type: b.backupAccount.type, status: b.backupAccount.status })),
+      mains: (a.assignedAsBackup || []).map(b => ({ id: b.mainAccount.id, alias: b.mainAccount.alias, type: b.mainAccount.type, status: b.mainAccount.status })),
+    }));
+
+    return res.json(mapped);
   } catch (error) {
     console.error('Error listing accounts:', error);
     return res.status(500).json({ message: 'Error listing accounts' });
