@@ -19,6 +19,7 @@ import {
   mostDownloadedAssets,
   randomizeFree,
   listAssetReplicas,
+  getFullProgress,
 } from '../../controllers/asset.controller.js';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
 import { createBrokenReport } from '../../controllers/brokenReport.controller.js'
@@ -78,6 +79,7 @@ router.post('/randomize-free', randomizeFree)
 router.get('/', listAssets);
 router.get('/:id/progress', getAssetProgress);
 router.get('/:id/replicas', listAssetReplicas);
+router.get('/:id/full-progress', getFullProgress);
 router.put('/:id', updateAsset);
 router.delete('/:id', deleteAsset);
 

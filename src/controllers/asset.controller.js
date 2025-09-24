@@ -11,6 +11,8 @@ const prisma = new PrismaClient();
 
 // Progreso en memoria por assetId (0..100)
 const progressMap = new Map();
+// Progreso de réplicas: key `${assetId}:${accountId}` -> 0..100
+const replicaProgressMap = new Map();
 
 const UPLOADS_DIR = path.resolve('uploads');
 const TEMP_DIR = path.join(UPLOADS_DIR, 'tmp');
@@ -164,44 +166,28 @@ export const listAssets = async (req, res) => {
   }
 };
 
+// Obtener un asset específico con relaciones básicas
 export const getAsset = async (req, res) => {
   try {
-    const id = Number(req.params.id);
-    const item = await prisma.asset.findUnique({
+    const id = Number(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Invalid id' })
+    const asset = await prisma.asset.findUnique({
       where: { id },
       include: {
-        account: { select: { alias: true, id: true } },
+        account: { select: { id: true, alias: true, type: true } },
         categories: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
-        tags: { select: { slug: true, name: true, nameEn: true } },
-      },
-    });
-    if (!item) return res.status(404).json({ message: 'Not found' });
-
-    // Preparar tags ES (slugs) y EN desde relación
-    const tagsEs = Array.isArray(item.tags) ? item.tags.map(t => t.slug) : [];
-    const tagsEn = Array.isArray(item.tags) ? item.tags.map(t => t.nameEn || t.name || t.slug) : [];
-
-    // Solo exponer megaLink si el solicitante es admin
-    let isAdmin = false;
-    try {
-      const auth = req.headers.authorization || '';
-      const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
-      if (token) {
-        const secret = process.env.JWT_SECRET || 'dev-secret';
-        const payload = jwt.verify(token, secret);
-        isAdmin = Number(payload?.roleId) === 2;
+        tags: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+        replicas: { select: { id: true, accountId: true, status: true } }
       }
-    } catch {}
-
-    const { megaLink, ...rest } = item;
-    const payload = isAdmin ? { ...item, tagsEs, tagsEn } : { ...rest, tagsEs, tagsEn };
-
-    return res.json(payload);
+    })
+    if (!asset) return res.status(404).json({ message: 'Asset not found' })
+    return res.json(asset)
   } catch (e) {
-    console.error('[ASSETS] get error:', e);
-    return res.status(500).json({ message: 'Error getting asset' });
+    console.error('[ASSETS] getAsset error:', e)
+    return res.status(500).json({ message: 'Error getting asset' })
   }
 };
+
 
 export const updateAsset = async (req, res) => {
   try {
@@ -542,7 +528,7 @@ export const createAssetFull = async (req, res) => {
 export const getAssetProgress = async (req, res) => {
   try {
     const id = Number(req.params.id)
-    const asset = await prisma.asset.findUnique({ where: { id }, select: { status: true } })
+  const asset = await prisma.asset.findUnique({ where: { id }, select: { status: true, accountId: true, account: { select: { backups: { select: { backupAccount: { select: { id: true, alias: true, type: true } } } } } } } })
     if (!asset) return res.status(404).json({ message: 'Not found' })
     const progress = progressMap.get(id) ?? (asset.status === 'PUBLISHED' ? 100 : 0)
     return res.json({ status: asset.status, progress: Math.max(0, Math.min(100, Math.round(progress))) })
@@ -557,6 +543,26 @@ async function runCmd(cmd, args = [], options = {}) {
     child.stdout.on('data', d => console.log(`[MEGA] ${d.toString().trim()}`));
     child.stderr.on('data', d => console.error(`[MEGA] ${d.toString().trim()}`));
     child.on('close', (code) => code === 0 ? resolve() : reject(new Error(`${cmd} exited ${code}`)) )
+  })
+}
+
+// mega-mkdir retorna código 54 cuando la carpeta ya existe; lo tratamos como éxito silencioso.
+async function safeMkdir(remotePath) {
+  const mkdirCmd = 'mega-mkdir'
+  return new Promise((resolve, reject) => {
+    const child = spawn(mkdirCmd, ['-p', remotePath], { shell: true })
+    let stderrBuf = ''
+    child.stdout.on('data', d => console.log(`[MEGA] ${d.toString().trim()}`))
+    child.stderr.on('data', d => {
+      const s = d.toString(); stderrBuf += s; console.error(`[MEGA] ${s.trim()}`)
+    })
+    child.on('close', code => {
+      if (code === 0) return resolve()
+      if (code === 54 || /Folder already exists/i.test(stderrBuf)) {
+        console.log(`[MEGA] mkdir exists (code=${code}) -> ok`) ; return resolve()
+      }
+      return reject(new Error(`${mkdirCmd} exited ${code}`))
+    })
   })
 }
 
@@ -635,7 +641,8 @@ export async function enqueueToMegaReal(asset) {
       if (payload?.type === 'session' && payload.session) await runCmd(loginCmd, [payload.session])
       else if (payload?.username && payload?.password) await runCmd(loginCmd, [payload.username, payload.password])
       else throw new Error('Invalid credentials payload')
-      await runCmd(mkdirCmd, ['-p', remotePath])
+  // Crear carpeta (ignorar si ya existe)
+  await safeMkdir(remotePath)
       if (!localArchive || !fs.existsSync(localArchive)) throw new Error('Local archive not found')
       await new Promise((resolve, reject) => {
         const child = spawn(putCmd, [localArchive, remotePath], { shell: true })
@@ -729,7 +736,7 @@ async function replicateAssetToBackupsSequential(assetId) {
         if (payload?.type === 'session' && payload.session) await runCmd(loginCmd, [payload.session])
         else if (payload?.username && payload?.password) await runCmd(loginCmd, [payload.username, payload.password])
         else throw new Error('Invalid credentials')
-        await runCmd(mkdirCmd, ['-p', remotePath])
+  await safeMkdir(remotePath)
         const fileName = path.basename(archiveAbs)
         await new Promise((resolve, reject) => {
           const child = spawn(putCmd, [archiveAbs, remotePath], { shell: true })
@@ -746,6 +753,7 @@ async function replicateAssetToBackupsSequential(assetId) {
               if (p !== lastLogged) {
                 lastLogged = p
                 console.log(`[REPLICA] asset=${asset.id} backupAccount=${b.id} progreso ${p}%`)
+                replicaProgressMap.set(`${asset.id}:${b.id}`, p)
               }
             }
           }
@@ -770,12 +778,16 @@ async function replicateAssetToBackupsSequential(assetId) {
         }
         try { await runCmd(logoutCmd, []) } catch {}
       }, `REPLICA-${b.id}`)
+      replicaProgressMap.set(`${asset.id}:${b.id}`, 100)
       await prisma.assetReplica.update({ where: { id: replica.id }, data: { status: 'COMPLETED', finishedAt: new Date(), megaLink: publicLink || undefined, remotePath } })
       console.log(`[REPLICA] completed asset=${asset.id} backupAccount=${b.id}`)
     } catch (err) {
       console.error('[REPLICA] error backupAccount=' + b.id, err)
       try { await prisma.assetReplica.update({ where: { id: replica.id }, data: { status: 'FAILED', errorMessage: err.message, finishedAt: new Date() } }) } catch {}
+      replicaProgressMap.delete(`${asset.id}:${b.id}`)
     }
+    // Limpieza de progreso en memoria si ya terminó (COMPLETED o FAILED)
+    try { const r = await prisma.assetReplica.findUnique({ where: { id: replica.id }, select: { status: true, accountId: true } }); if (r && (r.status === 'COMPLETED' || r.status === 'FAILED')) replicaProgressMap.delete(`${asset.id}:${r.accountId}`) } catch {}
   }
 
   // Cuando todas finalizan (o fallan) eliminar archivo local (si existe)
@@ -786,6 +798,8 @@ async function replicateAssetToBackupsSequential(assetId) {
       try { removeEmptyDirsUp(path.dirname(archiveAbs), ARCHIVES_DIR) } catch {}
     }
   } catch {}
+  // Limpiar progresos restantes del asset
+  for (const key of Array.from(replicaProgressMap.keys())) if (key.startsWith(`${asset.id}:`)) replicaProgressMap.delete(key)
 }
 
 // Endpoint para listar réplicas de un asset
@@ -793,9 +807,46 @@ export const listAssetReplicas = async (req, res) => {
   try {
     const id = Number(req.params.id)
     const rows = await prisma.assetReplica.findMany({ where: { assetId: id }, include: { account: { select: { id: true, alias: true } } }, orderBy: { id: 'asc' } })
-    return res.json(rows)
+    const enriched = rows.map(r => ({ ...r, progress: replicaProgressMap.get(`${id}:${r.accountId}`) ?? (r.status === 'COMPLETED' ? 100 :  r.status === 'PROCESSING' ? 0 : 0) }))
+    return res.json(enriched)
   } catch (e) {
     return res.status(500).json({ message: 'Error listing replicas' })
+  }
+}
+
+// Progreso completo (principal + replicas)
+export const getFullProgress = async (req, res) => {
+  try {
+    const id = Number(req.params.id)
+    const asset = await prisma.asset.findUnique({ where: { id }, select: { status: true, accountId: true } })
+    if (!asset) return res.status(404).json({ message: 'Not found' })
+    let expectedReplicas = []
+    try {
+      const links = await prisma.megaAccountBackup.findMany({
+        where: { mainAccountId: asset.accountId },
+        include: { backupAccount: { select: { id: true, alias: true, type: true } } }
+      })
+      expectedReplicas = links
+        .map(l => l.backupAccount)
+        .filter(b => b && b.type === 'backup')
+        .map(b => ({ accountId: b.id, alias: b.alias }))
+    } catch (err) { console.warn('[ASSETS] expectedReplicas warn:', err.message) }
+    const mainProgress = progressMap.get(id) ?? (asset.status === 'PUBLISHED' ? 100 : 0)
+    const replicas = await prisma.assetReplica.findMany({ where: { assetId: id }, include: { account: { select: { id: true, alias: true } } } })
+    const replicaItems = replicas.map(r => {
+      const inMem = replicaProgressMap.get(`${id}:${r.accountId}`)
+      let p = inMem ?? (r.status === 'COMPLETED' ? 100 : 0)
+      if (r.status === 'FAILED') p = 100
+      return { id: r.id, accountId: r.accountId, alias: r.account.alias, status: r.status, progress: p }
+    })
+    const totalTargets = 1 + replicaItems.length
+    const perTarget = [mainProgress, ...replicaItems.map(r => r.progress)]
+    const overallPercent = perTarget.length ? Math.round(perTarget.reduce((a,b) => a + b, 0) / perTarget.length) : mainProgress
+    const allDone = (asset.status === 'PUBLISHED' || asset.status === 'FAILED') && replicaItems.every(r => ['COMPLETED','FAILED'].includes(r.status))
+    return res.json({ main: { status: asset.status, progress: mainProgress }, replicas: replicaItems, totalTargets, overallPercent, allDone, expectedReplicas })
+  } catch (e) {
+    console.error('[ASSETS] fullProgress error:', e)
+    return res.status(500).json({ message: 'Error getting full progress' })
   }
 }
 
@@ -803,7 +854,7 @@ export const listAssetReplicas = async (req, res) => {
 export const deleteAsset = async (req, res) => {
   const id = Number(req.params.id)
   try {
-    const asset = await prisma.asset.findUnique({ where: { id } })
+    const asset = await prisma.asset.findUnique({ where: { id }, include: { account: { include: { credentials: true } }, replicas: { include: { account: { include: { credentials: true } } } } } })
     if (!asset) return res.status(404).json({ message: 'Asset not found' })
 
     const imgDir = path.join(IMAGES_DIR, asset.slug) // imágenes por slug
@@ -815,41 +866,48 @@ export const deleteAsset = async (req, res) => {
     try { removeEmptyDirsUp(path.dirname(imgDir), IMAGES_DIR) } catch {}
     try { removeEmptyDirsUp(path.dirname(archDir), ARCHIVES_DIR) } catch {}
 
-    // Eliminar de DB primero
-    await prisma.asset.delete({ where: { id } })
-
-    // Intentar eliminar en MEGA
-    let megaDeleted = false
-    try {
-      const acc = await prisma.megaAccount.findUnique({ where: { id: asset.accountId }, include: { credentials: true } })
-      if (!acc || !acc.credentials) throw new Error('No account/credentials')
-      const payload = decryptToJson(acc.credentials.encData, acc.credentials.encIv, acc.credentials.encTag)
-
-      const loginCmd = 'mega-login'
-      const rmCmd = 'mega-rm'
-      const logoutCmd = 'mega-logout'
-
-      const remoteBase = (acc.baseFolder || '/').replaceAll('\\', '/')
-      const remotePath = path.posix.join(remoteBase, asset.slug) // NUEVO: sin categoría
-
-      try { await runCmd(logoutCmd, []) } catch {}
-      if (payload?.type === 'session' && payload.session) {
-        await runCmd(loginCmd, [payload.session])
-      } else if (payload?.username && payload?.password) {
-        await runCmd(loginCmd, [payload.username, payload.password])
-      } else {
-        throw new Error('Invalid credentials payload')
+    // Recolectar cuentas a borrar: principal + backups (de replicas existentes)
+    const accountsToDelete = []
+    if (asset.account && asset.account.credentials) accountsToDelete.push({ kind: 'main', acc: asset.account })
+    const backupSeen = new Set()
+    for (const r of asset.replicas || []) {
+      if (r.account && r.account.credentials && !backupSeen.has(r.account.id)) {
+        backupSeen.add(r.account.id)
+        accountsToDelete.push({ kind: 'backup', acc: r.account })
       }
-
-      // Forzar borrado recursivo del folder del asset
-      await runCmd(rmCmd, ['-rf', remotePath])
-      megaDeleted = true
-      try { await runCmd(logoutCmd, []) } catch {}
-    } catch (e) {
-      console.warn('[ASSETS] mega delete warn:', e.message)
     }
 
-    return res.json({ dbDeleted: true, megaDeleted })
+    const loginCmd = 'mega-login'
+    const rmCmd = 'mega-rm'
+    const logoutCmd = 'mega-logout'
+
+    const results = []
+    for (const entry of accountsToDelete) {
+      const { acc } = entry
+      let deleted = false
+      try {
+        const payload = decryptToJson(acc.credentials.encData, acc.credentials.encIv, acc.credentials.encTag)
+        const remoteBase = (acc.baseFolder || '/').replaceAll('\\', '/')
+        const remotePath = path.posix.join(remoteBase, asset.slug)
+        await withMegaLock(async () => {
+          try { await runCmd(logoutCmd, []) } catch {}
+          if (payload?.type === 'session' && payload.session) await runCmd(loginCmd, [payload.session])
+          else if (payload?.username && payload?.password) await runCmd(loginCmd, [payload.username, payload.password])
+          else throw new Error('Invalid credentials payload')
+          try { await runCmd(rmCmd, ['-rf', remotePath]) ; deleted = true } catch (e) { console.warn(`[ASSETS] rm warn acc=${acc.id}:`, e.message) }
+          try { await runCmd(logoutCmd, []) } catch {}
+        }, `DEL-${acc.id}`)
+      } catch (e) {
+        console.warn('[ASSETS] mega delete warn acc=' + acc.id, e.message)
+      }
+      results.push({ accountId: acc.id, kind: entry.kind, deleted })
+    }
+
+    // Eliminar de DB (asset + replicas cascada si FK ON DELETE CASCADE)
+    await prisma.asset.delete({ where: { id } })
+
+    const mainResult = results.find(r => r.kind === 'main')
+    return res.json({ dbDeleted: true, megaDeleted: mainResult?.deleted || false, results })
   } catch (e) {
     console.error('[ASSETS] delete error:', e)
     return res.status(500).json({ message: 'Error deleting asset' })
