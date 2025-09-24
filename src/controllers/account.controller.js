@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { encryptJson, decryptToJson } from '../utils/cryptoUtils.js';
 import { spawn } from 'child_process';
+import { withMegaLock } from '../utils/megaQueue.js';
 
 const prisma = new PrismaClient();
 // Cuota por defecto para cuentas gratuitas de MEGA (MB). Se puede sobreescribir con MEGA_FREE_QUOTA_MB
@@ -140,34 +141,32 @@ export const testAccount = async (req, res) => {
     const duCmd = 'mega-du';
     const findCmd = 'mega-find';
 
-    // Limpiar sesiones previas
-    try { await runCmd(logoutCmd, []); console.log('[ACCOUNTS] pre-logout ok'); } catch (e) { console.warn('[ACCOUNTS] pre-logout warn:', String(e.message).slice(0,200)); }
-
-    // Login
-    try {
-      if (payload?.type === 'session' && payload.session) {
-        console.log('[ACCOUNTS] login with session');
-        await runCmd(loginCmd, [payload.session]);
-      } else if (payload?.username && payload?.password) {
-        console.log('[ACCOUNTS] login with user');
-        await runCmd(loginCmd, [payload.username, payload.password]);
-      } else {
-        return res.status(400).json({ message: 'Invalid credentials payload' });
-      }
-      didLogin = true;
-      console.log('[ACCOUNTS] login ok');
-    } catch (e) {
-      const msg = String(e.message || '').toLowerCase();
-      console.error('[ACCOUNTS] login error:', msg);
-      if (!msg.includes('already logged in')) { throw e }
-    }
-
-    // Asegurar carpeta base
     const base = (acc.baseFolder || '/').trim();
-    console.log(`[ACCOUNTS] ensure base folder: ${base}`);
-    if (base && base !== '/') {
-      try { await runCmd(mkdirCmd, ['-p', base]); console.log('[ACCOUNTS] mkdir ok'); } catch (e) { console.warn('[ACCOUNTS] mkdir warn:', String(e.message).slice(0,200)); }
-    }
+    await withMegaLock(async () => {
+      // Limpiar sesiones previas
+      try { await runCmd(logoutCmd, []); console.log('[ACCOUNTS] pre-logout ok'); } catch (e) { console.warn('[ACCOUNTS] pre-logout warn:', String(e.message).slice(0,200)); }
+      // Login
+      try {
+        if (payload?.type === 'session' && payload.session) {
+          console.log('[ACCOUNTS] login with session');
+          await runCmd(loginCmd, [payload.session]);
+        } else if (payload?.username && payload?.password) {
+          console.log('[ACCOUNTS] login with user');
+          await runCmd(loginCmd, [payload.username, payload.password]);
+        } else {
+          throw new Error('Invalid credentials payload');
+        }
+        didLogin = true; console.log('[ACCOUNTS] login ok');
+      } catch (e) {
+        const msg = String(e.message || '').toLowerCase();
+        console.error('[ACCOUNTS] login error:', msg);
+        if (!msg.includes('already logged in')) { throw e }
+      }
+      console.log(`[ACCOUNTS] ensure base folder: ${base}`);
+      if (base && base !== '/') {
+        try { await runCmd(mkdirCmd, ['-p', base]); console.log('[ACCOUNTS] mkdir ok'); } catch (e) { console.warn('[ACCOUNTS] mkdir warn:', String(e.message).slice(0,200)); }
+      }
+    }, 'ACCOUNTS-TEST')
 
     // Métricas: SOLO almacenamiento (quitar banda). Intentar df primero, luego fallback a du.
     let storageUsedMB = 0, storageTotalMB = 0;
@@ -302,7 +301,7 @@ export const testAccount = async (req, res) => {
     } catch {}
     return res.status(500).json({ message: 'Error testing account', error: String(error.message) });
   } finally {
-    try { await runCmd('mega-logout', []); console.log('[ACCOUNTS] final logout ok'); } catch (e) { console.warn('[ACCOUNTS] final logout warn:', String(e.message).slice(0,200)); }
+    try { await withMegaLock(() => runCmd('mega-logout', []), 'ACCOUNTS-TEST-LOGOUT'); console.log('[ACCOUNTS] final logout ok'); } catch (e) { console.warn('[ACCOUNTS] final logout warn:', String(e.message).slice(0,200)); }
   }
 };
 
@@ -320,37 +319,31 @@ export const getAccountDetail = async (req, res) => {
     const mkdirCmd = 'mega-mkdir'
     const lsCmd = 'mega-ls'
 
-    // limpiar sesión previa
-    try { await runCmd(logoutCmd, []) } catch {}
-
-    // login
-    try {
-      if (payload?.type === 'session' && payload.session) {
-        await runCmd(loginCmd, [payload.session])
-      } else if (payload?.username && payload?.password) {
-        await runCmd(loginCmd, [payload.username, payload.password])
-      } else {
-        return res.status(400).json({ message: 'Invalid credentials payload' })
-      }
-    } catch (e) {
-      const msg = String(e.message || '').toLowerCase()
-      if (!msg.includes('already logged in')) throw e
-    }
-
-    const base = (acc.baseFolder || '/').trim()
-    if (base && base !== '/') {
-      try { await runCmd(mkdirCmd, ['-p', base]) } catch {}
-    }
-
-    // Listar items
     let items = []
-    try {
-      const ls = await runCmd(lsCmd, ['-l', base || '/'])
-      items = (ls.out || '').split(/\r?\n/).filter(Boolean)
-    } catch {}
-
-    // cerrar sesión
-    try { await runCmd(logoutCmd, []) } catch {}
+    const base = (acc.baseFolder || '/').trim()
+    await withMegaLock( async () => {
+      try { await runCmd(logoutCmd, []) } catch {}
+      try {
+        if (payload?.type === 'session' && payload.session) {
+          await runCmd(loginCmd, [payload.session])
+        } else if (payload?.username && payload?.password) {
+          await runCmd(loginCmd, [payload.username, payload.password])
+        } else {
+          throw new Error('Invalid credentials payload')
+        }
+      } catch (e) {
+        const msg = String(e.message || '').toLowerCase()
+        if (!msg.includes('already logged in')) throw e
+      }
+      if (base && base !== '/') {
+        try { await runCmd(mkdirCmd, ['-p', base]) } catch {}
+      }
+      try {
+        const ls = await runCmd(lsCmd, ['-l', base || '/'])
+        items = (ls.out || '').split(/\r?\n/).filter(Boolean)
+      } catch {}
+      try { await runCmd(logoutCmd, []) } catch {}
+    }, 'ACCOUNTS-DETAIL')
 
     return res.json({
       account: {

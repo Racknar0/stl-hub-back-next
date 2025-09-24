@@ -18,6 +18,7 @@ import {
   requestDownload,
   mostDownloadedAssets,
   randomizeFree,
+  listAssetReplicas,
 } from '../../controllers/asset.controller.js';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
 import { createBrokenReport } from '../../controllers/brokenReport.controller.js'
@@ -76,6 +77,7 @@ router.post('/randomize-free', randomizeFree)
 // GET /assets?q=texto&pageIndex=0&pageSize=25 para paginación del lado del servidor
 router.get('/', listAssets);
 router.get('/:id/progress', getAssetProgress);
+router.get('/:id/replicas', listAssetReplicas);
 router.put('/:id', updateAsset);
 router.delete('/:id', deleteAsset);
 

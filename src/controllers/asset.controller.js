@@ -5,6 +5,7 @@ import sharp from 'sharp';
 import { spawn } from 'child_process';
 import { decryptToJson } from '../utils/cryptoUtils.js';
 import jwt from 'jsonwebtoken'
+import { withMegaLock } from '../utils/megaQueue.js'
 
 const prisma = new PrismaClient();
 
@@ -600,142 +601,201 @@ function attachAutoAcceptTerms(child, label = 'MEGA') {
 }
 
 export async function enqueueToMegaReal(asset) {
-  const acc = await prisma.megaAccount.findUnique({ where: { id: asset.accountId }, include: { credentials: true } });
-  if (!acc) throw new Error('Account not found');
-  if (!acc.credentials) throw new Error('No credentials stored');
+  const acc = await prisma.megaAccount.findUnique({ where: { id: asset.accountId }, include: { credentials: true } })
+  if (!acc) throw new Error('Account not found')
+  if (!acc.credentials) throw new Error('No credentials stored')
 
-  const payload = decryptToJson(acc.credentials.encData, acc.credentials.encIv, acc.credentials.encTag);
-  const loginCmd = 'mega-login';
-  const mkdirCmd = 'mega-mkdir';
-  const putCmd = 'mega-put';
-  const logoutCmd = 'mega-logout';
+  const payload = decryptToJson(acc.credentials.encData, acc.credentials.encIv, acc.credentials.encTag)
+  const loginCmd = 'mega-login'
+  const mkdirCmd = 'mega-mkdir'
+  const putCmd = 'mega-put'
+  const logoutCmd = 'mega-logout'
+  const remoteBase = (acc.baseFolder || '/').replaceAll('\\', '/')
+  const remotePath = path.posix.join(remoteBase, asset.slug)
+  const localArchive = asset.archiveName ? path.join(UPLOADS_DIR, asset.archiveName) : null
+  console.log(`[MEGA-UP] start asset id=${asset.id} to ${remotePath}`)
 
-  const remoteBase = (acc.baseFolder || '/').replaceAll('\\', '/');
-  const remotePath = path.posix.join(remoteBase, asset.slug); // NUEVO: sin categoría
-
-  const localArchive = asset.archiveName ? path.join(UPLOADS_DIR, asset.archiveName) : null;
-
-  console.log(`[MEGA-UP] start asset id=${asset.id} to ${remotePath}`);
-
-  const runCmd = (cmd, args = [], options = {}) => new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { shell: true, ...options });
-    child.stdout.on('data', d => console.log(`[MEGA] ${d.toString().trim()}`));
-    child.stderr.on('data', d => console.error(`[MEGA] ${d.toString().trim()}`));
-    child.on('close', (code) => code === 0 ? resolve() : reject(new Error(`${cmd} exited ${code}`)) )
-  });
-
-  const parseAndSetProgress = (buf) => {
-    const txt = buf.toString();
-    if (/upload finished/i.test(txt)) {
-      progressMap.set(asset.id, 100)
-      return
-    }
+  const parseProgress = (buf) => {
+    const txt = buf.toString()
     let last = null
-    const re1 = /:\s*([0-9]{1,3}(?:\.[0-9]+)?)\s*%/g
-    const re2 = /([0-9]{1,3}(?:\.[0-9]+)?)\s*%/g
+    const re = /([0-9]{1,3}(?:\.[0-9]+)?)\s*%/g
     let m
-    while ((m = re1.exec(txt)) !== null) last = m[1]
-    if (last === null) {
-      while ((m = re2.exec(txt)) !== null) last = m[1]
-    }
+    while ((m = re.exec(txt)) !== null) last = m[1]
     if (last !== null) {
       const p = Math.max(0, Math.min(100, parseFloat(last)))
       progressMap.set(asset.id, p)
     }
+    if (/upload finished/i.test(txt)) progressMap.set(asset.id, 100)
   }
 
   try {
     progressMap.set(asset.id, 0)
-    try { await runCmd(logoutCmd, []); } catch {}
-
-    if (payload?.type === 'session' && payload.session) {
-      await runCmd(loginCmd, [payload.session]);
-    } else if (payload?.username && payload?.password) {
-      await runCmd(loginCmd, [payload.username, payload.password]);
-    } else {
-      throw new Error('Invalid credentials payload');
-    }
-
-    await runCmd(mkdirCmd, ['-p', remotePath]);
-
-    if (!localArchive || !fs.existsSync(localArchive)) throw new Error('Local archive not found');
-
-    // Subir con streaming de progreso + auto-aceptación de términos
-    await new Promise((resolve, reject) => {
-      const child = spawn(putCmd, [localArchive, remotePath], { shell: true })
-      attachAutoAcceptTerms(child, 'MEGA PUT')
-      // Solo parsear progreso aquí para evitar logs duplicados
-      child.stdout.on('data', (d) => { parseAndSetProgress(d) })
-      child.stderr.on('data', (d) => { parseAndSetProgress(d) })
-      child.on('close', (code) => code === 0 ? resolve() : reject(new Error(`${putCmd} exited ${code}`)))
-    })
-
-    progressMap.set(asset.id, 100)
-
-    // Intentar exportar link público del archivo en MEGA (con auto-aceptación)
-    let publicLink = null
-    try {
-      const remoteFilePath = path.posix.join(remotePath, path.basename(localArchive))
-      const out = await new Promise((resolve, reject) => {
-        let buffer = ''
-        const child = spawn('mega-export', ['-a', remoteFilePath], { shell: true })
-        attachAutoAcceptTerms(child, 'MEGA EXPORT')
-        child.stdout.on('data', (d) => { buffer += d.toString() })
-        child.stderr.on('data', (d) => { buffer += d.toString() })
-        child.on('close', (code) => code === 0 ? resolve(buffer) : reject(new Error(`mega-export exited ${code}`)))
+    await withMegaLock(async () => {
+      try { await runCmd(logoutCmd, []) } catch {}
+      if (payload?.type === 'session' && payload.session) await runCmd(loginCmd, [payload.session])
+      else if (payload?.username && payload?.password) await runCmd(loginCmd, [payload.username, payload.password])
+      else throw new Error('Invalid credentials payload')
+      await runCmd(mkdirCmd, ['-p', remotePath])
+      if (!localArchive || !fs.existsSync(localArchive)) throw new Error('Local archive not found')
+      await new Promise((resolve, reject) => {
+        const child = spawn(putCmd, [localArchive, remotePath], { shell: true })
+        attachAutoAcceptTerms(child, 'MEGA PUT')
+        child.stdout.on('data', d => parseProgress(d))
+        child.stderr.on('data', d => parseProgress(d))
+        child.on('close', code => code === 0 ? resolve() : reject(new Error(`${putCmd} exited ${code}`)))
       })
-      const m = String(out).match(/https?:\/\/mega\.nz\/\S+/i)
-      if (m) publicLink = m[0]
-    } catch (e) {
-      console.warn('[MEGA-UP] export warn:', e.message)
-    }
-
-    // Subida a MEGA completada: eliminar archivo local y limpiar campos
-    try { fs.unlinkSync(localArchive); } catch (e) { console.warn('[MEGA-UP] unlink warn:', e.message); }
-    try {
-      const archiveDir = path.dirname(localArchive)
-      removeEmptyDirsUp(archiveDir, ARCHIVES_DIR)
-    } catch (e) {
-      console.warn('[MEGA-UP] rmdir warn:', e.message)
-    }
-
-    if (publicLink) console.log(`*******************************  [MEGA-UP] public link: ${publicLink}`);
-
-    // Devuelve la ruta dentro de archives/... sin el prefijo "archives/"
-    function stripArchivesPrefix(absPath) {
-      // Si está dentro de ARCHIVES_DIR, saca la ruta relativa a esa carpeta
-      const relFromArchives = path.relative(ARCHIVES_DIR, absPath);
-      if (!relFromArchives.startsWith('..')) {
-        // Ej.: "back-spinal-atack-on-titan\back_spinal_atack_on_titan.rar"
-        return relFromArchives;
+      let publicLink = null
+      try {
+        const remoteFilePath = path.posix.join(remotePath, path.basename(localArchive))
+        const out = await new Promise((resolve, reject) => {
+          let buffer = ''
+          const child = spawn('mega-export', ['-a', remoteFilePath], { shell: true })
+          attachAutoAcceptTerms(child, 'MEGA EXPORT')
+          child.stdout.on('data', d => buffer += d.toString())
+          child.stderr.on('data', d => buffer += d.toString())
+          child.on('close', code => code === 0 ? resolve(buffer) : reject(new Error('export failed')))
+        })
+        const m = String(out).match(/https?:\/\/mega\.nz\/\S+/i)
+        if (m) publicLink = m[0]
+      } catch (e) { console.warn('[MEGA-UP] export warn:', e.message) }
+      function stripArchivesPrefix(absPath) {
+        const relFromArchives = path.relative(ARCHIVES_DIR, absPath)
+        if (!relFromArchives.startsWith('..')) return relFromArchives
+        const relFromUploads = path.relative(UPLOADS_DIR, absPath)
+        return relFromUploads.replace(/^archives[\\/]/i, '')
       }
-      // Fallback: relativo a UPLOADS y quitar "archives/" o "archives\"
-      const relFromUploads = path.relative(UPLOADS_DIR, absPath);
-      return relFromUploads.replace(/^archives[\\/]/i, '');
-    }
-
-    // --- uso ---
-    const nameWithoutPrefix = stripArchivesPrefix(localArchive);
-
-    await prisma.asset.update({
-      where: { id: asset.id },
-      data: {
-        status: 'PUBLISHED',
-        // Ejemplo final deseado:
-        // "back-spinal-atack-on-titan\back_spinal_atack_on_titan.rar"
-        archiveName: nameWithoutPrefix,
-        megaLink: publicLink || undefined,
-      }
-    });
-
-    console.log(`[MEGA-UP] done asset id=${asset.id}`);
+      const nameWithoutPrefix = stripArchivesPrefix(localArchive)
+      await prisma.asset.update({ where: { id: asset.id }, data: { status: 'PUBLISHED', archiveName: nameWithoutPrefix, megaLink: publicLink || undefined } })
+    }, 'MAIN-UPLOAD')
+    console.log(`[MEGA-UP] done asset id=${asset.id}`)
   } catch (e) {
-    console.error('[MEGA-UP] error:', e);
-    await prisma.asset.update({ where: { id: asset.id }, data: { status: 'FAILED' } });
-    throw e;
+    console.error('[MEGA-UP] error:', e)
+    await prisma.asset.update({ where: { id: asset.id }, data: { status: 'FAILED' } })
+    throw e
   } finally {
     progressMap.delete(asset.id)
-    try { await runCmd(logoutCmd, []); } catch {}
+    try { await runCmd(logoutCmd, []) } catch {}
+  }
+
+  try { replicateAssetToBackupsSequential(asset.id).catch(err => console.error('[REPLICA] async error:', err)) } catch (e) { console.error('[REPLICA] schedule error:', e.message) }
+}
+
+// Secuencial: toma backups relacionados al main account y replica el archivo (archiveName) creando carpeta slug
+async function replicateAssetToBackupsSequential(assetId) {
+  const asset = await prisma.asset.findUnique({ where: { id: assetId }, include: { account: { include: { backups: { include: { backupAccount: { include: { credentials: true } } } } } }, replicas: true } })
+  if (!asset) return
+  if (!asset.archiveName) return // nada que replicar
+  const archiveAbs = path.join(UPLOADS_DIR, asset.archiveName.startsWith('archives') ? asset.archiveName : path.join('archives', asset.archiveName))
+  // Si ya se eliminó tras subida principal no podemos replicar -> abortar
+  if (!fs.existsSync(archiveAbs)) {
+    console.warn('[REPLICA] local archive missing, skip replicas')
+    return
+  }
+  // Backups definidos para la cuenta principal
+  const backupAccounts = (asset.account.backups || []).map(b => b.backupAccount).filter(b => b && b.type === 'backup')
+  if (!backupAccounts.length) { console.log(`[REPLICA] asset=${asset.id} sin backups -> no se replica`); return }
+  console.log(`[REPLICA] asset=${asset.id} se replicará a ${backupAccounts.length} cuentas backup`)
+
+  // Asegurar filas de replicas PENDING
+  for (const b of backupAccounts) {
+    try {
+      await prisma.assetReplica.upsert({
+        where: { assetId_accountId: { assetId: asset.id, accountId: b.id } },
+        update: {},
+        create: { assetId: asset.id, accountId: b.id }
+      })
+    } catch (e) { console.warn('[REPLICA] upsert warn:', e.message) }
+  }
+
+  for (const b of backupAccounts) {
+    let replica
+    try { replica = await prisma.assetReplica.findUnique({ where: { assetId_accountId: { assetId: asset.id, accountId: b.id } } }) } catch {}
+    if (!replica || replica.status !== 'PENDING') continue
+    console.log(`[REPLICA] start asset=${asset.id} -> backupAccount=${b.id}`)
+    try {
+      await prisma.assetReplica.update({ where: { id: replica.id }, data: { status: 'PROCESSING', startedAt: new Date() } })
+      if (!b.credentials) throw new Error('No credentials stored for backup')
+      const payload = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
+      const loginCmd = 'mega-login'
+      const mkdirCmd = 'mega-mkdir'
+      const putCmd = 'mega-put'
+      const exportCmd = 'mega-export'
+      const logoutCmd = 'mega-logout'
+      const remoteBase = (b.baseFolder || '/').replaceAll('\\', '/')
+      const remotePath = path.posix.join(remoteBase, asset.slug)
+      let publicLink = null
+      await withMegaLock(async () => {
+        try { await runCmd(logoutCmd, []) } catch {}
+        if (payload?.type === 'session' && payload.session) await runCmd(loginCmd, [payload.session])
+        else if (payload?.username && payload?.password) await runCmd(loginCmd, [payload.username, payload.password])
+        else throw new Error('Invalid credentials')
+        await runCmd(mkdirCmd, ['-p', remotePath])
+        const fileName = path.basename(archiveAbs)
+        await new Promise((resolve, reject) => {
+          const child = spawn(putCmd, [archiveAbs, remotePath], { shell: true })
+          attachAutoAcceptTerms(child, `REPLICA PUT acc=${b.id}`)
+          let lastLogged = -1
+          const parseProgress = (buf) => {
+            const txt = buf.toString()
+            let last = null
+            const re = /([0-9]{1,3}(?:\.[0-9]+)?)\s*%/g
+            let m
+            while ((m = re.exec(txt)) !== null) last = m[1]
+            if (last !== null) {
+              const p = Math.max(0, Math.min(100, parseFloat(last)))
+              if (p !== lastLogged) {
+                lastLogged = p
+                console.log(`[REPLICA] asset=${asset.id} backupAccount=${b.id} progreso ${p}%`)
+              }
+            }
+          }
+          child.stdout.on('data', d => parseProgress(d))
+          child.stderr.on('data', d => parseProgress(d))
+          child.on('close', code => code === 0 ? resolve() : reject(new Error(`${putCmd} exited ${code}`)))
+        })
+        try {
+          const remoteFile = path.posix.join(remotePath, fileName)
+          const out = await new Promise((resolve, reject) => {
+            let buf = ''
+            const child = spawn(exportCmd, ['-a', remoteFile], { shell: true })
+            attachAutoAcceptTerms(child, 'REPLICA EXPORT')
+            child.stdout.on('data', d => buf += d.toString())
+            child.stderr.on('data', d => buf += d.toString())
+            child.on('close', code => code === 0 ? resolve(buf) : reject(new Error('export failed')))
+          })
+          const m = String(out).match(/https?:\/\/mega\.nz\/\S+/i)
+          if (m) publicLink = m[0]
+        } catch (e) {
+          console.warn('[REPLICA] export warn:', e.message)
+        }
+        try { await runCmd(logoutCmd, []) } catch {}
+      }, `REPLICA-${b.id}`)
+      await prisma.assetReplica.update({ where: { id: replica.id }, data: { status: 'COMPLETED', finishedAt: new Date(), megaLink: publicLink || undefined, remotePath } })
+      console.log(`[REPLICA] completed asset=${asset.id} backupAccount=${b.id}`)
+    } catch (err) {
+      console.error('[REPLICA] error backupAccount=' + b.id, err)
+      try { await prisma.assetReplica.update({ where: { id: replica.id }, data: { status: 'FAILED', errorMessage: err.message, finishedAt: new Date() } }) } catch {}
+    }
+  }
+
+  // Cuando todas finalizan (o fallan) eliminar archivo local (si existe)
+  try {
+    const remainProcessing = await prisma.assetReplica.count({ where: { assetId: asset.id, status: { in: ['PENDING', 'PROCESSING'] } } })
+    if (remainProcessing === 0 && fs.existsSync(archiveAbs)) {
+      try { fs.unlinkSync(archiveAbs) } catch {}
+      try { removeEmptyDirsUp(path.dirname(archiveAbs), ARCHIVES_DIR) } catch {}
+    }
+  } catch {}
+}
+
+// Endpoint para listar réplicas de un asset
+export const listAssetReplicas = async (req, res) => {
+  try {
+    const id = Number(req.params.id)
+    const rows = await prisma.assetReplica.findMany({ where: { assetId: id }, include: { account: { select: { id: true, alias: true } } }, orderBy: { id: 'asc' } })
+    return res.json(rows)
+  } catch (e) {
+    return res.status(500).json({ message: 'Error listing replicas' })
   }
 }
 

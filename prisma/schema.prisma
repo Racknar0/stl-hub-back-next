@@ -104,6 +104,8 @@ model megaAccount {
   // Relaciones de backups (self-relation many-to-many a través de megaAccountBackup)
   backups           megaAccountBackup[]    @relation("MainAccountBackups")      // Este account (main) -> backups
   assignedAsBackup  megaAccountBackup[]    @relation("BackupOfMainAccounts")    // Este account (backup) -> mains
+  // Réplicas alojadas en esta cuenta cuando actúa como backup
+  assetReplicas     AssetReplica[]
 }
 
 model megaAccountBackup {
@@ -178,8 +180,40 @@ model asset {
 
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
+  // Réplicas en cuentas backup
+  replicas     AssetReplica[]
 
   @@index([accountId])
+}
+
+// Estado de una réplica del asset en cuentas backup
+enum ReplicaStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+// Réplica de un asset en una cuenta backup (soporta múltiples backups futuras)
+model AssetReplica {
+  id          Int            @id @default(autoincrement())
+  assetId     Int
+  asset       asset          @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  accountId   Int
+  account     megaAccount    @relation(fields: [accountId], references: [id])
+  status      ReplicaStatus  @default(PENDING)
+  megaLink    String?
+  remotePath  String?
+  errorMessage String?
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@unique([assetId, accountId])
+  @@index([accountId])
+  @@index([status])
+  @@index([createdAt(sort: Desc)])
 }
 
 model category {
