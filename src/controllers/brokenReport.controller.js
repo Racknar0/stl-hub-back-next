@@ -1,15 +1,34 @@
 import { PrismaClient } from '@prisma/client'
+import fetch from 'node-fetch';
+const RECAPTCHA_SECRET_KEY = process.env.RECAPTCHA_SECRET_KEY;
+async function validateCaptcha(token, remoteIp) {
+  const params = new URLSearchParams();
+  params.append('secret', RECAPTCHA_SECRET_KEY);
+  params.append('response', token);
+  if (remoteIp) params.append('remoteip', remoteIp);
+  const res = await fetch('https://www.google.com/recaptcha/api/siteverify', {
+    method: 'POST',
+    body: params
+  });
+  const data = await res.json();
+  console.log('[CAPTCHA]', data); // LOG para debug
+  return data.success;
+}
 
 const prisma = new PrismaClient()
 
 export const createBrokenReport = async (req, res) => {
-  try {
-  const assetId = Number.parseInt(req.params.id, 10)
-  const note = String(req.body?.note || '').slice(0, 1000)
-  if (!Number.isInteger(assetId) || assetId <= 0) return res.status(400).json({ ok: false, error: 'INVALID_ASSET' })
 
-    // TODO: validar captchaToken cuando se integre
+  try {
+    const assetId = Number.parseInt(req.params.id, 10)
+    const note = String(req.body?.note || '').slice(0, 1000)
+    if (!Number.isInteger(assetId) || assetId <= 0) return res.status(400).json({ ok: false, error: 'INVALID_ASSET' })
+
+    const captchaToken = req.body?.captchaToken;
     const ip = req.headers['x-forwarded-for']?.toString().split(',')[0]?.trim() || req.socket?.remoteAddress || ''
+    if (!captchaToken || !(await validateCaptcha(captchaToken, ip))) {
+      return res.status(400).json({ ok: false, error: 'INVALID_CAPTCHA' });
+    }
     const ua = req.headers['user-agent'] || ''
 
     const created = await prisma.brokenReport.create({
