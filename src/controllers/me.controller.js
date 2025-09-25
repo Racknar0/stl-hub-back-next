@@ -5,7 +5,7 @@ const prisma = new PrismaClient();
 export const getMyProfile = async (req, res) => {
   try {
     const userId = Number(req.user?.id);
-    if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+    if (!userId) return res.status(403).json({ message: 'Forbidden' });
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
