@@ -2071,3 +2071,274 @@ export const randomizeFree = async (req, res) => {
         return res.status(500).json({ message: 'Error randomizing freebies' });
     }
 };
+
+
+// Restaura un asset desde su backup usando solo TEMP_DIR.
+// Flujo: login backup -> mega-get a TEMP_DIR -> login main -> mkdir -> mega-put -> export/get link -> update DB -> limpia archivo.
+export async function restoreAssetFromBackup(req, res) {
+  const assetId = Number(req.params.assetId ?? req.body?.assetId);
+  const preferBackupAccountId = req.body?.backupId ? Number(req.body.backupId) : null;
+
+  if (!Number.isFinite(assetId) || assetId <= 0) {
+    return res.status(400).json({ message: 'Invalid asset id' });
+  }
+
+  // --- Helper robusto para exportar/recuperar link público (mismo estilo de subida) ---
+  async function getOrCreateLink(remoteFile, label = 'RESTORE EXPORT') {
+    const ATTEMPTS = Number(process.env.MEGA_EXPORT_ATTEMPTS || 5);
+    const BASE_TIMEOUT = Number(process.env.MEGA_EXPORT_BASE_TIMEOUT_MS || 20000);
+
+    const tryGet = async (timeout, tag='GET') => {
+      const out = await new Promise((resolve, reject) => {
+        let buf = '';
+        const child = spawn('mega-export', [remoteFile], { shell: true });
+        attachAutoAcceptTerms(child, `${label} ${tag}`);
+        const to = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} ; reject(new Error(`mega-export timeout ${timeout}ms`)) }, timeout);
+        child.stdout.on('data', d => buf += d.toString());
+        child.stderr.on('data', d => buf += d.toString());
+        child.on('close', code => { clearTimeout(to); return code === 0 ? resolve(buf) : reject(new Error(`mega-export exited ${code}`)); });
+      });
+      const m = String(out).match(/https?:\/\/mega\.nz\/\S+/i);
+      return m ? m[0] : null;
+    };
+
+    const tryCreate = async (timeout, tag='CREATE') => {
+      const out = await new Promise((resolve, reject) => {
+        let buf = '';
+        const child = spawn('mega-export', ['-a', remoteFile], { shell: true });
+        attachAutoAcceptTerms(child, `${label} ${tag}`);
+        const to = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} ; reject(new Error(`mega-export -a timeout ${timeout}ms`)) }, timeout);
+        child.stdout.on('data', d => buf += d.toString());
+        child.stderr.on('data', d => buf += d.toString());
+        child.on('close', code => { clearTimeout(to); return code === 0 ? resolve(buf) : reject(Object.assign(new Error(`mega-export -a exited ${code}`), { code })); });
+      });
+      const m = String(out).match(/https?:\/\/mega\.nz\/\S+/i);
+      return m ? m[0] : null;
+    };
+
+    for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+      const timeout = Math.round(BASE_TIMEOUT * (1 + (attempt - 1) * 0.6));
+
+      // 1) intentar obtener link existente
+      try {
+        const got = await tryGet(timeout, `try=${attempt} GET`);
+        if (got) return got;
+      } catch (e) {
+        // silencioso; seguimos a crear
+      }
+
+      // 2) intentar crear
+      try {
+        const created = await tryCreate(timeout, `try=${attempt} CREATE`);
+        if (created) return created;
+      } catch (e) {
+        // Si está "already exported" (exit 64), volvemos a GET y devolvemos
+        if (String(e.message || '').includes('exited 64')) {
+          try {
+            const got = await tryGet(timeout, `try=${attempt} GET-ON-64`);
+            if (got) return got;
+          } catch {}
+        }
+        // log leve
+        console.warn(`[${label}] intento=${attempt} warn: ${e.message}`);
+      }
+
+      if (attempt < ATTEMPTS) {
+        const backoff = 1000 + attempt * 1500;
+        await new Promise(r => setTimeout(r, backoff));
+      }
+    }
+    console.warn(`[${label}] sin link tras reintentos`);
+    return null;
+  }
+
+  try {
+    // 1) Cargar asset + cuentas
+    const asset = await prisma.asset.findUnique({
+      where: { id: assetId },
+      include: {
+        account: { include: { credentials: true } }, // main
+        replicas: {
+          where: { status: 'COMPLETED' },
+          include: { account: { include: { credentials: true } } }, // backups
+        },
+      },
+    });
+    if (!asset) return res.status(404).json({ message: 'Asset not found' });
+    if (!asset.account?.credentials) {
+      return res.status(400).json({ message: 'Main account has no credentials' });
+    }
+
+    const candidates = (asset.replicas || []).filter(r => r.account?.credentials);
+    if (!candidates.length) {
+      return res.status(409).json({ message: 'No completed backup replicas found' });
+    }
+
+    const chosen = preferBackupAccountId
+      ? (candidates.find(r => r.accountId === preferBackupAccountId) || candidates[0])
+      : candidates[0];
+
+    const mainAcc = asset.account;
+    const backupAcc = chosen.account;
+
+    // 2) Nombre de archivo
+    const fileName = asset.archiveName ? path.basename(asset.archiveName) : null;
+    if (!fileName) {
+      return res.status(409).json({ message: 'Asset has no archiveName to restore' });
+    }
+
+    // 3) Paths remotos (reproducir EXACTA estructura del backup en el main)
+    const backupBase = (backupAcc.baseFolder || '/').replaceAll('\\', '/');
+    const replicaFolderRaw = (chosen.remotePath ? chosen.remotePath.replaceAll('\\', '/') : null)
+      || path.posix.join(backupBase, asset.slug);
+    // relPath: qué hay por debajo del base del backup
+    let relFromBackupBase = path.posix.relative(backupBase, replicaFolderRaw);
+    if (!relFromBackupBase || relFromBackupBase.startsWith('..')) {
+      // si no cuelga del base, fallback al slug
+      relFromBackupBase = asset.slug;
+    }
+
+    const backupRemoteFile = path.posix.join(replicaFolderRaw, fileName);
+
+    const mainBase = (mainAcc.baseFolder || '/').replaceAll('\\', '/');
+    const mainRemoteFolder = path.posix.join(mainBase, relFromBackupBase);
+    const mainRemoteFile = path.posix.join(mainRemoteFolder, fileName);
+
+    // 4) Área temporal: SOLO TEMP_DIR
+    ensureDir(TEMP_DIR);
+    const localPath = path.join(TEMP_DIR, fileName);
+    try { if (fs.existsSync(localPath)) fs.unlinkSync(localPath); } catch {}
+
+    // 5) LOGIN backup -> mega-get
+    const backupCred = decryptToJson(
+      backupAcc.credentials.encData,
+      backupAcc.credentials.encIv,
+      backupAcc.credentials.encTag
+    );
+
+    await withMegaLock(async () => {
+      try { await runCmd('mega-logout', []); } catch {}
+      if (backupCred?.type === 'session' && backupCred.session) {
+        await runCmd('mega-login', [backupCred.session]);
+      } else if (backupCred?.username && backupCred?.password) {
+        await runCmd('mega-login', [backupCred.username, backupCred.password]);
+      } else {
+        throw new Error('Invalid backup credentials payload');
+      }
+
+      console.log(`[RESTORE] Download from backup acc=${backupAcc.id} path=${backupRemoteFile}`);
+      await runCmd('mega-get', [backupRemoteFile, '.'], { cwd: TEMP_DIR });
+
+      // Asegurar existencia local
+      if (!fs.existsSync(localPath)) {
+        const entries = fs.readdirSync(TEMP_DIR).filter(n => {
+          const p = path.join(TEMP_DIR, n);
+          return fs.existsSync(p) && fs.statSync(p).isFile();
+        });
+        const found = entries.find(n => n.toLowerCase() === fileName.toLowerCase()) || null;
+        if (found && found !== fileName) {
+          fs.renameSync(path.join(TEMP_DIR, found), localPath);
+        }
+      }
+      if (!fs.existsSync(localPath)) {
+        throw new Error('Downloaded file not found locally after mega-get');
+      }
+
+      try { await runCmd('mega-logout', []); } catch {}
+    }, `RESTORE-BACKUP-${backupAcc.id}`);
+
+    // 6) LOGIN main -> mkdir -p -> (opcional) evitar re-subida si ya existe -> export/get link
+    const mainCred = decryptToJson(
+      mainAcc.credentials.encData,
+      mainAcc.credentials.encIv,
+      mainAcc.credentials.encTag
+    );
+
+    let publicLink = null;
+
+    await withMegaLock(async () => {
+      try { await runCmd('mega-logout', []); } catch {}
+      if (mainCred?.type === 'session' && mainCred.session) {
+        await runCmd('mega-login', [mainCred.session]);
+      } else if (mainCred?.username && mainCred?.password) {
+        await runCmd('mega-login', [mainCred.username, mainCred.password]);
+      } else {
+        throw new Error('Invalid main credentials payload');
+      }
+
+      await safeMkdir(mainRemoteFolder);
+
+      // Si ya existe en MAIN, saltamos la subida (solo generamos/reusamos link)
+      let existsMain = false;
+      try { await runCmd('mega-ls', [mainRemoteFile]); existsMain = true; } catch {}
+
+      if (!existsMain) {
+        console.log(`[RESTORE] Upload to main acc=${mainAcc.id} dest=${mainRemoteFolder}`);
+        await runCmd('mega-put', [localPath, mainRemoteFolder]);
+      } else {
+        console.log('[RESTORE] Archivo ya existe en main. No se re-sube.');
+      }
+
+      // Recuperar/crear link (maneja "already exported")
+      publicLink = await getOrCreateLink(mainRemoteFile, 'RESTORE EXPORT');
+      if (publicLink) console.log(`[RESTORE] Link: ${publicLink}`);
+      else console.warn('[RESTORE] No se pudo obtener link público');
+
+      try { await runCmd('mega-logout', []); } catch {}
+    }, `RESTORE-MAIN-${mainAcc.id}`);
+
+    // 7) Actualizar DB
+    await prisma.asset.update({
+      where: { id: asset.id },
+      data: {
+        status: 'PUBLISHED',
+        megaLink: publicLink || undefined,
+        megaLinkAlive: publicLink ? true : null,
+        megaLinkCheckedAt: publicLink ? new Date() : null,
+      },
+    });
+
+    // 8) Limpieza TEMP
+    try { if (fs.existsSync(localPath)) fs.unlinkSync(localPath); } catch {}
+
+    // 9) Notificación
+    try {
+      await prisma.notification.create({
+        data: {
+          title: 'Asset restaurado desde backup',
+          body: `El asset "${asset.title}" (id: ${asset.id}) fue restaurado desde backup accId=${backupAcc.id} hacia la cuenta principal accId=${mainAcc.id}.`,
+          status: 'UNREAD',
+          type: 'AUTOMATION',
+          typeStatus: 'SUCCESS',
+        },
+      });
+    } catch {}
+
+    return res.json({ ok: true, link: publicLink });
+  } catch (err) {
+    console.error('[RESTORE] error:', err?.message || err);
+
+    // limpieza best-effort del TEMP
+    try {
+      const fileName = String(req?.body?.fileName || '');
+      if (fileName) {
+        const p = path.join(TEMP_DIR, path.basename(fileName));
+        if (fs.existsSync(p)) fs.unlinkSync(p);
+      }
+    } catch {}
+
+    try {
+      await prisma.notification.create({
+        data: {
+          title: 'Error al restaurar asset desde backup',
+          body: `Asset id=${assetId}. Detalle: ${err?.message || err}`,
+          status: 'UNREAD',
+          type: 'AUTOMATION',
+          typeStatus: 'ERROR',
+        },
+      });
+    } catch {}
+
+    return res.status(500).json({ message: 'Restore failed', error: String(err.message || err) });
+  }
+}

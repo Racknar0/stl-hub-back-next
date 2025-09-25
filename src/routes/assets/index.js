@@ -20,6 +20,7 @@ import {
   randomizeFree,
   listAssetReplicas,
   getFullProgress,
+  restoreAssetFromBackup,
 } from '../../controllers/asset.controller.js';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
 import { createBrokenReport } from '../../controllers/brokenReport.controller.js'
@@ -69,7 +70,7 @@ router.post('/:id/request-download', requestDownload);
 // Reportar link roto (público: no requiere login)
 router.post('/:id/report-broken-link', createBrokenReport);
 
-// A partir de aquí, requieren admin
+//! A partir de aquí, requieren admin
 router.use(requireAuth, requireAdmin)
 
 // Nuevo: randomizar freebies
@@ -96,5 +97,8 @@ router.post('/', createAsset);
 
 // Encolar manualmente (si no se usó flujo unificado)
 router.post('/:id/enqueue', enqueueUploadToMega);
+
+router.post('/:assetId/restore-link', restoreAssetFromBackup); // alias
+
 
 export default router;
