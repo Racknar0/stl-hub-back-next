@@ -39,6 +39,7 @@ model user {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+    @@map("user")
 }
 
 model role {
@@ -48,6 +49,7 @@ model role {
   users     user[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+    @@map("role")
 }
 
 // Suscripción simple: estado, fecha de compra y fecha de finalización del periodo actual
@@ -63,6 +65,7 @@ model subscription {
   updatedAt        DateTime           @updatedAt
 
   @@index([userId])
+    @@map("subscription")
 }
 
 enum SubscriptionStatus {
@@ -111,6 +114,7 @@ model megaAccount {
   assignedAsBackup  megaAccountBackup[]    @relation("BackupOfMainAccounts")    // Este account (backup) -> mains
   // Réplicas alojadas en esta cuenta cuando actúa como backup
   assetReplicas     AssetReplica[]
+    @@map("megaaccount")
 }
 
 model megaAccountBackup {
@@ -123,6 +127,7 @@ model megaAccountBackup {
 
   @@unique([mainAccountId, backupAccountId])
   @@index([backupAccountId])
+    @@map("megaaccountbackup")
 }
 
 enum AccountType {
@@ -140,6 +145,7 @@ model accountCredential {
   updatedAt DateTime     @updatedAt
 
   account   megaAccount  @relation(fields: [accountId], references: [id])
+    @@map("accountcredential")
 }
 
 enum AssetStatus {
@@ -193,6 +199,7 @@ model asset {
   replicas     AssetReplica[]
 
   @@index([accountId])
+    @@map("asset")
 }
 
 // Estado de una réplica del asset en cuentas backup
@@ -223,6 +230,7 @@ model AssetReplica {
   @@index([accountId])
   @@index([status])
   @@index([createdAt(sort: Desc)])
+    @@map("assetreplica")
 }
 
 model category {
@@ -235,6 +243,7 @@ model category {
   assets      asset[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+    @@map("category")
 }
 
 model tag {
@@ -249,6 +258,7 @@ model tag {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+    @@map("tag")
 }
 
 // Reportes de links rotos
@@ -270,6 +280,7 @@ model BrokenReport {
 
   @@index([createdAt(sort: Desc)])
   @@index([assetId])
+    @@map("brokenreport")
 }
 
 // Historial de descargas por usuario (máx 20 por usuario)
@@ -282,6 +293,7 @@ model DownloadHistory {
 
   @@index([userId])
   @@index([downloadedAt(sort: Desc)])
+    @@map("downloadhistory")
 }
 
 // Notificaciones internas (solo admin por ahora)
@@ -315,6 +327,7 @@ model Notification {
   updatedAt   DateTime           @updatedAt
 
   @@index([status])
+    @@map("notification")
 }
 
 
@@ -336,4 +349,5 @@ model Payment {
 
   @@index([provider])
   @@index([externalOrderId])
+    @@map("payment")
 }
