@@ -138,6 +138,31 @@ async function capturePayPalOrder(req, res) {
 
                 const dashboardLink = `${process.env.FRONT_URL}/`;
 
+                // Crear notificación interna para una nueva venta (según el modelo Notification)
+                try {
+                    const notifTitle = `Nueva compra - Order ${captureResult.id}`;
+                    const notifBody = [
+                        `Usuario ID: ${userId}`,
+                        `Usuario email: ${buyerEmail || 'N/D'}`,
+                        `Plan: ${selectedPlan?.name_es || planId}`,
+                        `Monto: ${selectedPlan?.price} ${selectedPlan?.currency}`,
+                        `Order ID: ${captureResult.id}`,
+                        `Proveedor: ${newPayment?.provider || 'PAYPAL'}`,
+                    ].join('\n');
+
+                    await prisma.notification.create({
+                        data: {
+                            title: notifTitle,
+                            body: notifBody,
+                            type: 'SALES',
+                            typeStatus: 'SUCCESS',
+                            status: 'UNREAD'
+                        }
+                    });
+                } catch (notifErr) {
+                    console.error('Error creando notificación tras venta:', notifErr);
+                }
+
                 // Texto plano y preheader
                 const buyerPreheader = isEn
                     ? 'Thanks for your purchase. Order details inside.'

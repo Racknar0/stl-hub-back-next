@@ -89,15 +89,26 @@ export const login = async (req, res) => {
     // Crear token JWT (incluye roleId)
     const token = generateJWT({ id: user.id, roleId: user.roleId });
 
-    // Respuesta:
-    // - Mantengo message/token como antes para no romper frontend.
-    // - Agrego "subscription" si quieres usarlo en /login directo (opcional).
-    return res.status(200).json({
-      message: language === 'en' ? 'Login successful' : 'Inicio de sesión exitoso',
-      token,
-      // 🔽 opcional, elimina si no lo vas a usar desde el front en /login
-      subscription: subscriptionPayload,
-    });
+        // Actualizar lastLogin en la base de datos
+        try {
+            await prisma.user.update({
+                where: { id: user.id },
+                data: { lastLogin: new Date() },
+            });
+        } catch (e) {
+            // No interrumpir el login si por alguna razón no se puede guardar la fecha
+            console.warn('Could not update lastLogin for user', user.id, e.message);
+        }
+
+        // Respuesta:
+        // - Mantengo message/token como antes para no romper frontend.
+        // - Agrego "subscription" si quieres usarlo en /login directo (opcional).
+        return res.status(200).json({
+            message: language === 'en' ? 'Login successful' : 'Inicio de sesión exitoso',
+            token,
+            // 🔽 opcional, elimina si no lo vas a usar desde el front en /login
+            subscription: subscriptionPayload,
+        });
   } catch (error) {
     console.error(error);
     return res.status(500).json({
