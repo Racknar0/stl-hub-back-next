@@ -385,20 +385,113 @@ export const register = async (req, res) => {
 
         // crear logica de envio de email
         const activationLink = `${process.env.FRONT_URL}/register?activate=${activationToken}`;
-        await transporter.sendMail({
-            to: email,
-            from: process.env.SMTP_EMAIL,
-            subject:
+        const transporterSend = await transporter.sendMail({
+        to: email,
+        from: process.env.SMTP_EMAIL,
+        subject:
+            language === 'en'
+            ? 'Activate your account'
+            : 'Activa tu cuenta',
+
+        // Texto plano (mejora la entregabilidad)
+        text:
+            (language === 'en'
+            ? [
+                'Confirm your email',
+                '',
+                'Thanks for signing up!',
+                'Open this link to activate your account:',
+                activationLink,
+                '',
+                'If you did not request this, you can ignore this message.'
+                ]
+            : [
+                'Confirma tu correo',
+                '',
+                '¡Gracias por registrarte!',
+                'Abre este enlace para activar tu cuenta:',
+                activationLink,
+                '',
+                'Si no solicitaste esto, puedes ignorar este mensaje.'
+                ]).join('\n'),
+
+            // HTML simple, sin imágenes, con botón de texto
+            html: `
+            <!doctype html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width">
+                <style>
+                .preheader{display:none!important;visibility:hidden;opacity:0;color:transparent;height:0;width:0;overflow:hidden;mso-hide:all}
+                .btn{display:inline-block;padding:12px 18px;border-radius:8px;text-decoration:none;font-weight:600}
+                @media (prefers-color-scheme: dark){
+                    body{background:#0b0b0c!important}
+                    .card{background:#111214!important;border-color:#2a2b2e!important}
+                    .text{color:#e6e7e9!important}
+                    .muted{color:#b5b7ba!important}
+                    .btn{background:#4f46e5!important;color:#fff!important}
+                }
+                </style>
+            </head>
+            <body style="margin:0;padding:0;background:#f6f7f9;">
+                <span class="preheader">${
                 language === 'en'
-                    ? 'Activate your account'
-                    : 'Activa tu cuenta',
-            html: `<p>${
-                language === 'en'
-                    ? 'Please click the link below to activate your account:'
-                    : 'Por favor, haz clic en el siguiente enlace para activar tu cuenta:'
-            }</p>
-             <p><a href="${activationLink}">${activationLink}</a></p>`,
+                    ? 'Confirm your email to finish setting up your account.'
+                    : 'Confirma tu correo para terminar de crear tu cuenta.'
+                }</span>
+
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="padding:24px 12px;">
+                <tr><td align="center">
+                    <table role="presentation" width="100%" style="max-width:600px;">
+                    <tr><td class="card" style="background:#ffffff;border:1px solid #e6e8eb;border-radius:12px;padding:28px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,'Helvetica Neue',sans-serif;line-height:1.55;">
+                        <h1 class="text" style="margin:0 0 6px;font-size:20px;font-weight:700;color:#0f172a;">
+                        ${language === 'en' ? 'Confirm your email' : 'Confirma tu correo'}
+                        </h1>
+                        <p class="muted" style="margin:0 0 18px;font-size:14px;color:#64748b;">
+                        ${language === 'en' ? 'Thanks for signing up!' : '¡Gracias por registrarte!'}
+                        </p>
+
+                        <p class="text" style="margin:0 0 20px;font-size:16px;color:#0f172a;">
+                        ${language === 'en'
+                            ? 'Click the button to activate your account:'
+                            : 'Haz clic en el botón para activar tu cuenta:'}
+                        </p>
+
+                        <p style="margin:0 0 20px;">
+                        <a href="${activationLink}" class="btn" style="background:#4f46e5;color:#ffffff;">
+                            ${language === 'en' ? 'Activate my account' : 'Activar mi cuenta'}
+                        </a>
+                        </p>
+
+                        <hr style="border:none;border-top:1px solid #e6e8eb;margin:22px 0;">
+
+                        <p class="text" style="margin:0 0 8px;font-size:14px;color:#0f172a;">
+                        ${language === 'en'
+                            ? 'If the button does not work, copy and paste this link:'
+                            : 'Si el botón no funciona, copia y pega este enlace:'}
+                        </p>
+                        <p style="word-break:break-all;margin:0;">
+                        <a href="${activationLink}" style="color:#4f46e5;text-decoration:underline;">${activationLink}</a>
+                        </p>
+
+                        <p class="muted" style="margin:16px 0 0;font-size:12px;color:#64748b;">
+                        ${language === 'en'
+                            ? 'If you did not request this, you can ignore this message.'
+                            : 'Si no solicitaste esto, puedes ignorar este mensaje.'}
+                        </p>
+                    </td></tr>
+                    </table>
+                </td></tr>
+                </table>
+            </body>
+            </html>
+        `.trim(),
+
+        // headers: { 'List-Unsubscribe': '<mailto:soporte@tudominio.com>' } // opcional
         });
+
+        console.log('Activation email sent:', transporterSend);
 
         return res.status(201).json({
             message: `${
