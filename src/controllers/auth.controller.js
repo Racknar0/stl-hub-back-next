@@ -162,14 +162,120 @@ export const forgotPassword = async (req, res) => {
 
         // Enviar el email de reseteo de contraseña
         await transporter.sendMail({
-            to: email,
-            from: process.env.SMTP_EMAIL,
-            subject:
+        to: email,
+        from: process.env.SMTP_EMAIL,
+        subject:
+            language === 'en'
+            ? 'Password Reset Request'
+            : 'Solicitud de restablecimiento de contraseña',
+
+        // Texto plano (mejora la entregabilidad)
+        text:
+            (language === 'en'
+            ? [
+                'Reset your password',
+                '',
+                'You requested a password reset.',
+                'Open this link to set a new password:',
+                resetLink,
+                '',
+                'This link will expire in 1 hour.',
+                'If you did not request this, you can ignore this message.'
+                ]
+            : [
+                'Restablece tu contraseña',
+                '',
+                'Has solicitado un restablecimiento de contraseña.',
+                'Abre este enlace para establecer una nueva contraseña:',
+                resetLink,
+                '',
+                'Este enlace expirará en 1 hora.',
+                'Si no solicitaste esto, puedes ignorar este mensaje.'
+                ]).join('\n'),
+
+        // HTML simple, sin imágenes, mismo estilo del anterior
+        html: `
+            <!doctype html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width">
+                <style>
+                .preheader{display:none!important;visibility:hidden;opacity:0;color:transparent;height:0;width:0;overflow:hidden;mso-hide:all}
+                .btn{display:inline-block;padding:12px 18px;border-radius:8px;text-decoration:none;font-weight:600}
+                @media (prefers-color-scheme: dark){
+                    body{background:#0b0b0c!important}
+                    .card{background:#111214!important;border-color:#2a2b2e!important}
+                    .text{color:#e6e7e9!important}
+                    .muted{color:#b5b7ba!important}
+                    .btn{background:#4f46e5!important;color:#fff!important}
+                }
+                </style>
+            </head>
+            <body style="margin:0;padding:0;background:#f6f7f9;">
+                <span class="preheader">${
                 language === 'en'
-                    ? 'Password Reset Request'
-                    : 'Solicitud de restablecimiento de contraseña',
-            html: `<p>${ language === 'en' ? 'You have requested a password reset.' : 'Has solicitado un restablecimiento de contraseña.' }</p> <p>${ language === 'en' ? 'Please click the link below to reset your password:' : 'Por favor, haz clic en el siguiente enlace para restablecer tu contraseña:' }</p> <p><a href="${resetLink}">${resetLink}</a></p> <p>${ language === 'en' ? 'This link will expire in 1 hour.' : 'Este enlace expirará en 1 hora.' }</p>`,
+                    ? 'Reset your password. This link expires in 1 hour.'
+                    : 'Restablece tu contraseña. Este enlace vence en 1 hora.'
+                }</span>
+
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="padding:24px 12px;">
+                <tr><td align="center">
+                    <table role="presentation" width="100%" style="max-width:600px;">
+                    <tr><td class="card" style="background:#ffffff;border:1px solid #e6e8eb;border-radius:12px;padding:28px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,'Helvetica Neue',sans-serif;line-height:1.55;">
+                        <h1 class="text" style="margin:0 0 6px;font-size:20px;font-weight:700;color:#0f172a;">
+                        ${language === 'en' ? 'Reset your password' : 'Restablece tu contraseña'}
+                        </h1>
+
+                        <p class="muted" style="margin:0 0 18px;font-size:14px;color:#64748b;">
+                        ${language === 'en'
+                            ? 'You requested a password reset.'
+                            : 'Has solicitado un restablecimiento de contraseña.'}
+                        </p>
+
+                        <p class="text" style="margin:0 0 20px;font-size:16px;color:#0f172a;">
+                        ${language === 'en'
+                            ? 'Click the button to create a new password:'
+                            : 'Haz clic en el botón para crear una nueva contraseña:'}
+                        </p>
+
+                        <p style="margin:0 0 20px;">
+                        <a href="${resetLink}" class="btn" style="background:#4f46e5;color:#ffffff;">
+                            ${language === 'en' ? 'Reset password' : 'Restablecer contraseña'}
+                        </a>
+                        </p>
+
+                        <p class="muted" style="margin:0 0 6px;font-size:12px;color:#64748b;">
+                        ${language === 'en'
+                            ? 'This link will expire in 1 hour.'
+                            : 'Este enlace expirará en 1 hora.'}
+                        </p>
+
+                        <hr style="border:none;border-top:1px solid #e6e8eb;margin:22px 0;">
+
+                        <p class="text" style="margin:0 0 8px;font-size:14px;color:#0f172a;">
+                        ${language === 'en'
+                            ? 'If the button does not work, copy and paste this link:'
+                            : 'Si el botón no funciona, copia y pega este enlace:'}
+                        </p>
+                        <p style="word-break:break-all;margin:0;">
+                        <a href="${resetLink}" style="color:#4f46e5;text-decoration:underline;">${resetLink}</a>
+                        </p>
+
+                        <p class="muted" style="margin:16px 0 0;font-size:12px;color:#64748b;">
+                        ${language === 'en'
+                            ? 'If you did not request this, you can ignore this message.'
+                            : 'Si no solicitaste esto, puedes ignorar este mensaje.'}
+                        </p>
+                    </td></tr>
+                    </table>
+                </td></tr>
+                </table>
+            </body>
+            </html>
+            `.trim(),
         });
+
 
         return res
             .status(200)
@@ -490,8 +596,6 @@ export const register = async (req, res) => {
 
         // headers: { 'List-Unsubscribe': '<mailto:soporte@tudominio.com>' } // opcional
         });
-
-        console.log('Activation email sent:', transporterSend);
 
         return res.status(201).json({
             message: `${
