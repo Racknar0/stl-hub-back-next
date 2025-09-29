@@ -66,26 +66,19 @@ async function createPayPalOrder(req, res) {
 // Capturar orden de pago
 async function capturePayPalOrder(req, res) {
     // 1. Recibir TODOS los datos necesarios del frontend
-    const { orderID, planId, userId } = req.body;
+    const { orderID, planId, userId, } = req.body;
 
     if (!orderID || !planId || !userId) {
         return res.status(400).json({ error: 'Faltan datos para capturar la orden (orderID, planId, userId)' });
     }
 
     const request = new paypal.orders.OrdersCaptureRequest(orderID);
-    console.log('request /*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*/*');
-    console.log(request);
 
     request.requestBody({});
 
     try {
         const capture = await client().execute(request);
         const captureResult = capture.result;
-
-        console.log('CAPTURE --------------------------');
-        console.log(capture);
-        console.log('CAPTURE RESULT **********************');
-        console.log(captureResult);
 
         // 2. VERIFICAR que el pago se completó
         if (captureResult.status === 'COMPLETED') {

@@ -9,7 +9,7 @@ export const getMyProfile = async (req, res) => {
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, email: true, createdAt: true }
+      select: { id: true, email: true, createdAt: true, language: true }
     });
     if (!user) return res.status(404).json({ message: 'User not found' });
 
@@ -36,6 +36,7 @@ export const getMyProfile = async (req, res) => {
 
     return res.json({
       email: user.email,
+      language: user.language || 'es',
       createdAt: user.createdAt,
       subscription: { status, currentPeriodEnd, daysRemaining }
     });
@@ -132,4 +133,26 @@ export const getMyStats = async (req, res) => {
   }
 };
 
-// extendMySubscriptionDays removido: ahora la UI abre el modal de planes
+export const updateMyLanguage = async (req, res) => {
+  try {
+    const userId = Number(req.user?.id);
+    if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+    const { language } = req.body;
+    console.log('Requested language update to:', language);
+    if (!language || (language !== 'es' && language !== 'en')) {
+      return res.status(400).json({ message: "Invalid language. Allowed values: 'es','en'" });
+    }
+
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data: { language },
+      select: { id: true, email: true, language: true, createdAt: true }
+    });
+
+    return res.json({ message: 'Language updated', user: updated });
+  } catch (e) {
+    console.error('[ME] updateMyLanguage error:', e);
+    return res.status(500).json({ message: 'Error updating language' });
+  }
+};
