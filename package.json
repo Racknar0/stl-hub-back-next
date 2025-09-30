@@ -1,11 +1,11 @@
 {
   "name": "backend-losrones",
   "version": "1.0.0",
-  "main": "app.js",
+  "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "node app.js --env-file=.env",
-    "dev": "nodemon --env-file=.env app.js",
+    "start": "node server.js --env-file=.env",
+    "dev": "nodemon --env-file=.env server.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "seed": "node ./seed/seed.js",
     "validate:last": "node ./src/utils/validateLastMeAccount.js"
