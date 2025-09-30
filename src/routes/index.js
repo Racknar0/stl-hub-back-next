@@ -10,6 +10,7 @@ import downloadsRoutes from './downloads/index.js';
 import meRoutes from './me/index.js';
 import notificationsRoutes from './notifications/index.js';
 import paymentsRoutes from './payments/index.js';
+import metricsRoutes from './metrics/index.js';
 
 const router = express.Router();
 
@@ -27,5 +28,6 @@ router.use('/admin/notifications', notificationsRoutes);
 
 router.use('/downloads', downloadsRoutes);
 router.use('/me', meRoutes);
+router.use('/metrics', metricsRoutes);
 
 export default router;
