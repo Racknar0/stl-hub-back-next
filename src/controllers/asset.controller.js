@@ -1682,11 +1682,21 @@ export const searchAssets = async (req, res) => {
             order = '',
             plan,
             isPremium,
+            pageIndex,
+            pageSize,
         } = req.query || {};
 
         const qStr = String(q || '').trim();
         const qLower = qStr.toLowerCase();
         const qSlug = qLower.replace(/[^a-z0-9-_]+/g, '-');
+
+        // Paginación (zero-based)
+        let page = Number.isFinite(Number(pageIndex)) ? Number(pageIndex) : 0;
+        if (!Number.isFinite(page) || page < 0) page = 0;
+        let size = Number.isFinite(Number(pageSize)) ? Number(pageSize) : 24;
+        if (!Number.isFinite(size) || size <= 0) size = 24;
+        // límites razonables para evitar respuestas gigantes
+        if (size > 96) size = 96;
 
         const catListRaw = String(categories || '')
             .split(',')
@@ -1745,39 +1755,58 @@ export const searchAssets = async (req, res) => {
         }
         if (andArr.length) where.AND = andArr;
 
-        const itemsDb = await prisma.asset.findMany({
-            where,
-            orderBy:
-                String(order).toLowerCase() === 'downloads'
-                    ? [{ downloads: 'desc' }, { id: 'desc' }]
-                    : { id: 'desc' },
-            take: 1000,
-            select: {
-                id: true,
-                title: true,
-                titleEn: true,
-                images: true,
-                isPremium: true,
-                downloads: true,
-                categories: {
-                    select: {
-                        id: true,
-                        name: true,
-                        nameEn: true,
-                        slug: true,
-                        slugEn: true,
-                    },
-                },
-                tags: {
-                    select: {
-                        slug: true,
-                        slugEn: true,
-                        name: true,
-                        nameEn: true,
-                    },
+        const baseSelect = {
+            id: true,
+            title: true,
+            titleEn: true,
+            images: true,
+            isPremium: true,
+            downloads: true,
+            categories: {
+                select: {
+                    id: true,
+                    name: true,
+                    nameEn: true,
+                    slug: true,
+                    slugEn: true,
                 },
             },
-        });
+            tags: {
+                select: {
+                    slug: true,
+                    slugEn: true,
+                    name: true,
+                    nameEn: true,
+                },
+            },
+        };
+
+        const orderBy =
+            String(order).toLowerCase() === 'downloads'
+                ? [{ downloads: 'desc' }, { id: 'desc' }]
+                : { id: 'desc' };
+
+        let itemsDb;
+        let total = 0;
+        if (!qLower) {
+            // Caso simple: sin término de búsqueda. Usamos count + skip/take para total real y página exacta.
+            total = await prisma.asset.count({ where });
+            itemsDb = await prisma.asset.findMany({
+                where,
+                orderBy,
+                skip: page * size,
+                take: size,
+                select: baseSelect,
+            });
+        } else {
+            // Caso con búsqueda: traemos un universo acotado y luego puntuamos en memoria.
+            itemsDb = await prisma.asset.findMany({
+                where,
+                orderBy,
+                take: 1000,
+                select: baseSelect,
+            });
+        }
 
         const scored = [];
         for (const it of itemsDb) {
@@ -1832,10 +1861,21 @@ export const searchAssets = async (req, res) => {
             );
         }
 
-        const out = (qLower ? scored.map(({ it }) => it) : itemsDb).slice(
-            0,
-            200
-        );
+        let out = [];
+        let hasMore = false;
+        if (qLower) {
+            // Lista completa en memoria (máximo 1000 por consulta a DB)
+            const outFull = scored.map(({ it }) => it);
+            total = outFull.length; // total = coincidencias
+            const start = page * size;
+            const end = start + size;
+            out = start < total ? outFull.slice(start, end) : [];
+            hasMore = end < total;
+        } else {
+            // Ya paginado con skip/take en la consulta
+            out = itemsDb;
+            hasMore = (page + 1) * size < total;
+        }
 
         const enriched = out.map((it) => {
             const rest = { ...it };
@@ -1849,7 +1889,7 @@ export const searchAssets = async (req, res) => {
             return { ...rest, tagsEs, tagsEn };
         });
 
-        return res.json({ items: enriched });
+    return res.json({ items: enriched, total, page, pageSize: size, hasMore });
     } catch (e) {
         console.error('[ASSETS] search error:', e);
         return res.status(500).json({ message: 'Error searching assets' });
