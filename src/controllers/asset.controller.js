@@ -171,6 +171,18 @@ async function generateUniqueSlug(base, maxTries = 50) {
     });
 }
 
+// Helper: convierte BigInt a Number recursivamente para respuestas JSON seguras
+function toJsonSafe(value) {
+    if (typeof value === 'bigint') return Number(value);
+    if (Array.isArray(value)) return value.map((v) => toJsonSafe(v));
+    if (value && typeof value === 'object') {
+        const out = {};
+        for (const [k, v] of Object.entries(value)) out[k] = toJsonSafe(v);
+        return out;
+    }
+    return value;
+}
+
 // Listar y obtener
 export const listAssets = async (req, res) => {
     try {
@@ -232,7 +244,8 @@ export const listAssets = async (req, res) => {
                 prisma.asset.count({ where }),
             ]);
 
-            return res.json({ items, total, page, pageSize: take });
+            const itemsSafe = toJsonSafe(items);
+            return res.json({ items: itemsSafe, total, page, pageSize: take });
         }
 
         const items = await prisma.asset.findMany({
@@ -255,7 +268,8 @@ export const listAssets = async (req, res) => {
             orderBy: { id: 'desc' },
             take: 50,
         });
-        return res.json(items);
+        const itemsSafe = toJsonSafe(items);
+        return res.json(itemsSafe);
     } catch (e) {
         console.error('[ASSETS] list error:', e);
         return res.status(500).json({ message: 'Error listing assets' });
@@ -295,7 +309,8 @@ export const getAsset = async (req, res) => {
             },
         });
         if (!asset) return res.status(404).json({ message: 'Asset not found' });
-        return res.json(asset);
+        const assetSafe = toJsonSafe(asset);
+        return res.json(assetSafe);
     } catch (e) {
         console.error('[ASSETS] getAsset error:', e);
         return res.status(500).json({ message: 'Error getting asset' });
@@ -331,7 +346,8 @@ export const updateAsset = async (req, res) => {
             data,
             include: { categories: true, tags: true },
         });
-        return res.json(updated);
+        const updatedSafe = toJsonSafe(updated);
+        return res.json(updatedSafe);
     } catch (e) {
         console.error('[ASSETS] update error:', e);
         return res.status(500).json({ message: 'Error updating asset' });
