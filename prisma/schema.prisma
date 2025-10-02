@@ -168,8 +168,8 @@ model asset {
 
   // Archivo del asset (opcional)
   archiveName  String?
-  archiveSizeB Int?
-  fileSizeB    Int?         // tamaño persistente del archivo original para mostrar info
+  archiveSizeB BigInt? @db.UnsignedBigInt
+  fileSizeB    BigInt? @db.UnsignedBigInt // tamaño persistente del archivo original para mostrar info
 
   // Imágenes asociadas (array de URLs o nombres)
   images       Json?

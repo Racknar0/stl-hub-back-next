@@ -577,11 +577,16 @@ export const logoutAccount = async (_req, res) => {
 export const listAccountAssets = async (req, res) => {
   try {
     const id = Number(req.params.id)
-    const items = await prisma.asset.findMany({
+    const itemsRaw = await prisma.asset.findMany({
       where: { accountId: id },
       orderBy: { id: 'desc' },
       select: { id: true, title: true, slug: true, fileSizeB: true, archiveSizeB: true, status: true, createdAt: true }
     })
+    const items = itemsRaw.map(it => ({
+      ...it,
+      fileSizeB: it.fileSizeB != null ? Number(it.fileSizeB) : null,
+      archiveSizeB: it.archiveSizeB != null ? Number(it.archiveSizeB) : null,
+    }))
     return res.json({ count: items.length, items })
   } catch (e) {
     console.error('[ACCOUNTS] listAccountAssets error:', e)

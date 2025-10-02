@@ -405,8 +405,8 @@ export const createAsset = async (req, res) => {
             const target = path.join(finalDir, fname);
             fs.renameSync(absTemp, target);
             archiveName = path.relative(UPLOADS_DIR, target);
-            const sz = fs.statSync(path.resolve(target)).size;
-            archiveSizeB = sz;
+            const szStat = fs.statSync(path.resolve(target), { bigint: true });
+            archiveSizeB = szStat.size; // BigInt
             megaLink = megaLink;
         }
 
@@ -439,7 +439,13 @@ export const createAsset = async (req, res) => {
                         : {}),
                 },
             });
-            return res.status(201).json(created);
+            // Convertir BigInt a Number para JSON
+            const createdSafe = {
+                ...created,
+                archiveSizeB: created.archiveSizeB != null ? Number(created.archiveSizeB) : null,
+                fileSizeB: created.fileSizeB != null ? Number(created.fileSizeB) : null,
+            };
+            return res.status(201).json(createdSafe);
         } catch (e) {
             if (e?.code === 'P2002') {
                 return res
@@ -718,8 +724,8 @@ export const createAssetFull = async (req, res) => {
             isPremium: Boolean(isPremium),
             accountId: accId,
             archiveName: path.relative(UPLOADS_DIR, archiveTarget),
-            archiveSizeB: fs.statSync(archiveTarget).size,
-            fileSizeB: fs.statSync(archiveTarget).size,
+            archiveSizeB: fs.statSync(archiveTarget, { bigint: true }).size, // BigInt
+            fileSizeB: fs.statSync(archiveTarget, { bigint: true }).size,    // BigInt
             images: imagesRel,
             status: 'PROCESSING',
         };
@@ -758,7 +764,13 @@ export const createAssetFull = async (req, res) => {
         );
 
         setTimeout(() => cleanTempDir(), 0);
-        return res.status(201).json(created);
+        // Convertir BigInt a Number para JSON
+        const createdSafe = {
+            ...created,
+            archiveSizeB: created.archiveSizeB != null ? Number(created.archiveSizeB) : null,
+            fileSizeB: created.fileSizeB != null ? Number(created.fileSizeB) : null,
+        };
+        return res.status(201).json(createdSafe);
     } catch (e) {
         console.error('[ASSETS] createFull error:', e);
         try {
