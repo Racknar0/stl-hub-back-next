@@ -1541,6 +1541,22 @@ export const deleteAsset = async (req, res) => {
         } catch (e) {
             console.warn('[ASSETS] rm images warn:', e.message);
         }
+        // Fallback: si la carpeta no se borró, intentar borrar por archivo según asset.images
+        try {
+            if (fs.existsSync(imgDir)) {
+                const imgs = Array.isArray(asset.images) ? asset.images : [];
+                for (const rel of imgs) {
+                    try {
+                        const abs = path.join(UPLOADS_DIR, rel);
+                        if (fs.existsSync(abs)) fs.unlinkSync(abs);
+                        // Intentar limpiar directorios vacíos bajo images
+                        try { removeEmptyDirsUp(path.dirname(abs), IMAGES_DIR) } catch {}
+                    } catch {}
+                }
+                // Intentar nuevamente eliminar el directorio del slug
+                try { if (fs.existsSync(imgDir)) fs.rmSync(imgDir, { recursive: true, force: true }) } catch {}
+            }
+        } catch {}
         try {
             if (fs.existsSync(archDir))
                 fs.rmSync(archDir, { recursive: true, force: true });
