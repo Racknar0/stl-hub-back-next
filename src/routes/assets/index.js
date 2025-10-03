@@ -21,6 +21,7 @@ import {
   listAssetReplicas,
   getFullProgress,
   restoreAssetFromBackup,
+  checkAssetUnique,
 } from '../../controllers/asset.controller.js';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
 import { createBrokenReport } from '../../controllers/brokenReport.controller.js'
@@ -65,7 +66,7 @@ const uploadCombined = multer({ storage: archiveStorage });
 router.get('/latest', latestAssets);
 router.get('/top', mostDownloadedAssets);
 router.get('/search', searchAssets);
-router.get('/:id', getAsset);
+router.get('/:id(\\d+)', getAsset);
 router.post('/:id/request-download', requestDownload);
 // Reportar link roto (público: no requiere login)
 router.post('/:id/report-broken-link', createBrokenReport);
@@ -78,6 +79,8 @@ router.post('/randomize-free', randomizeFree)
 
 // GET /assets?q=texto&pageIndex=0&pageSize=25 para paginación del lado del servidor
 router.get('/', listAssets);
+// Validación pre-flight de unicidad de slug/carpeta
+router.get('/check-unique', checkAssetUnique);
 router.get('/:id/progress', getAssetProgress);
 router.get('/:id/replicas', listAssetReplicas);
 router.get('/:id/full-progress', getFullProgress);

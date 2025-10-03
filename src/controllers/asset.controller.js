@@ -276,6 +276,35 @@ export const listAssets = async (req, res) => {
     }
 };
 
+// Verificar si un slug/carpeta ya existe (DB y/o FS local) y sugerir uno disponible
+export const checkAssetUnique = async (req, res) => {
+    try {
+        const raw = req.query?.slug || req.query?.folder || ''
+        const slug = safeName(String(raw))
+        if (!slug) return res.status(400).json({ message: 'slug required' })
+
+        let existsDb = false
+        try {
+            const found = await prisma.asset.findUnique({ where: { slug }, select: { id: true } })
+            console.log('[ASSETS] checkAssetUnique found:', found)
+            existsDb = !!found
+        } catch {}
+
+        const existsLocal = fs.existsSync(path.join(ARCHIVES_DIR, slug)) || fs.existsSync(path.join(IMAGES_DIR, slug))
+        const conflict = existsDb || existsLocal
+
+        let suggestion = slug
+        if (conflict) {
+            try { suggestion = await generateUniqueSlug(slug) } catch {}
+        }
+
+        return res.json({ slug, conflict, existsDb, existsLocal, suggestion })
+    } catch (e) {
+        console.error('[ASSETS] checkAssetUnique error:', e)
+        return res.status(500).json({ message: 'Error checking slug' })
+    }
+}
+
 // Obtener un asset específico con relaciones básicas
 export const getAsset = async (req, res) => {
     try {
