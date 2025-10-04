@@ -914,52 +914,101 @@ async function safeMkdir(remotePath) {
     });
 }
 
-// Helper: Auto-aceptar términos de MEGA cuando aparece el prompt
+// Helper: Auto-aceptar términos de MEGA y prompts interactivos (Windows/Linux)
 function attachAutoAcceptTerms(child, label = 'MEGA') {
-    let answered = false;
-    let sawCopyright = false;
+    const EOL = '\n'; // LF: funciona en Linux y Windows
+    let lastAnsweredAt = 0;
+    let lastPromptAt = 0;
+    let sawChoicePrompt = false;
 
     const ACCEPT_REGEXES = [
         /Do you accept\s+these\s+terms\??/i,
         /Do you accept.*terms\??/i,
+        /Type '\s*yes\s*' to continue/i,
         /Acepta[s]? .*t[ée]rminos\??/i,
+        /¿Acepta[s]? los t[ée]rminos\??/i,
     ];
     const COPYRIGHT_REGEXES = [
         /MEGA respects the copyrights/i,
         /You are strictly prohibited from using the MEGA cloud service/i,
         /copyright/i,
     ];
+    const PROMPT_YNA = /Please enter \[y\]es\/\[n\]o\/\[a\]ll\/none|\[(y|Y)\]es\s*\/\s*\[(n|N)\]o\s*\/\s*\[(a|A)\]ll/i;
+    const PROMPT_YN = /\[(y|Y)\]es\s*\/\s*\[(n|N)\]o/i;
+    const PROMPT_ES_SN = /\[(s|S)\]\s*\/\s*\[(n|N)\]/i;
+
+    const safeWrite = (txt, why) => {
+        try {
+            child.stdin.write(txt);
+            lastAnsweredAt = Date.now();
+            console.log(`[${label}] auto-answered (${why}) -> ${JSON.stringify(txt.trim())}`);
+        } catch (err) {
+            console.error(`[${label}] failed writing (${why}):`, err);
+        }
+    };
 
     const maybeAnswer = (s) => {
-        if (answered) return;
-        if (COPYRIGHT_REGEXES.some((r) => r.test(s))) {
-            sawCopyright = true;
-        }
+        const now = Date.now();
+        // Construir lista de respuestas a enviar en secuencia
+        const actions = [];
+
         if (ACCEPT_REGEXES.some((r) => r.test(s))) {
-            try {
-                child.stdin.write('Yes\r\n');
-                answered = true;
-                console.log(`[${label}] answered YES to terms`);
-            } catch (err) {
-                console.error(`[${label}] failed writing YES:`, err);
-            }
-            return;
+            actions.push(['yes' + EOL, 'terms']);
+            lastPromptAt = now;
         }
-        if (!answered && sawCopyright && /:\s*$/.test(s)) {
-            try {
-                child.stdin.write('Yes\r\n');
-                answered = true;
-                console.log(`[${label}] answered YES (fallback)`);
-            } catch (err) {
-                console.error(`[${label}] failed writing YES (fallback):`, err);
-            }
+        if (PROMPT_YNA.test(s)) {
+            actions.push(['a' + EOL, 'yna']);
+            lastPromptAt = now;
+            sawChoicePrompt = true;
+        } else if (PROMPT_YN.test(s)) {
+            actions.push(['y' + EOL, 'yn']);
+            lastPromptAt = now;
+            sawChoicePrompt = true;
+        } else if (PROMPT_ES_SN.test(s)) {
+            actions.push(['s' + EOL, 'sn']);
+            lastPromptAt = now;
+            sawChoicePrompt = true;
+        }
+
+        if (!actions.length && COPYRIGHT_REGEXES.some((r) => r.test(s)) && /:\s*$/.test(s)) {
+            // fallback genérico de EULA si termina en ':'
+            actions.push(['yes' + EOL, 'fallback-eula']);
+            lastPromptAt = now;
+        }
+
+        // Enviar todas las acciones con pequeños deltas para no chocar con el throttle
+        actions.forEach(([txt, why], i) => {
+            setTimeout(() => {
+                // Anti-flood suave: si acabamos de responder < 80ms, difiere un poco más
+                const since = Date.now() - lastAnsweredAt;
+                if (since < 80) {
+                    setTimeout(() => safeWrite(txt, why), 100 - since);
+                } else {
+                    safeWrite(txt, why);
+                }
+            }, i * 80);
+        });
+
+        // Failsafe: si vimos prompt de elección y no hubo respuesta efectiva en ~600ms, reintentar
+        if (sawChoicePrompt) {
+            setTimeout(() => {
+                const since = Date.now() - lastAnsweredAt;
+                if (since > 550) {
+                    const choice = PROMPT_YNA.test(s) ? 'a' : 'y';
+                    safeWrite(choice + EOL, 'failsafe-choice');
+                }
+            }, 600);
+        }
+
+        // Failsafe adicional tras 3s si seguimos sin respuesta
+        if (!actions.length && lastPromptAt && now - lastPromptAt > 3000) {
+            safeWrite('y' + EOL, 'failsafe-3s');
         }
     };
 
     const onData = (buf, isErr = false) => {
         const s = buf.toString();
         const trimmed = s.trim();
-        // Filtrar barras ASCII de transferencia para que no aparezcan como errores en el front
         if (/TRANSFERRING|Fetching nodes/i.test(trimmed)) return;
         if (isErr) console.warn(`[${label}] ${trimmed}`);
         else console.log(`[${label}] ${trimmed}`);
