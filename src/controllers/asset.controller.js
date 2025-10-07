@@ -689,10 +689,21 @@ export const enqueueUploadToMega = async (req, res) => {
 
 // Flujo unificado: recibe archivo + imágenes, crea asset atómico y encola subida a MEGA
 export const createAssetFull = async (req, res) => {
+    const startTime = Date.now();
+    console.log('🚀 [SERVER METRICS] ===== RECIBIENDO UPLOAD =====');
+    console.log('📊 [SERVER METRICS] Iniciado en:', new Date().toISOString());
+    
     let cleanupPaths = [];
+    let receivedBytes = 0;
+    let lastLogTime = startTime;
+    
     try {
         const { title, titleEn, categories, tags, isPremium, accountId } =
             req.body;
+        
+        const parseTime = Date.now();
+        console.log('📝 [SERVER METRICS] Body parseado en:', parseTime - startTime, 'ms');
+        
         if (!title) return res.status(400).json({ message: 'title required' });
         if (!accountId)
             return res.status(400).json({ message: 'accountId required' });
@@ -703,7 +714,22 @@ export const createAssetFull = async (req, res) => {
         if (!archiveFile)
             return res.status(400).json({ message: 'archive required' });
 
+        // Métricas de archivos recibidos
+        const archiveSize = archiveFile.size || 0;
+        const imagesSize = (imageFiles || []).reduce((s, f) => s + (f.size || 0), 0);
+        receivedBytes = archiveSize + imagesSize;
+        
+        console.log('📦 [SERVER METRICS] Archivos recibidos:', {
+            archiveSize: `${(archiveSize / (1024*1024)).toFixed(1)} MB`,
+            imagesCount: imageFiles?.length || 0,
+            imagesSize: `${(imagesSize / (1024*1024)).toFixed(1)} MB`,
+            totalSize: `${(receivedBytes / (1024*1024)).toFixed(1)} MB`,
+            elapsed: `${parseTime - startTime}ms`,
+            avgSpeed: `${((receivedBytes / (1024*1024)) / ((parseTime - startTime) / 1000)).toFixed(2)} MB/s`
+        });
+
         let slug;
+        const slugStart = Date.now();
         try {
             slug = await generateUniqueSlug(safeName(title));
         } catch (e) {
@@ -717,8 +743,10 @@ export const createAssetFull = async (req, res) => {
                     });
             throw e;
         }
+        console.log('🔤 [SERVER METRICS] Slug generado en:', Date.now() - slugStart, 'ms');
 
         // carpetas definitivas
+        const fsStart = Date.now();
         const archDir = path.join(ARCHIVES_DIR, slug); // archivo: sin carpeta por categoría
         const imgDir = path.join(IMAGES_DIR, slug); // imágenes solo por slug
         const thumbsDir = path.join(imgDir, 'thumbs');
@@ -731,8 +759,10 @@ export const createAssetFull = async (req, res) => {
         );
         const archiveTarget = path.join(archDir, targetName);
         fs.renameSync(archiveFile.path, archiveTarget);
+        console.log('📁 [SERVER METRICS] Archivo movido en:', Date.now() - fsStart, 'ms');
 
         const imagesRel = [];
+        const imageStart = Date.now();
         for (let i = 0; i < imageFiles.length; i++) {
             const f = imageFiles[i];
             const out = path.join(imgDir, `${Date.now()}_${i}.webp`);
@@ -750,7 +780,9 @@ export const createAssetFull = async (req, res) => {
             }
             imagesRel.push(path.relative(UPLOADS_DIR, out));
         }
+        console.log('🖼️ [SERVER METRICS] Imágenes procesadas en:', Date.now() - imageStart, 'ms');
 
+        const thumbsStart = Date.now();
         const thumbs = [];
         for (let i = 0; i < Math.min(2, imagesRel.length); i++) {
             const src = path.join(UPLOADS_DIR, imagesRel[i]);
@@ -761,6 +793,7 @@ export const createAssetFull = async (req, res) => {
                 .toFile(out);
             thumbs.push(path.relative(UPLOADS_DIR, out));
         }
+        console.log('🖼️ [SERVER METRICS] Thumbnails generados en:', Date.now() - thumbsStart, 'ms');
 
         const baseData = {
             title,
@@ -779,6 +812,7 @@ export const createAssetFull = async (req, res) => {
         const tagsParsed = parseTagsPayload(tags);
 
         let created;
+        const dbStart = Date.now();
         try {
             created = await prisma.asset.create({
                 data: {
@@ -791,6 +825,7 @@ export const createAssetFull = async (req, res) => {
                         : {}),
                 },
             });
+            console.log('💾 [SERVER METRICS] Asset creado en DB en:', Date.now() - dbStart, 'ms');
         } catch (e) {
             if (e?.code === 'P2002') {
                 return res
@@ -809,6 +844,22 @@ export const createAssetFull = async (req, res) => {
         );
 
         setTimeout(() => cleanTempDir(), 0);
+        
+        const endTime = Date.now();
+        const totalTime = endTime - startTime;
+        console.log('✅ [SERVER METRICS] Procesamiento completado:', {
+            totalTime: `${totalTime}ms`,
+            breakdown: {
+                parsing: `${parseTime - startTime}ms`,
+                slug: `${slugStart ? 'calculado' : 'N/A'}`,
+                fileOps: `${fsStart ? 'calculado' : 'N/A'}`,
+                images: `${imageStart ? Date.now() - imageStart : 'N/A'}ms`,
+                database: `${Date.now() - dbStart}ms`
+            },
+            efficiency: 'completed',
+            avgThroughput: `${((receivedBytes / (1024*1024)) / (totalTime / 1000)).toFixed(2)} MB/s`
+        });
+        
         // Convertir BigInt a Number para JSON
         const createdSafe = {
             ...created,
@@ -817,6 +868,13 @@ export const createAssetFull = async (req, res) => {
         };
         return res.status(201).json(createdSafe);
     } catch (e) {
+        const errorTime = Date.now();
+        console.error('❌ [SERVER METRICS] Error en procesamiento:', {
+            error: e?.message || String(e),
+            timeToError: `${errorTime - startTime}ms`,
+            receivedBytes: `${(receivedBytes / (1024*1024)).toFixed(1)} MB`,
+            phase: 'server_processing'
+        });
         console.error('[ASSETS] createFull error:', e);
         try {
             cleanupPaths.forEach((p) => {
@@ -834,6 +892,39 @@ export const createAssetFull = async (req, res) => {
             .status(500)
             .json({ message: 'Error creating asset', error: e.message });
     }
+};
+
+// Endpoint de prueba para medir velocidad pura de upload
+export const testUploadSpeed = async (req, res) => {
+    const startTime = Date.now();
+    console.log('🧪 [SPEED TEST] Iniciando test de velocidad');
+    
+    let receivedBytes = 0;
+    
+    req.on('data', chunk => {
+        receivedBytes += chunk.length;
+    });
+    
+    req.on('end', () => {
+        const endTime = Date.now();
+        const seconds = (endTime - startTime) / 1000;
+        const mbps = (receivedBytes / (1024 * 1024)) / seconds;
+        
+        const result = {
+            size: `${(receivedBytes / (1024*1024)).toFixed(1)} MB`,
+            time: `${seconds.toFixed(2)}s`,
+            speed: `${mbps.toFixed(2)} MB/s`,
+            timestamp: new Date().toISOString()
+        };
+        
+        console.log('🧪 [SPEED TEST] Resultado:', result);
+        res.json({ success: true, metrics: result });
+    });
+    
+    req.on('error', (err) => {
+        console.error('🧪 [SPEED TEST] Error:', err);
+        res.status(500).json({ error: err.message });
+    });
 };
 
 // Endpoint: progreso de subida a MEGA

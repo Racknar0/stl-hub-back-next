@@ -22,6 +22,7 @@ import {
   getFullProgress,
   restoreAssetFromBackup,
   checkAssetUnique,
+  testUploadSpeed,
 } from '../../controllers/asset.controller.js';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
 import { createBrokenReport } from '../../controllers/brokenReport.controller.js'
@@ -100,6 +101,9 @@ router.post('/', createAsset);
 
 // Encolar manualmente (si no se usó flujo unificado)
 router.post('/:id/enqueue', enqueueUploadToMega);
+
+// Test endpoint para medir velocidad pura de upload
+router.post('/test-upload-speed', testUploadSpeed);
 
 router.post('/:assetId/restore-link', restoreAssetFromBackup); // alias
 
