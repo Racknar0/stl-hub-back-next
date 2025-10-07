@@ -11,16 +11,19 @@ import { log } from './src/utils/logger.js';
 const app = express();
 
 app.use(cors());
-// Skip JSON/urlencoded parsers for the multipart upload endpoint to avoid
-// buffering multipart bodies and conflicting with multer. This improves upload performance.
-app.use(unless(
-	(req) => req.path === '/api/assets/upload' && req.method === 'POST',
-	express.json()
-));
-app.use(unless(
-	(req) => req.path === '/api/assets/upload' && req.method === 'POST',
-	express.urlencoded({ extended: true })
-));
+// No aplicar parsers JSON/urlencoded cuando el request es multipart/form-data (cualquier ruta).
+// En algunos despliegues (p.ej., NGINX) la URL puede reescribirse y el matcher por ruta deja de coincidir.
+// Detectar por Content-Type es más robusto y evita conflictos con Multer, mejorando el rendimiento de uploads.
+const isMultipart = (req) => {
+	try {
+		const ct = req.headers['content-type'] || '';
+		return /multipart\/form-data/i.test(ct);
+	} catch {
+		return false;
+	}
+};
+app.use(unless(isMultipart, express.json()));
+app.use(unless(isMultipart, express.urlencoded({ extended: true })));
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
