@@ -1006,6 +1006,33 @@ export const getStagedStatus = async (req, res) => {
     }
 };
 
+// GET /api/assets/scp-config (admin-only)
+// Devuelve configuración de SCP desde el servidor (no incluye password)
+export const getScpConfig = async (_req, res) => {
+    try {
+        const host = process.env.SCP_HOST || '';
+        const user = process.env.SCP_USER || '';
+        const port = Number(process.env.SCP_PORT || 22);
+        const remoteBase = process.env.SCP_REMOTE_BASE || '';
+        return res.json({ host, user, port, remoteBase });
+    } catch (e) {
+        return res.status(500).json({ message: 'Error getting SCP config' });
+    }
+};
+
+// GET /api/assets/uploads-root (admin-only, debug)
+export const getUploadsRoot = async (_req, res) => {
+    try {
+        return res.json({
+            uploadsDir: path.resolve(UPLOADS_DIR),
+            tempDir: path.resolve(TEMP_DIR),
+            cwd: process.cwd(),
+        });
+    } catch (e) {
+        return res.status(500).json({ message: 'Error getting uploads root' });
+    }
+};
+
 async function runCmd(cmd, args = [], options = {}) {
     return new Promise((resolve, reject) => {
         const child = spawn(cmd, args, { shell: true, ...options });
