@@ -23,6 +23,7 @@ import {
   restoreAssetFromBackup,
   checkAssetUnique,
   testUploadSpeed,
+  getStagedStatus,
 } from '../../controllers/asset.controller.js';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
 import { createBrokenReport } from '../../controllers/brokenReport.controller.js'
@@ -85,6 +86,8 @@ router.get('/check-unique', checkAssetUnique);
 router.get('/:id/progress', getAssetProgress);
 router.get('/:id/replicas', listAssetReplicas);
 router.get('/:id/full-progress', getFullProgress);
+// Nuevo: estado de archivo staged en uploads/tmp (para flujo SCP)
+router.get('/staged-status', getStagedStatus);
 router.put('/:id', updateAsset);
 router.delete('/:id', deleteAsset);
 

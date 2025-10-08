@@ -965,6 +965,47 @@ export const getAssetProgress = async (req, res) => {
     }
 };
 
+// GET /api/assets/staged-status?path=tmp/<batch>/<file>&expectedSize=<bytes>
+// Devuelve si existe el archivo en uploads/tmp, su tamaño actual y porcentaje estimado.
+export const getStagedStatus = async (req, res) => {
+    try {
+        const rel = String(req.query?.path || '').trim();
+        if (!rel) return res.status(400).json({ message: 'path required' });
+
+        // Normalizar y asegurar que apunta dentro de uploads/tmp
+        const normRel = rel.replace(/\\/g, '/').replace(/^\/+/, '');
+        const abs = path.join(UPLOADS_DIR, normRel);
+        const tmpRoot = path.resolve(TEMP_DIR) + path.sep; // uploads/tmp/
+        const absResolved = path.resolve(abs);
+        if (!absResolved.startsWith(tmpRoot)) {
+            return res.status(400).json({ message: 'invalid path (must be under uploads/tmp)' });
+        }
+
+        let exists = false;
+        let sizeB = 0;
+        let mtimeMs = 0;
+        try {
+            const st = fs.statSync(absResolved);
+            if (st.isFile()) {
+                exists = true;
+                sizeB = Number(st.size);
+                mtimeMs = Number(st.mtimeMs);
+            }
+        } catch {}
+
+        const expected = Number(req.query?.expectedSize || 0);
+        let percent = undefined;
+        if (exists && expected > 0) {
+            percent = Math.max(0, Math.min(100, Math.floor((sizeB / expected) * 100)));
+        }
+
+        return res.json({ exists, path: normRel, sizeB, mtimeMs, percent });
+    } catch (e) {
+        console.error('[ASSETS] staged-status error:', e);
+        return res.status(500).json({ message: 'Error getting staged status' });
+    }
+};
+
 async function runCmd(cmd, args = [], options = {}) {
     return new Promise((resolve, reject) => {
         const child = spawn(cmd, args, { shell: true, ...options });
