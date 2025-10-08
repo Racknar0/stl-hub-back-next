@@ -10,7 +10,34 @@ import { log } from './src/utils/logger.js';
 
 const app = express();
 
-app.use(cors());
+// CORS robusto: permitir orígenes configurables y manejar preflight
+const allowedOrigins = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+const corsOptions = {
+	origin: (origin, callback) => {
+		// Permitir sin Origin (p.ej. curl) o si no se configuró whitelist
+		if (!origin || allowedOrigins.length === 0) return callback(null, true);
+		// Coincidencia exacta
+		if (allowedOrigins.includes(origin)) return callback(null, true);
+		// Permitir subdominios si están definidos como *.dominio
+		const ok = allowedOrigins.some(o => o.startsWith('*.') && origin.endsWith(o.slice(1)));
+		if (ok) return callback(null, true);
+		return callback(new Error('CORS: Origin no permitido: ' + origin), false);
+	},
+	credentials: true,
+	methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+	allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+	exposedHeaders: ['Content-Length'],
+	optionsSuccessStatus: 204,
+};
+
+app.use((req, res, next) => {
+	// Ayuda a caches/CDN a variar por origen
+	res.setHeader('Vary', 'Origin');
+	next();
+});
+app.use(cors(corsOptions));
+// Asegurar manejo de preflight, incluso si NGINX reenvía OPTIONS
+app.options('*', cors(corsOptions));
 // No aplicar parsers JSON/urlencoded cuando el request es multipart/form-data (cualquier ruta).
 // En algunos despliegues (p.ej., NGINX) la URL puede reescribirse y el matcher por ruta deja de coincidir.
 // Detectar por Content-Type es más robusto y evita conflictos con Multer, mejorando el rendimiento de uploads.

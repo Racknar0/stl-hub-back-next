@@ -41,9 +41,22 @@ export function installConsoleHook() {
 
 // SSE handler
 export function logsSSEHandler(req, res) {
+  // CORS para SSE (en caso de que pase directo al Node sin middleware o en HTTP/2)
+  try {
+    const origin = req.headers.origin;
+    if (origin) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+    }
+  } catch {}
+
+  // Cabeceras SSE y anti-buffering (nginx/proxies)
   res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.setHeader('Keep-Alive', 'timeout=60');
   res.flushHeaders && res.flushHeaders();
 
   const send = (data) => {
@@ -59,7 +72,13 @@ export function logsSSEHandler(req, res) {
   logBus.on('log', listener);
 
   // Ping para mantener conexión
-  const pingInterval = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 15000);
+  // Pings periódicos; algunos proxies esperan data real
+  const pingInterval = setInterval(() => {
+    try {
+      res.write(`event: ping\n`);
+      res.write(`data: ${Date.now()}\n\n`);
+    } catch {}
+  }, 15000);
 
   req.on('close', () => {
     clearInterval(pingInterval);
