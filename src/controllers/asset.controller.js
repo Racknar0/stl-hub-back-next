@@ -43,7 +43,15 @@ function purgeDirContents(dir) {
 }
 
 function preUploadCleanup() {
-    purgeDirContents(TEMP_DIR);
+    // Limpieza segura: no vaciar completamente tmp para no borrar archivos en staging (SCP)
+    // En su lugar, eliminar solo temporales antiguos y omitir carpetas de staging (por ejemplo, batch_*)
+    try {
+        const hours = Number(process.env.TEMP_CLEAN_MAX_AGE_HOURS || 48);
+        cleanTempDirRecursive(hours * 60 * 60 * 1000);
+    } catch (e) {
+        console.warn('[CLEANUP] preUploadCleanup temp warn:', e.message);
+    }
+    // sync-cache puede purgarse completamente sin riesgo
     purgeDirContents(SYNC_CACHE_DIR);
 }
 
@@ -89,6 +97,46 @@ function cleanTempDir(maxAgeMs = 20 * 60 * 1000) {
         }
     } catch (e) {
         console.warn('[CLEANUP] temp dir cleanup warn:', e.message);
+    }
+}
+
+// Limpieza recursiva de uploads/tmp por antigüedad.
+// - No borra directorios de staging que coincidan con skipDirRegex (por defecto /^batch_/)
+// - Elimina archivos con mtime más antiguo que maxAgeMs en subcarpetas permitidas
+// - Intenta eliminar directorios vacíos tras la limpieza
+function cleanTempDirRecursive(maxAgeMs = 48 * 60 * 60 * 1000, { skipDirRegex = /^batch_/ } = {}) {
+    try {
+        const now = Date.now();
+        const walk = (dir) => {
+            if (!fs.existsSync(dir)) return;
+            const entries = fs.readdirSync(dir);
+            for (const name of entries) {
+                const p = path.join(dir, name);
+                try {
+                    const st = fs.statSync(p);
+                    if (st.isDirectory()) {
+                        if (skipDirRegex && skipDirRegex.test(name)) {
+                            // No entrar en carpetas de staging activas
+                            continue;
+                        }
+                        walk(p);
+                        // Intentar borrar si quedó vacía
+                        try {
+                            const items = fs.readdirSync(p);
+                            if (items.length === 0) fs.rmdirSync(p);
+                        } catch {}
+                    } else if (st.isFile()) {
+                        const age = now - Number(st.mtimeMs);
+                        if (age > maxAgeMs) {
+                            try { fs.unlinkSync(p); } catch {}
+                        }
+                    }
+                } catch {}
+            }
+        };
+        walk(TEMP_DIR);
+    } catch (e) {
+        console.warn('[CLEANUP] recursive temp cleanup warn:', e.message);
     }
 }
 function removeEmptyDirsUp(startDir, stopDir) {

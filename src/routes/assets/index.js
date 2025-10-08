@@ -75,6 +75,13 @@ router.post('/:id/request-download', requestDownload);
 // Reportar link roto (público: no requiere login)
 router.post('/:id/report-broken-link', createBrokenReport);
 
+// IMPORTANTE: Endpoints de progreso deben ser públicos para no desconectar al usuario por expiración del token
+router.get('/:id/progress', getAssetProgress);
+router.get('/:id/replicas', listAssetReplicas);
+router.get('/:id/full-progress', getFullProgress);
+// Estado de archivo staged en uploads/tmp (para flujo SCP) también sin auth
+router.get('/staged-status', getStagedStatus);
+
 //! A partir de aquí, requieren admin
 router.use(requireAuth, requireAdmin)
 
@@ -85,11 +92,6 @@ router.post('/randomize-free', randomizeFree)
 router.get('/', listAssets);
 // Validación pre-flight de unicidad de slug/carpeta
 router.get('/check-unique', checkAssetUnique);
-router.get('/:id/progress', getAssetProgress);
-router.get('/:id/replicas', listAssetReplicas);
-router.get('/:id/full-progress', getFullProgress);
-// Nuevo: estado de archivo staged en uploads/tmp (para flujo SCP)
-router.get('/staged-status', getStagedStatus);
 // Nuevo: configuración SCP del servidor (seguro, sin password)
 router.get('/scp-config', getScpConfig);
 router.get('/uploads-root', getUploadsRoot);
