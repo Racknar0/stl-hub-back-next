@@ -632,54 +632,28 @@ export const enqueueUploadToMega = async (req, res) => {
                 .status(400)
                 .json({ message: 'Archive not found on server' });
 
-        // Destino remoto en MEGA: raíz del baseFolder + slug (sin categoría)
+        // Log destino (informativo)
         const remoteBase = account.baseFolder || '/';
         const remotePath = path.posix.join(
             remoteBase.replaceAll('\\', '/'),
             asset.slug
         );
-
         console.log(
             `[ASSETS] enqueue upload asset id=${id} to MEGA ${remotePath}`
         );
 
-        const child = spawn(
-            'powershell.exe',
-            [
-                '-NoProfile',
-                '-Command',
-                `Write-Host "Uploading to MEGA... ${asset.slug}"; Start-Sleep -s 1; Write-Host "25%"; Start-Sleep -s 1; Write-Host "50%"; Start-Sleep -s 1; Write-Host "75%"; Start-Sleep -s 1; Write-Host "100% done"`,
-            ],
-            { shell: false }
-        );
-        child.stdout.on('data', (d) =>
-            console.log(`[MEGA-UP] ${d.toString().trim()}`)
-        );
-        child.stderr.on('data', (d) =>
-            console.error(`[MEGA-UP-ERR] ${d.toString().trim()}`)
-        );
-        child.on('close', async (code) => {
-            if (code === 0) {
-                console.log(`[MEGA-UP] upload finished for asset id=${id}`);
-                await prisma.asset.update({
-                    where: { id },
-                    data: { status: 'PUBLISHED' },
+        // Marcar como en proceso y disparar subida real a MEGA en background
+        await prisma.asset.update({ where: { id }, data: { status: 'PROCESSING' } });
+        setImmediate(() => {
+            enqueueToMegaReal(asset)
+                .catch(async (err) => {
+                    console.error('[ASSETS] enqueueToMegaReal error:', err);
+                    try {
+                        await prisma.asset.update({ where: { id }, data: { status: 'FAILED' } });
+                    } catch {}
                 });
-            } else {
-                console.error(
-                    `[MEGA-UP] upload failed for asset id=${id} code=${code}`
-                );
-                await prisma.asset.update({
-                    where: { id },
-                    data: { status: 'FAILED' },
-                });
-            }
         });
 
-        await prisma.asset.update({
-            where: { id },
-            data: { status: 'PROCESSING' },
-        });
         return res.json({ message: 'Enqueued', status: 'PROCESSING' });
     } catch (e) {
         console.error('[ASSETS] enqueue error:', e);
