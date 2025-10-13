@@ -10,9 +10,9 @@ import { log } from './logger.js'
 /*
   Script: validateAssetsOnLastAccount (REFACTORED to auto-restore MAIN)
   Objetivo:
-    - Seleccionar la cuenta MAIN con lastCheckAt más antigua (NULL primero) que tenga al menos un backup asociado y assets en los backups.
+    - Seleccionar la cuenta MAIN con lastCheckAt más antigua (NULL primero) que tenga al menos un backup asociado.
       Override: MAIN_ACCOUNT_ID
-    - Escanear el MAIN y detectar assets existentes vs faltantes (fase 1 de syncBackupsToMain).
+    - Escanear TODOS los assets pertenecientes a esa MAIN y detectar existentes vs faltantes (fase 1).
     - Descargar desde backups sólo los faltantes (fase 2).
     - Subirlos al MAIN regenerando link público y marcando status PUBLISHED (fase 3).
     - Regenerar link para los que existen pero no tienen megaLink.
@@ -62,7 +62,6 @@ async function megaLogin(payload, ctx){
       return
     } catch (e){
       log.warn(`[MEGA][LOGIN][FAIL] intento=${attempt} ${ctx} msg=${e.message}`)
-             body: `Ocurrió un error al restaurar backups hacia assets (main=${main?.id||'?'}, email=${main?.email || '--'}) (script): ${e.message}`,
       await new Promise(r=>setTimeout(r, 500*attempt))
     }
   }
@@ -70,6 +69,7 @@ async function megaLogin(payload, ctx){
 async function megaLogout(ctx){ try { await runCmd('mega-logout',[],{ quiet:true }); log.info(`[MEGA][LOGOUT][OK] ${ctx}`) } catch(e){ log.warn(`[MEGA][LOGOUT][WARN] ${ctx} ${e.message}`) } }
 
 export async function runAutoRestoreMain(){
+  const tStart = Date.now()
   const forced = process.env.MAIN_ACCOUNT_ID?Number(process.env.MAIN_ACCOUNT_ID):null
   const maxAssets = process.env.MAX_ASSETS?Number(process.env.MAX_ASSETS):null
   let main
@@ -98,26 +98,27 @@ export async function runAutoRestoreMain(){
     const backupAccounts = (main.backups||[]).map(r=>r.backupAccount).filter(Boolean)
     if (!backupAccounts.length){ log.info('[CRON] Main sin backups asociados'); return { ok:true, skipped:true, reason:'NO_BACKUPS' } }
 
-    const backupIds = backupAccounts.map(b=>b.id)
-    const replicas = await prisma.assetReplica.findMany({ where:{ accountId:{ in: backupIds } }, include:{ asset:true } })
-    const assetMap = new Map()
-    for (const r of replicas){ if (r.asset) assetMap.set(r.asset.id, r.asset) }
-    let candidateAssets = Array.from(assetMap.values())
+    // Tomar TODOS los assets pertenecientes a la MAIN
+    let candidateAssets = await prisma.asset.findMany({
+      where: { accountId: main.id },
+      select: { id: true, slug: true, archiveName: true, megaLink: true }
+    })
+    const assetMap = new Map(candidateAssets.map(a => [a.id, a]))
     if (maxAssets) candidateAssets = candidateAssets.slice(0, maxAssets)
-    if (!candidateAssets.length){ log.info('[CRON] No hay replicas en backups'); return { ok:true, skipped:true, reason:'NO_REPLICAS' } }
+    if (!candidateAssets.length){ log.info('[CRON] Main sin assets'); return { ok:true, skipped:true, reason:'NO_ASSETS' } }
 
-    log.info('__________________________________________________')
-    log.info('___________ INICIANDO RECUPERACION (CRON) ___________')
-    log.info('__________________________________________________')
-    log.info(`[CRON][RESTORE] main=${main.id} assetsBackups=${candidateAssets.length} backups=${backupAccounts.length}`)
-    log.info('[CRON][RESTORE] Lista assets: '+candidateAssets.map(a=>a.id).join(', '))
+  log.info('__________________________________________________')
+  log.info('____ INICIANDO RECUPERACIÓN AUTOMÁTICA (CRON) ____')
+  log.info('__________________________________________________')
+  log.info(`[CRON][RESUMEN] Cuenta MAIN id=${main.id} alias=${main.alias||'--'} email=${main.email||'--'} assets=${candidateAssets.length} backups=${backupAccounts.length}`)
+  log.info('[CRON][DETALLE] Lista de assets a verificar: '+candidateAssets.map(a=>a.id).join(', '))
 
-    const existingSet = new Set()
-    const needDownload = new Map()
-    const recovered = new Map()
+  const existingSet = new Set()
+  const needDownload = new Map() // assetId -> asset
+  const recovered = new Map()    // assetId -> { fileName, localTemp, size }
     let regeneratedLinks=0, restored=0
 
-    // FASE 1
+    // FASE 1: Escaneo en MAIN (existentes vs faltantes) y re-export de links faltantes
     await withMegaLock(async () => {
       const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
       await megaLogout(buildCtx(main))
@@ -143,7 +144,7 @@ export async function runAutoRestoreMain(){
               const exp= await runCmd('mega-export',['-a', remoteFile],{ quiet:true })
               const m = exp.out.match(/https?:\/\/mega\.nz\/\S+/i)
               if (m){ await prisma.asset.update({ where:{ id: asset.id }, data:{ megaLink:m[0], status:'PUBLISHED' } }); regeneratedLinks++; }
-            } catch (e){ log.warn(`[CRON][SCAN] fallo link asset=${asset.id} ${e.message}`) }
+            } catch (e){ log.warn(`[CRON][ESCANEO] No se pudo regenerar link para asset=${asset.id} -> ${e.message}`) }
           }
         } else {
           needDownload.set(asset.id, asset)
@@ -151,8 +152,9 @@ export async function runAutoRestoreMain(){
       }
       await megaLogout(buildCtx(main))
     }, 'CRON-PHASE1')
+    log.info(`[CRON][RESUMEN][FASE1] existentes=${existingSet.size} faltantes=${needDownload.size} linksRegenerados=${regeneratedLinks}`)
 
-    // FASE 2
+    // FASE 2: Descargar faltantes desde BACKUPs
     if (needDownload.size){
       for (const b of backupAccounts){
         if (!needDownload.size) break
@@ -171,16 +173,16 @@ export async function runAutoRestoreMain(){
               if (fs.existsSync(localTemp)){
                 const size = fs.statSync(localTemp).size
                 recovered.set(asset.id,{ fileName, localTemp, size }); needDownload.delete(asset.id)
-                log.info(`[CRON][DL] asset=${asset.id} backup=${b.id} size=${size}`)
+                log.info(`[CRON][DESCARGA] asset=${asset.id} desde backup=${b.id} bytes=${size}`)
               }
-            } catch (e){ log.warn(`[CRON][DL] fallo asset=${asset.id} backup=${b.id} ${e.message}`) }
+            } catch (e){ log.warn(`[CRON][DESCARGA] fallo asset=${asset.id} desde backup=${b.id} -> ${e.message}`) }
           }
           await megaLogout(buildCtx(b))
         }, `CRON-DL-${b.id}`)
       }
     }
 
-    // FASE 3
+    // FASE 3: Subir a MAIN y exportar link
     await withMegaLock(async () => {
       if (recovered.size){
         const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
@@ -199,8 +201,8 @@ export async function runAutoRestoreMain(){
             if (!m) throw new Error('No link')
             await prisma.asset.update({ where:{ id: asset.id }, data:{ megaLink:m[0], status:'PUBLISHED' } })
             restored++
-            log.info(`[CRON][UP] asset=${asset.id} ok`)
-          } catch (e){ log.error(`[CRON][UP] fallo asset=${asset.id} ${e.message}`) }
+            log.info(`[CRON][SUBIDA] asset=${asset.id} restaurado y publicado`)
+          } catch (e){ log.error(`[CRON][SUBIDA] fallo asset=${asset.id} -> ${e.message}`) }
           finally { try { if (fs.existsSync(info.localTemp)) fs.unlinkSync(info.localTemp) } catch{} }
         }
         await megaLogout(buildCtx(main))
@@ -209,19 +211,21 @@ export async function runAutoRestoreMain(){
 
     const skippedExisting = existingSet.size
     const notRecovered = Array.from(needDownload.keys()).length
-    log.info(`[CRON][RESTORE] Finalizado main=${main.id} total=${candidateAssets.length} restaurados=${restored} existentes=${skippedExisting} linksRegenerados=${regeneratedLinks} noRecuperados=${notRecovered}`)
+    const durMs = Date.now() - tStart
+    const completos = (restored===0 && skippedExisting===candidateAssets.length)
+    if (completos){
+      log.info(`[CRON][FINAL] Assets COMPLETOS para MAIN alias=${main.alias||'--'} (id=${main.id}). total=${candidateAssets.length} (existentes=${skippedExisting}, restaurados=0, linksRegenerados=${regeneratedLinks}). duraciónMs=${durMs}`)
+    } else {
+      log.info(`[CRON][FINAL] MAIN alias=${main.alias||'--'} (id=${main.id}). total=${candidateAssets.length} restaurados=${restored} existentes=${skippedExisting} linksRegenerados=${regeneratedLinks} noRecuperados=${notRecovered} duraciónMs=${durMs}`)
+    }
     await prisma.megaAccount.update({ where:{ id: main.id }, data:{ lastCheckAt: new Date() } }).catch(()=>{})
     // Notificación: backup → assets (script)
     try {
-      await prisma.notification.create({
-        data: {
-          title: `Restauración automática de backups a assets completada`,
-          body: `Se restauraron ${restored} assets desde backups hacia la cuenta principal (main=${main.id}, email=${main.email}). Existentes: ${skippedExisting}, links regenerados: ${regeneratedLinks}, no recuperados: ${notRecovered}.`,
-          status: 'UNREAD',
-          type: 'AUTOMATION',
-          typeStatus: 'SUCCESS'
-        }
-      })
+      const notifTitle = completos ? 'Validación de assets en MAIN: todo completo' : 'Restauración automática de assets desde backups completada'
+      const notifBody = completos
+        ? `Cuenta MAIN ${main.alias||'--'} (${main.email||'--'}). Total: ${candidateAssets.length}. Todos existentes. Links regenerados: ${regeneratedLinks}. Duración: ${durMs} ms.`
+        : `Cuenta MAIN ${main.alias||'--'} (${main.email||'--'}). Total: ${candidateAssets.length}. Restaurados: ${restored}. Existentes: ${skippedExisting}. Links regenerados: ${regeneratedLinks}. No recuperados: ${notRecovered}. Duración: ${durMs} ms.`
+      await prisma.notification.create({ data: { title: notifTitle, body: notifBody, status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'SUCCESS' } })
     } catch(e){ log.warn('[NOTIF][CRON] No se pudo crear notificación: '+e.message) }
     return { ok:true, restored, existing: skippedExisting, regeneratedLinks, notRecovered, total: candidateAssets.length }
   } catch (e){
@@ -231,7 +235,7 @@ export async function runAutoRestoreMain(){
       await prisma.notification.create({
         data: {
           title: 'Error en restauración automática de backups',
-          body: `Ocurrió un error al restaurar backups hacia assets (main=${main?.id||'?'}) (script): ${e.message}`,
+          body: `Ocurrió un error al restaurar backups hacia assets (MAIN id=${main?.id||'?'} alias=${main?.alias||'--'}): ${e.message}`,
           status: 'UNREAD',
           type: 'AUTOMATION',
           typeStatus: 'ERROR'

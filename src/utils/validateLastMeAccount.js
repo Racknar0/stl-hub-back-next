@@ -63,7 +63,7 @@ export async function runValidateLastMeAccount() {
       account = await prisma.megaAccount.findUnique({ where: { id: forcedId }, include: { credentials: true } });
       if (!account) throw new Error(`Cuenta forzada id=${forcedId} no encontrada`);
       if (account.type !== 'main') throw new Error('La cuenta forzada no es de tipo MAIN');
-      log.info(`[VALIDATE][SELECT] modo=forzado id=${account.id} alias=${account.alias} type=${account.type} suspended=${account.suspended} lastCheckAt=${account.lastCheckAt}`);
+  log.info(`[VALIDAR][SELECCIÓN] modo=forzado id=${account.id} alias=${account.alias} tipo=${account.type} suspendida=${account.suspended} últimoChequeo=${account.lastCheckAt}`);
     } else {
       // Orden: cuentas MAIN con lastCheckAt null primero, luego más antiguo
       account = await prisma.megaAccount.findFirst({
@@ -74,16 +74,16 @@ export async function runValidateLastMeAccount() {
         include: { credentials: true },
       });
       if (account) {
-        log.info(`[VALIDATE][SELECT] modo=auto id=${account.id} alias=${account.alias} type=${account.type} suspended=${account.suspended} lastCheckAt=${account.lastCheckAt}`);
+        log.info(`[VALIDAR][SELECCIÓN] modo=automático id=${account.id} alias=${account.alias} tipo=${account.type} suspendida=${account.suspended} últimoChequeo=${account.lastCheckAt}`);
       }
     }
     if (!account) {
-  log.info('Validación: no hay cuentas disponibles');
+  log.info('Validación: no hay cuentas MAIN disponibles');
       return { ok: true, skipped: true, reason: 'NO_ACCOUNTS' };
     }
     if (!account.credentials) throw new Error('La cuenta no posee credenciales almacenadas');
 
-  log.info(`Validando cuenta id=${account.id} alias=${account.alias} lastCheckAt=${account.lastCheckAt}`);
+  log.info(`Validando cuenta MAIN id=${account.id} alias=${account.alias} últimoChequeo=${account.lastCheckAt}`);
 
     const payload = decryptToJson(account.credentials.encData, account.credentials.encIv, account.credentials.encTag);
 
@@ -106,16 +106,16 @@ export async function runValidateLastMeAccount() {
       } else {
         throw new Error('Payload de credenciales inválido');
       }
-      log.info(`[VALIDATE][LOGIN][OK] id=${account.id} alias=${account.alias}`);
+  log.info(`[VALIDAR][LOGIN][OK] id=${account.id} alias=${account.alias}`);
     } catch (e) {
       const msg = String(e.message || '').toLowerCase();
       if (!msg.includes('already logged in')) throw e;
-      log.warn(`[VALIDATE][LOGIN][SKIP] sesión ya activa para id=${account.id}`);
+  log.warn(`[VALIDAR][LOGIN][OMITIDO] sesión ya activa para id=${account.id}`);
     }
 
     const base = (account.baseFolder || '/').trim();
     if (base && base !== '/') {
-      try { await runCmd(mkdirCmd, ['-p', base]); log.verbose(`[VALIDATE][MKDIR] baseFolder=${base}`); } catch {}
+  try { await runCmd(mkdirCmd, ['-p', base]); log.verbose(`[VALIDAR][MKDIR] carpetaBase=${base}`); } catch {}
     }
 
     let storageUsedMB = 0, storageTotalMB = 0, fileCount = 0, folderCount = 0;
@@ -202,7 +202,7 @@ export async function runValidateLastMeAccount() {
     if (!storageTotalMB || storageTotalMB <= 0) storageTotalMB = DEFAULT_FREE_QUOTA_MB;
     if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB;
 
-  log.info(`[VALIDATE][METRICS] account=${account.id} baseFolder="${base||'/'}" storageUsedMB=${storageUsedMB} storageTotalMB=${storageTotalMB} storageSource=${storageSource} fileCount=${fileCount} folderCount=${folderCount} countsSource=mega-find`);
+  log.info(`[VALIDAR][MÉTRICAS] cuenta=${account.id} carpetaBase="${base||'/'}" almacenamientoUsadoMB=${storageUsedMB} almacenamientoTotalMB=${storageTotalMB} fuenteAlmacenamiento=${storageSource} archivos=${fileCount} carpetas=${folderCount} fuenteConteos=mega-find`);
 
     const tUpdate = Date.now();
     const updated = await prisma.megaAccount.update({
@@ -218,8 +218,8 @@ export async function runValidateLastMeAccount() {
       },
     });
 
-  log.info(`[VALIDATE][UPDATE][OK] id=${updated.id} alias=${updated.alias} lastCheckAt=${updated.lastCheckAt}`);
-  log.info('Validación OK ' + JSON.stringify({ id: updated.id, alias: updated.alias, storageUsedMB, storageTotalMB, fileCount, folderCount }));
+  log.info(`[VALIDAR][ACTUALIZADO] id=${updated.id} alias=${updated.alias} últimoChequeo=${updated.lastCheckAt}`);
+  log.info(`Validación OK -> Cuenta MAIN ${updated.alias} (id ${updated.id}). Almacenamiento: ${storageUsedMB}/${storageTotalMB} MB. Archivos: ${fileCount}. Carpetas: ${folderCount}.`);
     return { ok: true, accountId: updated.id, alias: updated.alias, storageUsedMB, storageTotalMB, fileCount, folderCount };
   } catch (e) {
   log.error('Error en validación: ' + e.message);
@@ -232,7 +232,7 @@ export async function runValidateLastMeAccount() {
   } finally {
     try { await runCmd('mega-logout', []); } catch {}
     try { await prisma.$disconnect(); } catch {}
-    log.info(`[VALIDATE][END] elapsedMs=${Date.now()-tStart}`);
+  log.info(`[VALIDAR][FIN] duracionMs=${Date.now()-tStart}`);
   }
 }
 
