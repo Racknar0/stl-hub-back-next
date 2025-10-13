@@ -148,7 +148,7 @@ async function megaLogout(ctx){ try { await runCmd('mega-logout',[],{ quiet:true
 export async function runAutoRestoreMain(){
   const tStart = Date.now()
   const forced = process.env.MAIN_ACCOUNT_ID?Number(process.env.MAIN_ACCOUNT_ID):null
-  const maxAssets = process.env.MAX_ASSETS?Number(process.env.MAX_ASSETS):null
+  const maxAssets = process.env.MAX_ASSETS!==undefined ? Number(process.env.MAX_ASSETS) : null
   let main
   try {
     if (forced){
@@ -175,11 +175,33 @@ export async function runAutoRestoreMain(){
     const backupAccounts = (main.backups||[]).map(r=>r.backupAccount).filter(Boolean)
     if (!backupAccounts.length){ log.info('[CRON] Main sin backups asociados'); return { ok:true, skipped:true, reason:'NO_BACKUPS' } }
 
+    // Si MAX_ASSETS=0 no hay nada que procesar
+    if (maxAssets === 0){
+      log.info('[CRON] MAX_ASSETS=0: no se procesarán assets en esta corrida')
+      return { ok:true, skipped:true, reason:'MAX_ASSETS_ZERO' }
+    }
+
     // Tomar TODOS los assets pertenecientes a la MAIN
     let candidateAssets = await prisma.asset.findMany({
       where: { accountId: main.id },
       select: { id: true, slug: true, archiveName: true, megaLink: true }
     })
+    // Fallback: si la MAIN no tiene assets, intentar derivarlos de las réplicas en BACKUPs
+    if (!candidateAssets.length){
+      const backupIds = (backupAccounts||[]).map(b=>b.id)
+      if (backupIds.length){
+        const replicas = await prisma.assetReplica.findMany({
+          where: { accountId: { in: backupIds }, status: 'COMPLETED' },
+          select: { asset: { select: { id: true, slug: true, archiveName: true, megaLink: true } } }
+        })
+        const uniq = new Map()
+        for (const r of replicas){ if (r.asset && !uniq.has(r.asset.id)) uniq.set(r.asset.id, r.asset) }
+        candidateAssets = Array.from(uniq.values())
+        if (candidateAssets.length){
+          log.info(`[CRON][FALLBACK] MAIN sin assets propios. Usando ${candidateAssets.length} assets desde réplicas en BACKUPs`)
+        }
+      }
+    }
     const assetMap = new Map(candidateAssets.map(a => [a.id, a]))
     if (maxAssets) candidateAssets = candidateAssets.slice(0, maxAssets)
     if (!candidateAssets.length){ log.info('[CRON] Main sin assets'); return { ok:true, skipped:true, reason:'NO_ASSETS' } }
