@@ -8,7 +8,7 @@ import path from 'path';
 /*
   Script: validateLastMeAccount
   Objetivo:
-    - Seleccionar la cuenta de MEGA con el lastCheckAt más antiguo (null primero) y refrescar sus métricas
+    - Seleccionar la cuenta de MEGA de tipo MAIN con el lastCheckAt más antiguo (null primero) y refrescar sus métricas
     - Reproduce la lógica principal de testAccount (login -> métricas -> update -> logout)
     - Pensado para ejecutarse vía cron o manual: `node ./src/utils/validateLastMeAccount.js`
     - Se puede forzar una cuenta específica con env MEGA_ACCOUNT_ID
@@ -61,10 +61,11 @@ export async function runValidateLastMeAccount() {
     if (forcedId) {
       account = await prisma.megaAccount.findUnique({ where: { id: forcedId }, include: { credentials: true } });
       if (!account) throw new Error(`Cuenta forzada id=${forcedId} no encontrada`);
+      if (account.type !== 'main') throw new Error('La cuenta forzada no es de tipo MAIN');
     } else {
-      // Orden: cuentas con lastCheckAt null primero, luego más antiguo
+      // Orden: cuentas MAIN con lastCheckAt null primero, luego más antiguo
       account = await prisma.megaAccount.findFirst({
-        where: { suspended: false },
+        where: { suspended: false, type: 'main' },
         orderBy: [
           { lastCheckAt: 'asc' },
         ],
