@@ -52,6 +52,8 @@ function pickFirstFileFromLs(lsOut){
 
 function buildCtx(acc){ return acc?`accId=${acc.id} alias=${acc.alias||'--'} email=${acc.email||'--'}`:'' }
 
+function sleep(ms){ return new Promise(r=>setTimeout(r, ms)) }
+
 async function megaLogin(payload, ctx){
   for (let attempt=1; attempt<=3; attempt++){
     try {
@@ -150,9 +152,30 @@ export async function runAutoRestoreMain(){
           needDownload.set(asset.id, asset)
         }
       }
+      // Al finalizar el escaneo en MAIN, esperamos 10s y hacemos login en cada BACKUP para actualizar su lastCheckAt
+      log.info('[CRON][WARMUP] Esperando 10s antes de autenticar BACKUPs...')
+      await sleep(10000)
       await megaLogout(buildCtx(main))
     }, 'CRON-PHASE1')
     log.info(`[CRON][RESUMEN][FASE1] existentes=${existingSet.size} faltantes=${needDownload.size} linksRegenerados=${regeneratedLinks}`)
+
+    // Autenticación rápida en BACKUPs para actualizar lastCheckAt
+    for (const b of backupAccounts){
+      if (!b?.credentials) continue
+      const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
+      await withMegaLock(async () => {
+        try {
+          await megaLogout(buildCtx(b));
+          await megaLogin(payloadB, buildCtx(b))
+          await prisma.megaAccount.update({ where:{ id: b.id }, data:{ lastCheckAt: new Date() } })
+          log.info(`[CRON][WARMUP][OK] Backup id=${b.id} alias=${b.alias||'--'} lastCheckAt actualizado`)
+        } catch(e){
+          log.warn(`[CRON][WARMUP][WARN] No se pudo autenticar backup id=${b.id}: ${e.message}`)
+        } finally {
+          try { await megaLogout(buildCtx(b)) } catch{}
+        }
+      }, `CRON-WARMUP-${b.id}`)
+    }
 
     // FASE 2: Descargar faltantes desde BACKUPs
     if (needDownload.size){
