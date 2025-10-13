@@ -55,6 +55,7 @@ function parseSizeToMB(str) {
 }
 
 export async function runValidateLastMeAccount() {
+  const tStart = Date.now();
   const forcedId = process.env.MEGA_ACCOUNT_ID ? Number(process.env.MEGA_ACCOUNT_ID) : null;
   let account;
   try {
@@ -62,6 +63,7 @@ export async function runValidateLastMeAccount() {
       account = await prisma.megaAccount.findUnique({ where: { id: forcedId }, include: { credentials: true } });
       if (!account) throw new Error(`Cuenta forzada id=${forcedId} no encontrada`);
       if (account.type !== 'main') throw new Error('La cuenta forzada no es de tipo MAIN');
+      log.info(`[VALIDATE][SELECT] modo=forzado id=${account.id} alias=${account.alias} type=${account.type} suspended=${account.suspended} lastCheckAt=${account.lastCheckAt}`);
     } else {
       // Orden: cuentas MAIN con lastCheckAt null primero, luego más antiguo
       account = await prisma.megaAccount.findFirst({
@@ -71,6 +73,9 @@ export async function runValidateLastMeAccount() {
         ],
         include: { credentials: true },
       });
+      if (account) {
+        log.info(`[VALIDATE][SELECT] modo=auto id=${account.id} alias=${account.alias} type=${account.type} suspended=${account.suspended} lastCheckAt=${account.lastCheckAt}`);
+      }
     }
     if (!account) {
   log.info('Validación: no hay cuentas disponibles');
@@ -101,17 +106,20 @@ export async function runValidateLastMeAccount() {
       } else {
         throw new Error('Payload de credenciales inválido');
       }
+      log.info(`[VALIDATE][LOGIN][OK] id=${account.id} alias=${account.alias}`);
     } catch (e) {
       const msg = String(e.message || '').toLowerCase();
       if (!msg.includes('already logged in')) throw e;
+      log.warn(`[VALIDATE][LOGIN][SKIP] sesión ya activa para id=${account.id}`);
     }
 
     const base = (account.baseFolder || '/').trim();
     if (base && base !== '/') {
-      try { await runCmd(mkdirCmd, ['-p', base]); } catch {}
+      try { await runCmd(mkdirCmd, ['-p', base]); log.verbose(`[VALIDATE][MKDIR] baseFolder=${base}`); } catch {}
     }
 
     let storageUsedMB = 0, storageTotalMB = 0, fileCount = 0, folderCount = 0;
+    let storageSource = 'none';
 
     // Intentar mega-df -h
     try {
@@ -125,6 +133,7 @@ export async function runValidateLastMeAccount() {
       if (m) {
         storageUsedMB = parseSizeToMB(m[1]);
         storageTotalMB = parseSizeToMB(m[2]);
+        storageSource = 'df -h';
       }
       if (!storageTotalMB) {
         const p = txt.match(/storage[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:of|de)\s*([\d.,]+\s*[KMGT]?B)/i)
@@ -133,6 +142,7 @@ export async function runValidateLastMeAccount() {
           storageTotalMB = parseSizeToMB(p[2]);
           const pct = parseFloat(String(p[1]).replace(',', '.'));
             if (!isNaN(pct) && isFinite(pct)) storageUsedMB = Math.round((pct / 100) * storageTotalMB);
+            storageSource = storageSource === 'none' ? 'df -h (pct)' : storageSource;
         }
       }
     } catch (e) {
@@ -151,6 +161,7 @@ export async function runValidateLastMeAccount() {
         if (m) {
           storageUsedMB = parseSizeToMB(m[1]);
           storageTotalMB = parseSizeToMB(m[2]);
+          storageSource = storageSource === 'none' ? 'df' : storageSource;
         }
       } catch (e) {
   log.warn('df advertencia: ' + String(e.message).slice(0,200));
@@ -162,7 +173,7 @@ export async function runValidateLastMeAccount() {
         const du = await runCmd(duCmd, ['-h', base || '/']);
         const txt = (du.out || du.err || '').toString();
         const mm = txt.match(/[\r\n]*\s*([\d.,]+\s*[KMGT]?B)/i) || txt.match(/([\d.,]+\s*[KMGT]?B)/i);
-        if (mm) storageUsedMB = parseSizeToMB(mm[1]);
+        if (mm) { storageUsedMB = parseSizeToMB(mm[1]); storageSource = storageSource === 'none' ? 'du -h' : storageSource; }
       } catch (e) {
   log.warn('du -h advertencia: ' + String(e.message).slice(0,200));
       }
@@ -191,6 +202,9 @@ export async function runValidateLastMeAccount() {
     if (!storageTotalMB || storageTotalMB <= 0) storageTotalMB = DEFAULT_FREE_QUOTA_MB;
     if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB;
 
+  log.info(`[VALIDATE][METRICS] account=${account.id} baseFolder="${base||'/'}" storageUsedMB=${storageUsedMB} storageTotalMB=${storageTotalMB} storageSource=${storageSource} fileCount=${fileCount} folderCount=${folderCount} countsSource=mega-find`);
+
+    const tUpdate = Date.now();
     const updated = await prisma.megaAccount.update({
       where: { id: account.id },
       data: {
@@ -204,6 +218,7 @@ export async function runValidateLastMeAccount() {
       },
     });
 
+  log.info(`[VALIDATE][UPDATE][OK] id=${updated.id} alias=${updated.alias} lastCheckAt=${updated.lastCheckAt}`);
   log.info('Validación OK ' + JSON.stringify({ id: updated.id, alias: updated.alias, storageUsedMB, storageTotalMB, fileCount, folderCount }));
     return { ok: true, accountId: updated.id, alias: updated.alias, storageUsedMB, storageTotalMB, fileCount, folderCount };
   } catch (e) {
@@ -217,6 +232,7 @@ export async function runValidateLastMeAccount() {
   } finally {
     try { await runCmd('mega-logout', []); } catch {}
     try { await prisma.$disconnect(); } catch {}
+    log.info(`[VALIDATE][END] elapsedMs=${Date.now()-tStart}`);
   }
 }
 
