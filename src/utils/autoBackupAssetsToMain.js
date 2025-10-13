@@ -157,7 +157,7 @@ export async function runAutoRestoreMain(){
       if (main.type!=='main') throw new Error('Cuenta forzada no es MAIN')
     } else {
       const mains = await prisma.megaAccount.findMany({
-        where:{ type:'main', suspended:false, backups:{ some:{} } },
+        where:{ type:'main', suspended:false, backups:{ some:{} }, assets:{ some:{} } },
         include:{ credentials:true, backups:{ include:{ backupAccount:{ include:{ credentials:true } } } } }
       })
       // ordenar por lastCheckAt null primero -> más antiguo
@@ -204,7 +204,52 @@ export async function runAutoRestoreMain(){
     }
     const assetMap = new Map(candidateAssets.map(a => [a.id, a]))
     if (maxAssets) candidateAssets = candidateAssets.slice(0, maxAssets)
-    if (!candidateAssets.length){ log.info('[CRON] Main sin assets'); return { ok:true, skipped:true, reason:'NO_ASSETS' } }
+    if (!candidateAssets.length){
+      log.info('[CRON] MAIN seleccionada sin assets para procesar. Se actualizarán métricas y backups, no hay nada que restaurar.')
+      // Actualizar métricas de MAIN aunque no haya assets
+      await withMegaLock(async () => {
+        try {
+          const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
+          await megaLogout(buildCtx(main)); await megaLogin(payload, buildCtx(main))
+          const base = (main.baseFolder||'/').replaceAll('\\','/')
+          const m = await getAccountMetrics(base)
+          await prisma.megaAccount.update({ where:{ id: main.id }, data:{
+            status: 'CONNECTED', statusMessage: null, lastCheckAt: new Date(),
+            storageUsedMB: m.storageUsedMB, storageTotalMB: m.storageTotalMB, fileCount: m.fileCount, folderCount: m.folderCount,
+          }})
+          log.info(`[CRON][MÉTRICAS][MAIN] alias=${main.alias||'--'} usados=${m.storageUsedMB}MB de ${m.storageTotalMB}MB | archivos=${m.fileCount} carpetas=${m.folderCount} (fuente=${m.storageSource})`)
+        } catch(e){ log.warn('[CRON][MÉTRICAS][MAIN][WARN] '+e.message) }
+        finally { try { await megaLogout(buildCtx(main)) } catch{} }
+      }, 'CRON-NO-ASSETS-MAIN')
+
+      // Warmup de BACKUPs al final
+      log.info('[CRON][WARMUP] Esperando 10s antes de autenticar BACKUPs (sin assets en MAIN)...')
+      await sleep(10000)
+      for (const b of backupAccounts){
+        if (!b?.credentials) continue
+        const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
+        await withMegaLock(async () => {
+          try {
+            await megaLogout(buildCtx(b)); await megaLogin(payloadB, buildCtx(b))
+            const baseB = (b.baseFolder||'/').replaceAll('\\','/')
+            try {
+              const m = await getAccountMetrics(baseB)
+              await prisma.megaAccount.update({ where:{ id: b.id }, data:{
+                status: 'CONNECTED', statusMessage: null, lastCheckAt: new Date(),
+                storageUsedMB: m.storageUsedMB, storageTotalMB: m.storageTotalMB, fileCount: m.fileCount, folderCount: m.folderCount,
+              }})
+              log.info(`[CRON][MÉTRICAS][BACKUP] alias=${b.alias||'--'} usados=${m.storageUsedMB}MB de ${m.storageTotalMB}MB | archivos=${m.fileCount} carpetas=${m.folderCount} (fuente=${m.storageSource})`)
+            } catch(me){
+              await prisma.megaAccount.update({ where:{ id: b.id }, data:{ lastCheckAt: new Date(), status: 'CONNECTED', statusMessage: null } })
+              log.warn(`[CRON][MÉTRICAS][BACKUP][WARN] No se pudieron obtener métricas de alias=${b.alias||'--'}: ${me.message}`)
+            }
+          } catch(e){ log.warn(`[CRON][WARMUP][WARN] No se pudo autenticar backup id=${b.id}: ${e.message}`) }
+          finally { try { await megaLogout(buildCtx(b)) } catch{} }
+        }, `CRON-WARMUP-NO-ASSETS-${b.id}`)
+      }
+
+      return { ok:true, skipped:true, reason:'NO_ASSETS' }
+    }
 
   log.info('__________________________________________________')
   log.info('____ INICIANDO RECUPERACIÓN AUTOMÁTICA (CRON) ____')
