@@ -27,6 +27,7 @@ const prisma = new PrismaClient()
 const UPLOADS_DIR = path.resolve('uploads')
 const TEMP_DIR = path.join(UPLOADS_DIR, 'tmp')
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive:true })
+const DEFAULT_FREE_QUOTA_MB = Number(process.env.MEGA_FREE_QUOTA_MB) || 20480
 
 function runCmd(cmd, args = [], { quiet=false } = {}) {
   const printable = `${cmd} ${(args||[]).join(' ')}`.trim()
@@ -53,6 +54,80 @@ function pickFirstFileFromLs(lsOut){
 function buildCtx(acc){ return acc?`accId=${acc.id} alias=${acc.alias||'--'} email=${acc.email||'--'}`:'' }
 
 function sleep(ms){ return new Promise(r=>setTimeout(r, ms)) }
+
+function parseSizeToMB(str){
+  if (!str) return 0
+  const s = String(str).trim().toUpperCase()
+  const m = s.match(/[\d.,]+\s*[KMGT]?B/)
+  if (!m) return 0
+  const num = parseFloat((m[0].match(/[\d.,]+/) || ['0'])[0].replace(',', '.'))
+  const unit = (m[0].match(/[KMGT]?B/) || ['MB'])[0]
+  const factor = unit === 'KB' ? 1/1024 : unit === 'MB' ? 1 : unit === 'GB' ? 1024 : unit === 'TB' ? 1024*1024 : 1/(1024*1024)
+  return Math.round(num * factor)
+}
+
+async function getAccountMetrics(base){
+  const dfCmd = 'mega-df'
+  const duCmd = 'mega-du'
+  const findCmd = 'mega-find'
+  let storageUsedMB=0, storageTotalMB=0, fileCount=0, folderCount=0
+  let storageSource='none'
+  try {
+    const df = await runCmd(dfCmd, ['-h'], { quiet: true })
+    const txt = (df.out || df.err || '').toString()
+    let m = txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i)
+      || txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i)
+      || txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i)
+      || txt.match(/almacenamiento\s+de\s+la\s+cuenta\s*:\s*([^\n]+?)\s*de\s*([^\n]+)/i)
+      || txt.match(/almacenamiento\s*:\s*([\d.,]+\s*[KMGT]?B)\s*de\s*([\d.,]+\s*[KMGT]?B)/i)
+    if (m){ storageUsedMB = parseSizeToMB(m[1]); storageTotalMB = parseSizeToMB(m[2]); storageSource='df -h' }
+    if (!storageTotalMB){
+      const p = txt.match(/storage[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:of|de)\s*([\d.,]+\s*[KMGT]?B)/i)
+        || txt.match(/almacenamiento[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:de|of)\s*([\d.,]+\s*[KMGT]?B)/i)
+      if (p){
+        storageTotalMB = parseSizeToMB(p[2])
+        const pct = parseFloat(String(p[1]).replace(',', '.'))
+        if (!isNaN(pct) && isFinite(pct)) storageUsedMB = Math.round((pct/100)*storageTotalMB)
+        storageSource = storageSource==='none' ? 'df -h (pct)' : storageSource
+      }
+    }
+  } catch {}
+  if (!storageTotalMB){
+    try {
+      const df = await runCmd(dfCmd, [], { quiet: true })
+      const txt = (df.out || df.err || '').toString()
+      let m = txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i)
+        || txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i)
+        || txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i)
+        || txt.match(/almacenamiento\s+de\s+la\s+cuenta\s*:\s*([^\n]+?)\s*de\s*([^\n]+)/i)
+        || txt.match(/almacenamiento\s*:\s*([\d.,]+\s*[KMGT]?B)\s*de\s*([\d.,]+\s*[KMGT]?B)/i)
+      if (m){ storageUsedMB = parseSizeToMB(m[1]); storageTotalMB = parseSizeToMB(m[2]); storageSource = storageSource==='none' ? 'df' : storageSource }
+    } catch {}
+  }
+  if (!storageUsedMB){
+    try {
+      const du = await runCmd(duCmd, ['-h', base || '/'], { quiet: true })
+      const txt = (du.out || du.err || '').toString()
+      const mm = txt.match(/[\r\n]*\s*([\d.,]+\s*[KMGT]?B)/i) || txt.match(/([\d.,]+\s*[KMGT]?B)/i)
+      if (mm){ storageUsedMB = parseSizeToMB(mm[1]); storageSource = storageSource==='none' ? 'du -h' : storageSource }
+    } catch {}
+  }
+  try {
+    const f = await runCmd(findCmd, [base || '/', '--type=f'], { quiet: true })
+    fileCount = (f.out || '').split(/\r?\n/).filter(Boolean).length
+  } catch {
+    try { const f = await runCmd(findCmd, ['--type=f', base || '/'], { quiet: true }); fileCount = (f.out || '').split(/\r?\n/).filter(Boolean).length } catch {}
+  }
+  try {
+    const d = await runCmd(findCmd, [base || '/', '--type=d'], { quiet: true })
+    folderCount = (d.out || '').split(/\r?\n/).filter(Boolean).length
+  } catch {
+    try { const d = await runCmd(findCmd, ['--type=d', base || '/'], { quiet: true }); folderCount = (d.out || '').split(/\r?\n/).filter(Boolean).length } catch {}
+  }
+  if (!storageTotalMB || storageTotalMB<=0) storageTotalMB = DEFAULT_FREE_QUOTA_MB
+  if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB
+  return { storageUsedMB, storageTotalMB, fileCount, folderCount, storageSource }
+}
 
 async function megaLogin(payload, ctx){
   for (let attempt=1; attempt<=3; attempt++){
@@ -125,10 +200,10 @@ export async function runAutoRestoreMain(){
       const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
       await megaLogout(buildCtx(main))
       await megaLogin(payload, buildCtx(main))
+      const remoteBaseMain = (main.baseFolder||'/').replaceAll('\\','/')
       for (let i=0;i<candidateAssets.length;i++){
         const asset = candidateAssets[i]
-        const remoteBase = (main.baseFolder||'/').replaceAll('\\','/')
-        const remoteFolder = path.posix.join(remoteBase, asset.slug)
+        const remoteFolder = path.posix.join(remoteBaseMain, asset.slug)
         const expectedFile = asset.archiveName ? path.basename(asset.archiveName) : null
         let lsOut=''
         try { const ls = await runCmd('mega-ls',[remoteFolder],{ quiet:true }); lsOut=ls.out } catch {}
@@ -152,30 +227,26 @@ export async function runAutoRestoreMain(){
           needDownload.set(asset.id, asset)
         }
       }
-      // Al finalizar el escaneo en MAIN, esperamos 10s y hacemos login en cada BACKUP para actualizar su lastCheckAt
-      log.info('[CRON][WARMUP] Esperando 10s antes de autenticar BACKUPs...')
-      await sleep(10000)
+      // Medimos y actualizamos métricas de la MAIN (como el botón "Actualizar")
+      try {
+        const m = await getAccountMetrics(remoteBaseMain)
+        await prisma.megaAccount.update({
+          where:{ id: main.id },
+          data:{
+            status: 'CONNECTED',
+            statusMessage: null,
+            lastCheckAt: new Date(),
+            storageUsedMB: m.storageUsedMB,
+            storageTotalMB: m.storageTotalMB,
+            fileCount: m.fileCount,
+            folderCount: m.folderCount,
+          }
+        })
+        log.info(`[CRON][MÉTRICAS][MAIN] alias=${main.alias||'--'} usados=${m.storageUsedMB}MB de ${m.storageTotalMB}MB | archivos=${m.fileCount} carpetas=${m.folderCount} (fuente=${m.storageSource})`)
+      } catch(e){ log.warn(`[CRON][MÉTRICAS][MAIN][WARN] No se pudo actualizar métricas: ${e.message}`) }
       await megaLogout(buildCtx(main))
     }, 'CRON-PHASE1')
     log.info(`[CRON][RESUMEN][FASE1] existentes=${existingSet.size} faltantes=${needDownload.size} linksRegenerados=${regeneratedLinks}`)
-
-    // Autenticación rápida en BACKUPs para actualizar lastCheckAt
-    for (const b of backupAccounts){
-      if (!b?.credentials) continue
-      const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
-      await withMegaLock(async () => {
-        try {
-          await megaLogout(buildCtx(b));
-          await megaLogin(payloadB, buildCtx(b))
-          await prisma.megaAccount.update({ where:{ id: b.id }, data:{ lastCheckAt: new Date() } })
-          log.info(`[CRON][WARMUP][OK] Backup id=${b.id} alias=${b.alias||'--'} lastCheckAt actualizado`)
-        } catch(e){
-          log.warn(`[CRON][WARMUP][WARN] No se pudo autenticar backup id=${b.id}: ${e.message}`)
-        } finally {
-          try { await megaLogout(buildCtx(b)) } catch{}
-        }
-      }, `CRON-WARMUP-${b.id}`)
-    }
 
     // FASE 2: Descargar faltantes desde BACKUPs
     if (needDownload.size){
@@ -242,6 +313,44 @@ export async function runAutoRestoreMain(){
       log.info(`[CRON][FINAL] MAIN alias=${main.alias||'--'} (id=${main.id}). total=${candidateAssets.length} restaurados=${restored} existentes=${skippedExisting} linksRegenerados=${regeneratedLinks} noRecuperados=${notRecovered} duraciónMs=${durMs}`)
     }
     await prisma.megaAccount.update({ where:{ id: main.id }, data:{ lastCheckAt: new Date() } }).catch(()=>{})
+
+    // Solo ahora, cuando todo el proceso de MAIN ha finalizado, actualizamos BACKUPs
+    log.info('[CRON][WARMUP] Esperando 10s antes de autenticar BACKUPs (post-proceso MAIN)...')
+    await sleep(10000)
+    for (const b of backupAccounts){
+      if (!b?.credentials) continue
+      const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
+      await withMegaLock(async () => {
+        try {
+          await megaLogout(buildCtx(b));
+          await megaLogin(payloadB, buildCtx(b))
+          const remoteBaseB = (b.baseFolder||'/').replaceAll('\\','/')
+          try {
+            const m = await getAccountMetrics(remoteBaseB)
+            await prisma.megaAccount.update({
+              where:{ id: b.id },
+              data:{
+                status: 'CONNECTED',
+                statusMessage: null,
+                lastCheckAt: new Date(),
+                storageUsedMB: m.storageUsedMB,
+                storageTotalMB: m.storageTotalMB,
+                fileCount: m.fileCount,
+                folderCount: m.folderCount,
+              }
+            })
+            log.info(`[CRON][MÉTRICAS][BACKUP] alias=${b.alias||'--'} usados=${m.storageUsedMB}MB de ${m.storageTotalMB}MB | archivos=${m.fileCount} carpetas=${m.folderCount} (fuente=${m.storageSource})`)
+          } catch(me){
+            await prisma.megaAccount.update({ where:{ id: b.id }, data:{ lastCheckAt: new Date(), status: 'CONNECTED', statusMessage: null } })
+            log.warn(`[CRON][MÉTRICAS][BACKUP][WARN] No se pudieron obtener métricas de alias=${b.alias||'--'}: ${me.message}`)
+          }
+        } catch(e){
+          log.warn(`[CRON][WARMUP][WARN] No se pudo autenticar backup id=${b.id}: ${e.message}`)
+        } finally {
+          try { await megaLogout(buildCtx(b)) } catch{}
+        }
+      }, `CRON-WARMUP-${b.id}`)
+    }
     // Notificación: backup → assets (script)
     try {
       const notifTitle = completos ? 'Validación de assets en MAIN: todo completo' : 'Restauración automática de assets desde backups completada'
