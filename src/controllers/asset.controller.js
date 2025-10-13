@@ -6,6 +6,7 @@ import { spawn } from 'child_process';
 import { decryptToJson } from '../utils/cryptoUtils.js';
 import jwt from 'jsonwebtoken';
 import { withMegaLock } from '../utils/megaQueue.js';
+import { startUploadsActive } from '../utils/uploadsActiveFlag.js';
 import { checkMegaLinkAlive } from '../utils/megaCheckFiles/megaLinkChecker.js';
 import { maybeCheckMegaOnVisit } from '../utils/megaCheckFiles/visitTriggeredMegaCheck.js';
 
@@ -1210,6 +1211,7 @@ export async function enqueueToMegaReal(asset) {
 
     // Limpieza previa (evitar acumulación de archivos temporales entre subidas)
     preUploadCleanup();
+    const stopUploadsFlag = startUploadsActive(`asset:${asset.id}:main`);
 
     const payload = decryptToJson(
         acc.credentials.encData,
@@ -1337,16 +1339,17 @@ export async function enqueueToMegaReal(asset) {
                 },
             });
         }, 'MAIN-UPLOAD');
-        console.log(`[UPLOAD] Finalizada asset=${asset.id} 100%`);
+    console.log(`[UPLOAD] Finalizada asset=${asset.id} 100%`);
     } catch (e) {
-        console.error('[UPLOAD] Error asset=' + asset.id + ' msg=' + e.message);
+    console.error('[UPLOAD] Error asset=' + asset.id + ' msg=' + e.message);
         await prisma.asset.update({
             where: { id: asset.id },
             data: { status: 'FAILED' },
         });
         throw e;
     } finally {
-        progressMap.delete(asset.id);
+    progressMap.delete(asset.id);
+    try { stopUploadsFlag && stopUploadsFlag() } catch{}
         try {
             await runCmd(logoutCmd, []);
             console.log(`[MEGA][LOGOUT][OK] main upload end accId=${acc.id}`);
@@ -1383,6 +1386,7 @@ async function replicateAssetToBackupsSequential(assetId) {
     });
     if (!asset) return;
     if (!asset.archiveName) return; // nada que replicar
+    const stopUploadsFlag = startUploadsActive(`asset:${asset.id}:replicas`);
     const archiveAbs = path.join(
         UPLOADS_DIR,
         asset.archiveName.startsWith('archives')
@@ -1605,6 +1609,7 @@ async function replicateAssetToBackupsSequential(assetId) {
     // Limpiar progresos restantes del asset
     for (const key of Array.from(replicaProgressMap.keys()))
         if (key.startsWith(`${asset.id}:`)) replicaProgressMap.delete(key);
+    try { stopUploadsFlag && stopUploadsFlag() } catch{}
 }
 
 // Endpoint para listar réplicas de un asset

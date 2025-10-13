@@ -28,6 +28,7 @@ const UPLOADS_DIR = path.resolve('uploads')
 const TEMP_DIR = path.join(UPLOADS_DIR, 'tmp')
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive:true })
 const DEFAULT_FREE_QUOTA_MB = Number(process.env.MEGA_FREE_QUOTA_MB) || 20480
+const UPLOADS_ACTIVE_FLAG = process.env.UPLOADS_ACTIVE_FLAG || path.join(UPLOADS_DIR, 'sync-cache', 'uploads-active.lock')
 
 function runCmd(cmd, args = [], { quiet=false } = {}) {
   const printable = `${cmd} ${(args||[]).join(' ')}`.trim()
@@ -147,10 +148,35 @@ async function megaLogout(ctx){ try { await runCmd('mega-logout',[],{ quiet:true
 
 export async function runAutoRestoreMain(){
   const tStart = Date.now()
+  const RUN_LOCK = path.join(TEMP_DIR, 'auto-restore-main.running')
   const forced = process.env.MAIN_ACCOUNT_ID?Number(process.env.MAIN_ACCOUNT_ID):null
   const maxAssets = process.env.MAX_ASSETS!==undefined ? Number(process.env.MAX_ASSETS) : null
   let main
   try {
+    // Evitar solapamiento de ejecuciones
+    if (fs.existsSync(RUN_LOCK)){
+      const ageMin = (Date.now() - fs.statSync(RUN_LOCK).mtimeMs) / 60000
+      // Si hay un lock de ejecución reciente (< 240 min), omitir
+      if (ageMin < 240){
+        log.info('[CRON][SKIP] Ya hay una ejecución en curso (lock activo). Se omite esta corrida.')
+        return { ok:true, skipped:true, reason:'RUNNING' }
+      }
+    }
+    // Crear lock
+    try { fs.writeFileSync(RUN_LOCK, String(new Date().toISOString())) } catch{}
+    // Si hay subidas activas, no ejecutar para no interferir con MEGAcmd
+    try {
+      const st = fs.existsSync(UPLOADS_ACTIVE_FLAG) ? fs.statSync(UPLOADS_ACTIVE_FLAG) : null
+      if (st){
+        const ageMin = (Date.now() - st.mtimeMs) / 60000
+        // Considera "activo" si el lock es reciente (< 60 min) o si variable fuerza ignorar tiempo
+        const maxIdleMin = process.env.UPLOADS_ACTIVE_MAX_IDLE_MIN ? Number(process.env.UPLOADS_ACTIVE_MAX_IDLE_MIN) : 60
+        if (ageMin < maxIdleMin){
+          log.info(`[CRON][SKIP] Subidas activas detectadas (lock: ${UPLOADS_ACTIVE_FLAG}, edad ${ageMin.toFixed(1)} min). Se omite esta corrida.`)
+          return { ok:true, skipped:true, reason:'UPLOADS_ACTIVE' }
+        }
+      }
+    } catch(e){ log.warn('[CRON][WARN] No se pudo evaluar bandera de subidas activas: '+e.message) }
     if (forced){
       main = await prisma.megaAccount.findUnique({ where:{ id:forced }, include:{ credentials:true, backups:{ include:{ backupAccount:{ include:{ credentials:true } } } } } })
       if (!main) throw new Error(`Main forzada id=${forced} no encontrada`)
@@ -443,6 +469,8 @@ export async function runAutoRestoreMain(){
     } catch(err){ log.warn('[NOTIF][CRON][ERROR] No se pudo crear notificación de error: '+err.message) }
     return { ok:false, error:e.message }
   } finally {
+    // Liberar lock
+    try { if (fs.existsSync(RUN_LOCK)) fs.unlinkSync(RUN_LOCK) } catch{}
     try { await runCmd('mega-logout',[],{ quiet:true }) } catch{}
     try { await prisma.$disconnect() } catch{}
   }
