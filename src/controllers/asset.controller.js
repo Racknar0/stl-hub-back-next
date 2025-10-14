@@ -455,7 +455,7 @@ export const uploadArchiveTemp = async (req, res) => {
 export const createAsset = async (req, res) => {
     try {
         const {
-            title,
+            title: rawTitle,
             titleEn,
             categories,
             tags,
@@ -464,7 +464,8 @@ export const createAsset = async (req, res) => {
             tempArchivePath,
             archiveOriginal,
         } = req.body;
-        if (!title) return res.status(400).json({ message: 'title required' });
+        if (!rawTitle) return res.status(400).json({ message: 'title required' });
+        const title = rawTitle.startsWith('STL - ') ? rawTitle : `STL - ${rawTitle}`;
         if (!accountId)
             return res.status(400).json({ message: 'accountId required' });
         const accId = Number(accountId);
@@ -721,8 +722,10 @@ export const createAssetFull = async (req, res) => {
     let lastLogTime = startTime;
     
     try {
-        const { title, titleEn, categories, tags, isPremium, accountId } =
+        const { title: rawTitle, titleEn, categories, tags, isPremium, accountId } =
             req.body;
+        const title = rawTitle?.startsWith('STL - ') ? rawTitle : `STL - ${rawTitle}`;
+        if (!title) return res.status(400).json({ message: 'title required' });
         
         const parseTime = Date.now();
         console.log('📝 [SERVER METRICS] Body parseado en:', parseTime - startTime, 'ms');
