@@ -2387,21 +2387,27 @@ export const requestDownload = async (req, res) => {
 
 // Obtener asset por slug (página detalle SEO)
 export const getAssetBySlug = async (req, res) => {
+
+    console.log('getAssetBySlug called with paramsxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx:', req.params);
+
     try {
         const slug = String(req.params.slug || '').trim();
         if (!slug) return res.status(400).json({ message: 'slug required' });
-        const a = await prisma.asset.findUnique({
+            const a = await prisma.asset.findUnique({
             where: { slug },
             include: {
                 categories: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
                 tags: { select: { slug: true, name: true, nameEn: true, slugEn: true } },
             },
         });
-        if (!a || a.status !== 'PUBLISHED') return res.status(404).json({ message: 'Asset not found' });
-        // Normalizar arrays de tags (igual que otros endpoints)
-        const tagsEs = Array.isArray(a.tags) ? a.tags.map(t => t.slug) : [];
-        const tagsEn = Array.isArray(a.tags) ? a.tags.map(t => t.nameEn || t.name || t.slug) : [];
-        return res.json({ ...a, tagsEs, tagsEn });
+        if (!a) return res.status(404).json({ message: 'Asset not found' });
+        // ANTES: filtrábamos por status === PUBLISHED. Ahora devolvemos siempre el asset y exponemos flag para el frontend.
+            const tagsEs = Array.isArray(a.tags) ? a.tags.map(t => t.slug) : [];
+            const tagsEn = Array.isArray(a.tags) ? a.tags.map(t => t.nameEn || t.name || t.slug) : [];
+            // Sanitizar BigInt (archiveSizeB, fileSizeB, etc.) reutilizando helper toJsonSafe definido arriba.
+            let safe = a;
+            try { safe = toJsonSafe(a); } catch {}
+            return res.json({ ...safe, tagsEs, tagsEn, unpublished: a.status !== 'PUBLISHED' });
     } catch (e) {
         console.error('[ASSETS] getAssetBySlug error:', e);
         return res.status(500).json({ message: 'Error getting asset by slug' });
