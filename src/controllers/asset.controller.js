@@ -2414,6 +2414,30 @@ export const getAssetBySlug = async (req, res) => {
     }
 };
 
+// Listar todos los slugs publicados (para sitemap / SEO)
+// GET /api/assets/slugs
+// Opcional: ?updatedAfter=ISOString para delta sitemaps en el futuro
+export const listPublishedSlugs = async (req, res) => {
+    try {
+        const { updatedAfter } = req.query || {};
+        const where = { status: 'PUBLISHED' };
+        if (updatedAfter) {
+            const d = new Date(updatedAfter);
+            if (!isNaN(d.getTime())) where.updatedAt = { gt: d };
+        }
+        const rows = await prisma.asset.findMany({
+            where,
+            select: { slug: true, updatedAt: true },
+            orderBy: { updatedAt: 'desc' },
+            take: 50000, // límite amplio; si se supera, paginar
+        });
+        return res.json(rows);
+    } catch (e) {
+        console.error('[ASSETS] listPublishedSlugs error:', e);
+        return res.status(500).json({ message: 'Error listing slugs' });
+    }
+};
+
 // Randomizar freebies: poner todos los publicados como premium y luego seleccionar N aleatorios para dejarlos gratis
 export const randomizeFree = async (req, res) => {
     try {

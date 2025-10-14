@@ -9,6 +9,7 @@ import {
   getAsset,
   getAssetProgress,
   getAssetBySlug,
+  listPublishedSlugs,
   listAssets,
   uploadImages,
   uploadArchiveTemp,
@@ -71,6 +72,7 @@ const uploadCombined = multer({ storage: archiveStorage });
 router.get('/latest', latestAssets);
 router.get('/top', mostDownloadedAssets);
 router.get('/search', searchAssets);
+router.get('/slugs', listPublishedSlugs);
 // Nueva ruta por slug (antes de :id para evitar conflicto con texto que sea numérico)
 router.get('/slug/:slug', getAssetBySlug);
 router.get('/:id(\\d+)', getAsset);
