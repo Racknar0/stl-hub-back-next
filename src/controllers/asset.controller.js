@@ -2402,12 +2402,72 @@ export const getAssetBySlug = async (req, res) => {
         });
         if (!a) return res.status(404).json({ message: 'Asset not found' });
         // ANTES: filtrábamos por status === PUBLISHED. Ahora devolvemos siempre el asset y exponemos flag para el frontend.
-            const tagsEs = Array.isArray(a.tags) ? a.tags.map(t => t.slug) : [];
-            const tagsEn = Array.isArray(a.tags) ? a.tags.map(t => t.nameEn || t.name || t.slug) : [];
+            const tagsEs = Array.isArray(a.tags) ? a.tags.map(t => t.slug).filter(Boolean) : [];
+            const tagsEn = Array.isArray(a.tags) ? a.tags.map(t => (t.nameEn || t.name || t.slug)).filter(Boolean) : [];
+
             // Sanitizar BigInt (archiveSizeB, fileSizeB, etc.) reutilizando helper toJsonSafe definido arriba.
             let safe = a;
             try { safe = toJsonSafe(a); } catch {}
-            return res.json({ ...safe, tagsEs, tagsEn, unpublished: a.status !== 'PUBLISHED' });
+
+            // --- AUTOGENERACIÓN DE DESCRIPCIÓN (sólo si falta) ---
+            // Campos presentes: safe.title, safe.titleEn, categories[], tagsEs, tagsEn, isPremium.
+            const hasDescriptionEs = typeof safe.description === 'string' && safe.description.trim().length > 0;
+            const hasDescriptionEn = typeof safe.descriptionEn === 'string' && safe.descriptionEn.trim().length > 0;
+
+            const primaryCategoryEs = Array.isArray(safe.categories) && safe.categories.length
+                ? (safe.categories[0].name || safe.categories[0].slug || '').trim()
+                : '';
+            const primaryCategoryEn = Array.isArray(safe.categories) && safe.categories.length
+                ? (safe.categories[0].nameEn || safe.categories[0].name || safe.categories[0].slugEn || safe.categories[0].slug || '').trim()
+                : '';
+
+            const normTitleEs = (safe.title || '').replace(/^\s*STL\s*-/i, '').trim();
+            const normTitleEn = (safe.titleEn || safe.title || '').replace(/^\s*STL\s*-/i, '').trim();
+
+            const tagsSnippetEs = tagsEs.slice(0, 6).join(', ');
+            const tagsSnippetEn = tagsEn.slice(0, 6).join(', ');
+
+            function buildDescriptionEs() {
+                const titular = normTitleEs || safe.slug;
+                const intro = safe.isPremium
+                    ? `Descarga STL premium de "${titular}" vía MEGA (acceso rápido y seguro).`
+                    : `Descarga gratuita STL de "${titular}" vía MEGA al instante.`;
+                const cat = primaryCategoryEs ? ` Categoría: ${primaryCategoryEs}.` : '';
+                const acceso = safe.isPremium
+                    ? ' Suscríbete para desbloquear la descarga y más modelos exclusivos.'
+                    : ' Imprime en 3D hoy mismo sin costo.';
+                const tags = tagsSnippetEs ? ` Tags: ${tagsSnippetEs}.` : '';
+                let full = intro + cat + acceso + tags;
+                // Limitar a ~300 chars para evitar exceso en meta description
+                if (full.length > 300) full = full.slice(0, 297).replace(/[,.;:!\s]+$/,'') + '...';
+                return full;
+            }
+            function buildDescriptionEn() {
+                const titular = normTitleEn || safe.slug;
+                const intro = safe.isPremium
+                    ? `Premium STL download of "${titular}" via MEGA (fast & secure access).`
+                    : `Free STL download of "${titular}" via MEGA instantly.`;
+                const cat = primaryCategoryEn ? ` Category: ${primaryCategoryEn}.` : '';
+                const acceso = safe.isPremium
+                    ? ' Subscribe to unlock this model and more exclusive designs.'
+                    : ' Print it today at no cost.';
+                const tags = tagsSnippetEn ? ` Tags: ${tagsSnippetEn}.` : '';
+                let full = intro + cat + acceso + tags;
+                if (full.length > 300) full = full.slice(0, 297).replace(/[,.;:!\s]+$/,'') + '...';
+                return full;
+            }
+
+            const autoDescriptionEs = hasDescriptionEs ? safe.description : buildDescriptionEs();
+            const autoDescriptionEn = hasDescriptionEn ? safe.descriptionEn : buildDescriptionEn();
+
+            return res.json({
+                ...safe,
+                tagsEs,
+                tagsEn,
+                unpublished: a.status !== 'PUBLISHED',
+                description: autoDescriptionEs,
+                descriptionEn: autoDescriptionEn,
+            });
     } catch (e) {
         console.error('[ASSETS] getAssetBySlug error:', e);
         return res.status(500).json({ message: 'Error getting asset by slug' });
