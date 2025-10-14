@@ -1903,6 +1903,7 @@ export const latestAssets = async (req, res) => {
                 titleEn: true,
                 images: true,
                 isPremium: true,
+                createdAt: true,
                 categories: {
                     select: {
                         id: true,
@@ -1948,6 +1949,7 @@ export const mostDownloadedAssets = async (req, res) => {
                 images: true,
                 isPremium: true,
                 downloads: true,
+                createdAt: true,
                 categories: {
                     select: {
                         id: true,
@@ -2070,6 +2072,7 @@ export const searchAssets = async (req, res) => {
             images: true,
             isPremium: true,
             downloads: true,
+            createdAt: true,
             categories: {
                 select: {
                     id: true,
