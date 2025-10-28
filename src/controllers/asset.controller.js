@@ -67,6 +67,8 @@ function safeName(s) {
         .replace(/^-+|-+$/g, '')
         .slice(0, 120);
 }
+
+
 function safeFileName(originalName) {
     const ext = path.extname(originalName) || '';
     const base =
@@ -1988,230 +1990,507 @@ export const mostDownloadedAssets = async (req, res) => {
 };
 
 // Búsqueda pública con filtros por categorías, tags y texto libre
+// export const searchAssets = async (req, res) => {
+//     try {
+//         const {
+//             q = '',
+//             categories = '',
+//             tags = '',
+//             order = '',
+//             plan,
+//             isPremium,
+//             pageIndex,
+//             pageSize,
+//         } = req.query || {};
+
+//         const qStr = String(q || '').trim();
+//         const qLower = qStr.toLowerCase();
+//         const qSlug = qLower.replace(/[^a-z0-9-_]+/g, '-');
+
+//         // Paginación (zero-based)
+//         let page = Number.isFinite(Number(pageIndex)) ? Number(pageIndex) : 0;
+//         if (!Number.isFinite(page) || page < 0) page = 0;
+//         let size = Number.isFinite(Number(pageSize)) ? Number(pageSize) : 24;
+//         if (!Number.isFinite(size) || size <= 0) size = 24;
+//         // límites razonables para evitar respuestas gigantes
+//         if (size > 96) size = 96;
+
+//         const catListRaw = String(categories || '')
+//             .split(',')
+//             .map((s) => s.trim())
+//             .filter(Boolean);
+//         const catList = catListRaw.map((s) => safeName(s));
+
+//         const tagTokens = String(tags || '')
+//             .split(',')
+//             .map((s) => s.trim().toLowerCase())
+//             .filter(Boolean);
+
+//         let resolvedTagSlugsSet = new Set();
+//         if (tagTokens.length) {
+//             try {
+//                 const rows = await prisma.tag.findMany({
+//                     where: {
+//                         OR: [
+//                             { slug: { in: tagTokens } },
+//                             { slugEn: { in: tagTokens } },
+//                         ],
+//                     },
+//                     select: { slug: true },
+//                 });
+//                 for (const r of rows)
+//                     resolvedTagSlugsSet.add(String(r.slug).toLowerCase());
+//                 for (const t of tagTokens) resolvedTagSlugsSet.add(t);
+//             } catch (e) {
+//                 resolvedTagSlugsSet = new Set(tagTokens);
+//             }
+//         }
+
+//         const where = { status: 'PUBLISHED' };
+//         // Filtro por plan o isPremium: plan=free|premium o isPremium=true|false
+//         const planStr = String(plan || '').toLowerCase();
+//         if (planStr === 'free') where.isPremium = false;
+//         else if (planStr === 'premium') where.isPremium = true;
+//         if (isPremium !== undefined && String(isPremium).length) {
+//             const b = String(isPremium).toLowerCase();
+//             if (b === 'true') where.isPremium = true;
+//             if (b === 'false') where.isPremium = false;
+//         }
+
+//         const andArr = [];
+//         if (catList.length) {
+//             andArr.push({
+//                 OR: [
+//                     { categories: { some: { slug: { in: catList } } } },
+//                     { categories: { some: { slugEn: { in: catList } } } },
+//                 ],
+//             });
+//         }
+//         const tagList = Array.from(resolvedTagSlugsSet);
+//         if (tagList.length) {
+//             andArr.push({ tags: { some: { slug: { in: tagList } } } });
+//         }
+//         if (andArr.length) where.AND = andArr;
+
+//         const baseSelect = {
+//             id: true,
+//             slug: true,
+//             title: true,
+//             titleEn: true,
+//             images: true,
+//             isPremium: true,
+//             downloads: true,
+//             createdAt: true,
+//             categories: {
+//                 select: {
+//                     id: true,
+//                     name: true,
+//                     nameEn: true,
+//                     slug: true,
+//                     slugEn: true,
+//                 },
+//             },
+//             tags: {
+//                 select: {
+//                     slug: true,
+//                     slugEn: true,
+//                     name: true,
+//                     nameEn: true,
+//                 },
+//             },
+//         };
+
+//         const orderBy =
+//             String(order).toLowerCase() === 'downloads'
+//                 ? [{ downloads: 'desc' }, { id: 'desc' }]
+//                 : { id: 'desc' };
+
+//         let itemsDb;
+//         let total = 0;
+//         if (!qLower) {
+//             // Caso simple: sin término de búsqueda. Usamos count + skip/take para total real y página exacta.
+//             total = await prisma.asset.count({ where });
+//             itemsDb = await prisma.asset.findMany({
+//                 where,
+//                 orderBy,
+//                 skip: page * size,
+//                 take: size,
+//                 select: baseSelect,
+//             });
+//         } else {
+//             // Caso con búsqueda: traemos un universo acotado y luego puntuamos en memoria.
+//             itemsDb = await prisma.asset.findMany({
+//                 where,
+//                 orderBy,
+//                 take: 1000,
+//                 select: baseSelect,
+//             });
+//         }
+
+//         const scored = [];
+//         for (const it of itemsDb) {
+//             if (!qLower) {
+//                 scored.push({ it, score: 0 });
+//                 continue;
+//             }
+
+//             const title = String(it.title || '');
+//             const titleEn = String(it.titleEn || '');
+//             const descr = String(it.description || '');
+//             const arch = String(it.archiveName || '');
+//             const imgs = Array.isArray(it.images) ? it.images : [];
+
+//             const tagsArr = Array.isArray(it.tags) ? it.tags : [];
+//             const catsArr = Array.isArray(it.categories) ? it.categories : [];
+
+//             const titleL = title.toLowerCase();
+//             const titleEnL = titleEn.toLowerCase();
+//             const descrL = descr.toLowerCase();
+//             const archL = arch.toLowerCase();
+//             const imgsL = imgs.map((p) => String(p).toLowerCase());
+
+//             const tagsTexts = tagsArr.flatMap((t) =>
+//                 [t.slug, t.slugEn, t.name, t.nameEn].filter(Boolean).map(String)
+//             );
+//             const catsTexts = catsArr.flatMap((c) =>
+//                 [c.slug, c.slugEn, c.name, c.nameEn].filter(Boolean).map(String)
+//             );
+//             const tagsL = tagsTexts.map((x) => x.toLowerCase());
+//             const catsL = catsTexts.map((x) => x.toLowerCase());
+
+//             let score = 0;
+//             if (titleL.includes(qLower)) score += 120;
+//             if (titleEnL.includes(qLower)) score += 115;
+//             if (archL && archL.includes(qLower)) score += 90;
+//             if (imgsL.some((p) => p.includes(qLower))) score += 85;
+//             if (tagsL.some((t) => t.includes(qLower))) score += 75;
+//             if (catsL.some((c) => c.includes(qLower))) score += 55;
+//             if (descrL.includes(qLower)) score += 35;
+//             if (titleL.startsWith(qLower) || titleEnL.startsWith(qLower))
+//                 score += 10;
+
+//             if (score > 0) scored.push({ it, score });
+//         }
+
+//         if (qLower) {
+//             scored.sort((a, b) => b.score - a.score || b.it.id - a.it.id);
+//         } else if (String(order).toLowerCase() === 'downloads') {
+//             scored.sort(
+//                 (a, b) => b.it.downloads - a.it.downloads || b.it.id - a.it.id
+//             );
+//         }
+
+//         let out = [];
+//         let hasMore = false;
+//         if (qLower) {
+//             // Lista completa en memoria (máximo 1000 por consulta a DB)
+//             const outFull = scored.map(({ it }) => it);
+//             total = outFull.length; // total = coincidencias
+//             const start = page * size;
+//             const end = start + size;
+//             out = start < total ? outFull.slice(start, end) : [];
+//             hasMore = end < total;
+//         } else {
+//             // Ya paginado con skip/take en la consulta
+//             out = itemsDb;
+//             hasMore = (page + 1) * size < total;
+//         }
+
+//         const enriched = out.map((it) => {
+//             const rest = { ...it };
+//             delete rest.megaLink;
+//             const tagsEs = Array.isArray(it.tags)
+//                 ? it.tags.map((t) => t.slug)
+//                 : [];
+//             const tagsEn = Array.isArray(it.tags)
+//                 ? it.tags.map((t) => t.nameEn || t.name || t.slug)
+//                 : [];
+//             return { ...rest, tagsEs, tagsEn };
+//         });
+
+//     return res.json({ items: enriched, total, page, pageSize: size, hasMore });
+//     } catch (e) {
+//         console.error('[ASSETS] search error:', e);
+//         return res.status(500).json({ message: 'Error searching assets' });
+//     }
+// };
+
+
 export const searchAssets = async (req, res) => {
-    try {
-        const {
-            q = '',
-            categories = '',
-            tags = '',
-            order = '',
-            plan,
-            isPremium,
-            pageIndex,
-            pageSize,
-        } = req.query || {};
+  try {
+    const {
+      q = '',
+      categories = '',
+      tags = '',
+      pageIndex,
+      pageSize,
+      // opcionales (si quieres mantenerlos)
+      plan,
+      isPremium,
+      order // ignorado a propósito: siempre latest-first
+    } = req.query || {};
 
-        const qStr = String(q || '').trim();
-        const qLower = qStr.toLowerCase();
-        const qSlug = qLower.replace(/[^a-z0-9-_]+/g, '-');
+    // --- Paginación (zero-based) ---
+    let page = Number.isFinite(Number(pageIndex)) ? Number(pageIndex) : 0;
+    if (!Number.isFinite(page) || page < 0) page = 0;
 
-        // Paginación (zero-based)
-        let page = Number.isFinite(Number(pageIndex)) ? Number(pageIndex) : 0;
-        if (!Number.isFinite(page) || page < 0) page = 0;
-        let size = Number.isFinite(Number(pageSize)) ? Number(pageSize) : 24;
-        if (!Number.isFinite(size) || size <= 0) size = 24;
-        // límites razonables para evitar respuestas gigantes
-        if (size > 96) size = 96;
+    let size = Number.isFinite(Number(pageSize)) ? Number(pageSize) : 24;
+    if (!Number.isFinite(size) || size <= 0) size = 24;
+    if (size > 96) size = 96;
 
-        const catListRaw = String(categories || '')
-            .split(',')
-            .map((s) => s.trim())
-            .filter(Boolean);
-        const catList = catListRaw.map((s) => safeName(s));
+    // --- Texto libre: minúsculas para consistencia ---
+    const qStr = String(q || '').trim();
+    const qLower = qStr.toLowerCase();
 
-        const tagTokens = String(tags || '')
-            .split(',')
-            .map((s) => s.trim().toLowerCase())
-            .filter(Boolean);
+    // --- Listas de categorías y tags ---
+    const catList = String(categories || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => safeName(s));
 
-        let resolvedTagSlugsSet = new Set();
-        if (tagTokens.length) {
-            try {
-                const rows = await prisma.tag.findMany({
-                    where: {
-                        OR: [
-                            { slug: { in: tagTokens } },
-                            { slugEn: { in: tagTokens } },
-                        ],
-                    },
-                    select: { slug: true },
-                });
-                for (const r of rows)
-                    resolvedTagSlugsSet.add(String(r.slug).toLowerCase());
-                for (const t of tagTokens) resolvedTagSlugsSet.add(t);
-            } catch (e) {
-                resolvedTagSlugsSet = new Set(tagTokens);
-            }
+    const tagTokens = String(tags || '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+
+    // Resolver tags por slug y slugEn (case-insensitive)
+    let resolvedTagSlugs = [];
+    if (tagTokens.length) {
+      try {
+        const rows = await prisma.tag.findMany({
+          where: {
+            OR: [
+              { slug: { in: tagTokens } },
+              { slugEn: { in: tagTokens } },
+            ],
+          },
+          select: { slug: true, slugEn: true },
+        });
+        const set = new Set(tagTokens);
+        for (const r of rows) {
+          if (r.slug) set.add(String(r.slug).toLowerCase());
+          if (r.slugEn) set.add(String(r.slugEn).toLowerCase());
         }
+        resolvedTagSlugs = Array.from(set);
+      } catch {
+        resolvedTagSlugs = tagTokens;
+      }
+    }
 
-        const where = { status: 'PUBLISHED' };
-        // Filtro por plan o isPremium: plan=free|premium o isPremium=true|false
-        const planStr = String(plan || '').toLowerCase();
-        if (planStr === 'free') where.isPremium = false;
-        else if (planStr === 'premium') where.isPremium = true;
-        if (isPremium !== undefined && String(isPremium).length) {
-            const b = String(isPremium).toLowerCase();
-            if (b === 'true') where.isPremium = true;
-            if (b === 'false') where.isPremium = false;
-        }
+    // --- WHERE base ---
+    const where = { status: 'PUBLISHED' };
 
-        const andArr = [];
-        if (catList.length) {
-            andArr.push({
-                OR: [
-                    { categories: { some: { slug: { in: catList } } } },
-                    { categories: { some: { slugEn: { in: catList } } } },
-                ],
-            });
-        }
-        const tagList = Array.from(resolvedTagSlugsSet);
-        if (tagList.length) {
-            andArr.push({ tags: { some: { slug: { in: tagList } } } });
-        }
-        if (andArr.length) where.AND = andArr;
+    // Opcional: plan/isPremium (se respeta si lo usas en el front)
+    const planStr = String(plan || '').toLowerCase();
+    if (planStr === 'free') where.isPremium = false;
+    else if (planStr === 'premium') where.isPremium = true;
 
-        const baseSelect = {
-            id: true,
-            slug: true,
-            title: true,
-            titleEn: true,
-            images: true,
-            isPremium: true,
-            downloads: true,
-            createdAt: true,
-            categories: {
-                select: {
-                    id: true,
-                    name: true,
-                    nameEn: true,
-                    slug: true,
-                    slugEn: true,
-                },
-            },
-            tags: {
-                select: {
-                    slug: true,
-                    slugEn: true,
-                    name: true,
-                    nameEn: true,
-                },
-            },
-        };
+    if (isPremium !== undefined && String(isPremium).length) {
+      const b = String(isPremium).toLowerCase();
+      if (b === 'true') where.isPremium = true;
+      if (b === 'false') where.isPremium = false;
+    }
 
-        const orderBy =
-            String(order).toLowerCase() === 'downloads'
-                ? [{ downloads: 'desc' }, { id: 'desc' }]
-                : { id: 'desc' };
+    const andArr = [];
 
-        let itemsDb;
-        let total = 0;
+    // Filtro por categorías: acepta slug y slugEn
+    if (catList.length) {
+      andArr.push({
+        OR: [
+          { categories: { some: { slug:   { in: catList } } } },
+          { categories: { some: { slugEn: { in: catList } } } },
+        ],
+      });
+    }
+
+    // Filtro por tags: acepta slug y slugEn
+    if (resolvedTagSlugs.length) {
+      andArr.push({
+        OR: [
+          { tags: { some: { slug:   { in: resolvedTagSlugs } } } },
+          { tags: { some: { slugEn: { in: resolvedTagSlugs } } } },
+        ],
+      });
+    }
+
+    // Para búsquedas con q: no añadimos una sola condición OR aquí.
+    // En su lugar haremos 3 consultas separadas (títulos -> tags -> categorías)
+    // y las concatenaremos en ese orden, eliminando duplicados, para garantizar
+    // que los resultados aparezcan primero por nombre, luego por tags y al final
+    // por categorías. Si qLower no existe mantendremos la paginación normal.
+
+    if (andArr.length) where.AND = andArr;
+
+    // --- SELECT mínimo necesario + relaciones ---
+    const select = {
+      id: true,
+      slug: true,
+      title: true,
+      titleEn: true,
+      images: true,
+      isPremium: true,
+      downloads: true,
+      createdAt: true,
+      archiveName: true,
+
+      categories: {
+        select: {
+          id: true,
+          name: true,
+          nameEn: true,
+          slug: true,
+          slugEn: true,
+        },
+      },
+      tags: {
+        select: {
+          slug: true,
+          slugEn: true,
+          name: true,
+          nameEn: true,
+        },
+      },
+    };
+
+    // --- ORDEN: siempre los últimos subidos primero ---
+    const orderBy = [{ createdAt: 'desc' }, { id: 'desc' }];
+
+        // --- total + página ---
         if (!qLower) {
-            // Caso simple: sin término de búsqueda. Usamos count + skip/take para total real y página exacta.
-            total = await prisma.asset.count({ where });
-            itemsDb = await prisma.asset.findMany({
+            // Sin texto de búsqueda: paginación normal en DB
+            const total = await prisma.asset.count({ where });
+            const itemsDb = await prisma.asset.findMany({
                 where,
                 orderBy,
                 skip: page * size,
                 take: size,
-                select: baseSelect,
+                select,
             });
-        } else {
-            // Caso con búsqueda: traemos un universo acotado y luego puntuamos en memoria.
-            itemsDb = await prisma.asset.findMany({
-                where,
-                orderBy,
-                take: 1000,
-                select: baseSelect,
+
+            // --- Enriquecimiento de salida ---
+            const items = itemsDb.map((it) => {
+                const {
+                    // ocultar megaLink si está en el modelo fuera del select
+                    // megaLink,  // no se selecciona
+                    ...rest
+                } = it;
+
+                const tagsEs = Array.isArray(it.tags) ? it.tags.map((t) => t.slug) : [];
+                const tagsEn = Array.isArray(it.tags)
+                    ? it.tags.map((t) => t.nameEn || t.name || t.slug)
+                    : [];
+
+                return { ...rest, tagsEs, tagsEn };
             });
+
+            const hasMore = (page + 1) * size < total;
+
+            return res.json({ items, total, page, pageSize: size, hasMore });
         }
 
-        const scored = [];
-        for (const it of itemsDb) {
-            if (!qLower) {
-                scored.push({ it, score: 0 });
-                continue;
+        // Rama para qLower: realizar 3 consultas separadas y concatenar
+        // 1) coincidencias por título/archiveName
+        // 2) coincidencias por tags
+        // 3) coincidencias por categories
+        // Además calculamos `total` con un count que engloba las 3 condiciones.
+
+        // Condiciones específicas
+        const titleCond = {
+            OR: [
+                { title: { contains: qStr } },
+                { titleEn: { contains: qStr } },
+                { archiveName: { contains: qStr } },
+            ],
+        };
+
+        const tagsCond = {
+            tags: {
+                some: {
+                    OR: [
+                        { slug: { contains: qStr } },
+                        { slugEn: { contains: qStr } },
+                        { name: { contains: qStr } },
+                        { nameEn: { contains: qStr } },
+                    ],
+                },
+            },
+        };
+
+        const catsCond = {
+            categories: {
+                some: {
+                    OR: [
+                        { slug: { contains: qStr } },
+                        { slugEn: { contains: qStr } },
+                        { name: { contains: qStr } },
+                        { nameEn: { contains: qStr } },
+                    ],
+                },
+            },
+        };
+
+        // count total de coincidencias únicas (DB)
+        const matchAnyWhere = { ...where };
+        // asegurarnos de mantener AND existente
+        matchAnyWhere.AND = Array.isArray(matchAnyWhere.AND) ? [...matchAnyWhere.AND] : [];
+        matchAnyWhere.AND.push({ OR: [titleCond, tagsCond, catsCond] });
+
+        const total = await prisma.asset.count({ where: matchAnyWhere });
+
+        // límite razonable en memoria (igual que antes)
+        const MEM_LIMIT = 1000;
+
+        // Ejecutar 3 consultas separadas manteniendo orden por createdAt desc
+        const titleItems = await prisma.asset.findMany({ where: { ...where, AND: [...(where.AND || []), titleCond] }, orderBy, take: MEM_LIMIT, select });
+        const tagItems = await prisma.asset.findMany({ where: { ...where, AND: [...(where.AND || []), tagsCond] }, orderBy, take: MEM_LIMIT, select });
+        const catItems = await prisma.asset.findMany({ where: { ...where, AND: [...(where.AND || []), catsCond] }, orderBy, take: MEM_LIMIT, select });
+
+        // Concatenar en el orden deseado y eliminar duplicados
+        const seen = new Set();
+        const combined = [];
+        for (const it of titleItems) {
+            if (!seen.has(it.id)) {
+                seen.add(it.id);
+                combined.push(it);
             }
-
-            const title = String(it.title || '');
-            const titleEn = String(it.titleEn || '');
-            const descr = String(it.description || '');
-            const arch = String(it.archiveName || '');
-            const imgs = Array.isArray(it.images) ? it.images : [];
-
-            const tagsArr = Array.isArray(it.tags) ? it.tags : [];
-            const catsArr = Array.isArray(it.categories) ? it.categories : [];
-
-            const titleL = title.toLowerCase();
-            const titleEnL = titleEn.toLowerCase();
-            const descrL = descr.toLowerCase();
-            const archL = arch.toLowerCase();
-            const imgsL = imgs.map((p) => String(p).toLowerCase());
-
-            const tagsTexts = tagsArr.flatMap((t) =>
-                [t.slug, t.slugEn, t.name, t.nameEn].filter(Boolean).map(String)
-            );
-            const catsTexts = catsArr.flatMap((c) =>
-                [c.slug, c.slugEn, c.name, c.nameEn].filter(Boolean).map(String)
-            );
-            const tagsL = tagsTexts.map((x) => x.toLowerCase());
-            const catsL = catsTexts.map((x) => x.toLowerCase());
-
-            let score = 0;
-            if (titleL.includes(qLower)) score += 120;
-            if (titleEnL.includes(qLower)) score += 115;
-            if (archL && archL.includes(qLower)) score += 90;
-            if (imgsL.some((p) => p.includes(qLower))) score += 85;
-            if (tagsL.some((t) => t.includes(qLower))) score += 75;
-            if (catsL.some((c) => c.includes(qLower))) score += 55;
-            if (descrL.includes(qLower)) score += 35;
-            if (titleL.startsWith(qLower) || titleEnL.startsWith(qLower))
-                score += 10;
-
-            if (score > 0) scored.push({ it, score });
+        }
+        for (const it of tagItems) {
+            if (!seen.has(it.id)) {
+                seen.add(it.id);
+                combined.push(it);
+            }
+        }
+        for (const it of catItems) {
+            if (!seen.has(it.id)) {
+                seen.add(it.id);
+                combined.push(it);
+            }
         }
 
-        if (qLower) {
-            scored.sort((a, b) => b.score - a.score || b.it.id - a.it.id);
-        } else if (String(order).toLowerCase() === 'downloads') {
-            scored.sort(
-                (a, b) => b.it.downloads - a.it.downloads || b.it.id - a.it.id
-            );
-        }
+        // Paginación en memoria sobre la lista combinada
+        const start = page * size;
+        const end = start + size;
+        const outFull = combined.slice(0, MEM_LIMIT); // respetar límite
+        const out = start < outFull.length ? outFull.slice(start, end) : [];
+        const hasMore = end < combined.length;
 
-        let out = [];
-        let hasMore = false;
-        if (qLower) {
-            // Lista completa en memoria (máximo 1000 por consulta a DB)
-            const outFull = scored.map(({ it }) => it);
-            total = outFull.length; // total = coincidencias
-            const start = page * size;
-            const end = start + size;
-            out = start < total ? outFull.slice(start, end) : [];
-            hasMore = end < total;
-        } else {
-            // Ya paginado con skip/take en la consulta
-            out = itemsDb;
-            hasMore = (page + 1) * size < total;
-        }
-
-        const enriched = out.map((it) => {
-            const rest = { ...it };
-            delete rest.megaLink;
-            const tagsEs = Array.isArray(it.tags)
-                ? it.tags.map((t) => t.slug)
-                : [];
-            const tagsEn = Array.isArray(it.tags)
-                ? it.tags.map((t) => t.nameEn || t.name || t.slug)
-                : [];
+        const items = out.map((it) => {
+            const { ...rest } = it;
+            const tagsEs = Array.isArray(it.tags) ? it.tags.map((t) => t.slug) : [];
+            const tagsEn = Array.isArray(it.tags) ? it.tags.map((t) => t.nameEn || t.name || t.slug) : [];
             return { ...rest, tagsEs, tagsEn };
         });
 
-    return res.json({ items: enriched, total, page, pageSize: size, hasMore });
-    } catch (e) {
-        console.error('[ASSETS] search error:', e);
-        return res.status(500).json({ message: 'Error searching assets' });
-    }
+        return res.json({ items, total, page, pageSize: size, hasMore });
+
+        // (la lógica de respuesta ya fue manejada en las ramas anteriores)
+  } catch (e) {
+    console.error('[ASSETS] search error:', e);
+    return res.status(500).json({ message: 'Error searching assets' });
+  }
 };
+
 
 
 // Solicitud de descarga (segura)
