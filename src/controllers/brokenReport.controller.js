@@ -1,18 +1,37 @@
 import { PrismaClient } from '@prisma/client'
-import fetch from 'node-fetch';
 const RECAPTCHA_SECRET_KEY = process.env.RECAPTCHA_SECRET_KEY;
+
 async function validateCaptcha(token, remoteIp) {
+  // Use global fetch if available (Node 18+). Otherwise try dynamic import of node-fetch.
+  let fetchFn = (typeof fetch !== 'undefined') ? fetch : null;
+  if (!fetchFn) {
+    try {
+      const mod = await import('node-fetch');
+      fetchFn = mod.default || mod;
+    } catch (err) {
+      console.warn('[CAPTCHA] fetch not available and node-fetch could not be imported:', err?.message);
+      return false;
+    }
+  }
+
+  if (!RECAPTCHA_SECRET_KEY) {
+    console.warn('[CAPTCHA] RECAPTCHA_SECRET_KEY not set in environment; skipping captcha check in non-production');
+    // In production we should fail; in development allow reports to proceed so "reportes" are not blocked when env isn't set
+    return process.env.NODE_ENV === 'production' ? false : true;
+  }
+
   const params = new URLSearchParams();
   params.append('secret', RECAPTCHA_SECRET_KEY);
   params.append('response', token);
   if (remoteIp) params.append('remoteip', remoteIp);
-  const res = await fetch('https://www.google.com/recaptcha/api/siteverify', {
+
+  const res = await fetchFn('https://www.google.com/recaptcha/api/siteverify', {
     method: 'POST',
     body: params
   });
   const data = await res.json();
   console.log('[CAPTCHA]', data); // LOG para debug
-  return data.success;
+  return Boolean(data?.success);
 }
 
 const prisma = new PrismaClient()
@@ -26,7 +45,15 @@ export const createBrokenReport = async (req, res) => {
 
     const captchaToken = req.body?.captchaToken;
     const ip = req.headers['x-forwarded-for']?.toString().split(',')[0]?.trim() || req.socket?.remoteAddress || ''
-    if (!captchaToken || !(await validateCaptcha(captchaToken, ip))) {
+    // If RECAPTCHA_SECRET_KEY is configured, require a token and validate it.
+    // If not configured (dev), allow reporting without a token.
+    let captchaOk = true;
+    if (RECAPTCHA_SECRET_KEY) {
+      if (!captchaToken || !(await validateCaptcha(captchaToken, ip))) {
+        captchaOk = false;
+      }
+    }
+    if (!captchaOk) {
       return res.status(400).json({ ok: false, error: 'INVALID_CAPTCHA' });
     }
     const ua = req.headers['user-agent'] || ''
@@ -70,9 +97,32 @@ export const listBrokenReports = async (_req, res) => {
       orderBy: { createdAt: 'desc' },
       select: { id: true, assetId: true, note: true, status: true, createdAt: true, ip: true, ua: true },
     })
-    return res.json({ ok: true, data })
+
+    // Obtener títulos de assets relacionados en una sola consulta para evitar N+1
+    const assetIds = Array.from(new Set(data.map((d) => d.assetId).filter(Boolean)))
+    let assetMap = {}
+    if (assetIds.length > 0) {
+      const assets = await prisma.asset.findMany({ where: { id: { in: assetIds } }, select: { id: true, title: true } })
+      assetMap = Object.fromEntries(assets.map((a) => [a.id, a.title]))
+    }
+
+    const mapped = data.map((d) => ({ ...d, assetTitle: assetMap[d.assetId] || null }))
+    return res.json({ ok: true, data: mapped })
   } catch (e) {
     console.error('listBrokenReports error', e)
+    return res.status(500).json({ ok: false, error: 'INTERNAL_ERROR' })
+  }
+}
+
+export const deleteBrokenReportsByAsset = async (req, res) => {
+  try {
+    const assetId = Number.parseInt(req.params.assetId, 10)
+    if (!assetId || assetId <= 0) return res.status(400).json({ ok: false, error: 'INVALID_INPUT' })
+
+    const result = await prisma.brokenReport.deleteMany({ where: { assetId } })
+    return res.json({ ok: true, deleted: result.count })
+  } catch (e) {
+    console.error('deleteBrokenReportsByAsset error', e)
     return res.status(500).json({ ok: false, error: 'INTERNAL_ERROR' })
   }
 }
