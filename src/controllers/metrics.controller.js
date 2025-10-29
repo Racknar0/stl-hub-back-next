@@ -55,3 +55,63 @@ export async function getConnectionsToday(req, res) {
     return res.status(500).json({ error: 'internal' });
   }
 }
+
+export async function getUsersCount(req, res) {
+  try {
+    // Devolver conteo total de usuarios y conteo de usuarios activos
+    const [total, active] = await Promise.all([
+      prisma.user.count(),
+      prisma.user.count({ where: { isActive: true } }),
+    ]);
+    return res.json({ total, active });
+  } catch (e) {
+    console.error('getUsersCount error', e);
+    return res.status(500).json({ error: 'internal' });
+  }
+}
+
+export async function getDownloadMetrics(req, res) {
+  try {
+    const now = new Date()
+    const oneDayAgo = new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000)
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+    const threeSixtyFiveDaysAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000)
+
+    const [d1, d7, d30, d365, total] = await Promise.all([
+      prisma.downloadHistory.count({ where: { downloadedAt: { gte: oneDayAgo } } }),
+      prisma.downloadHistory.count({ where: { downloadedAt: { gte: sevenDaysAgo } } }),
+      prisma.downloadHistory.count({ where: { downloadedAt: { gte: thirtyDaysAgo } } }),
+      prisma.downloadHistory.count({ where: { downloadedAt: { gte: threeSixtyFiveDaysAgo } } }),
+      prisma.downloadHistory.count(),
+    ])
+
+    return res.json({ '1d': d1, '1w': d7, '1m': d30, '1y': d365, all: total })
+  } catch (e) {
+    console.error('getDownloadMetrics error', e)
+    return res.status(500).json({ error: 'internal' })
+  }
+}
+
+export async function getRegistrationMetrics(req, res) {
+  try {
+    const now = new Date()
+    const oneDayAgo = new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000)
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+    const threeSixtyFiveDaysAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000)
+
+    const [d1, d7, d30, d365, total] = await Promise.all([
+      prisma.user.count({ where: { createdAt: { gte: oneDayAgo } } }),
+      prisma.user.count({ where: { createdAt: { gte: sevenDaysAgo } } }),
+      prisma.user.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
+      prisma.user.count({ where: { createdAt: { gte: threeSixtyFiveDaysAgo } } }),
+      prisma.user.count(),
+    ])
+
+    return res.json({ '1d': d1, '1w': d7, '1m': d30, '1y': d365, all: total })
+  } catch (e) {
+    console.error('getRegistrationMetrics error', e)
+    return res.status(500).json({ error: 'internal' })
+  }
+}
