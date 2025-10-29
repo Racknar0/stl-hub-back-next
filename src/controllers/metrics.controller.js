@@ -115,3 +115,36 @@ export async function getRegistrationMetrics(req, res) {
     return res.status(500).json({ error: 'internal' })
   }
 }
+
+export async function getTopDownloads(req, res) {
+  try {
+    const now = new Date()
+    const oneDayAgo = new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000)
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+    const threeSixtyFiveDaysAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000)
+
+    const opts = (gte) => ({
+      by: ['assetId', 'assetTitle'],
+      where: gte ? { downloadedAt: { gte } } : undefined,
+      _count: { id: true },
+      orderBy: { _count: { id: 'desc' } },
+      take: 30,
+    })
+
+    const [d1, d7, d30, d365, all] = await Promise.all([
+      prisma.downloadHistory.groupBy(opts(oneDayAgo)),
+      prisma.downloadHistory.groupBy(opts(sevenDaysAgo)),
+      prisma.downloadHistory.groupBy(opts(thirtyDaysAgo)),
+      prisma.downloadHistory.groupBy(opts(threeSixtyFiveDaysAgo)),
+      prisma.downloadHistory.groupBy(opts(undefined)),
+    ])
+
+  const mapGroup = (arr) => arr.map(r => ({ name: r.assetTitle || `#${r.assetId}`, count: r._count?.id || 0 }))
+
+    return res.json({ '1d': mapGroup(d1), '1w': mapGroup(d7), '1m': mapGroup(d30), '1y': mapGroup(d365), all: mapGroup(all) })
+  } catch (e) {
+    console.error('getTopDownloads error', e)
+    return res.status(500).json({ error: 'internal' })
+  }
+}
