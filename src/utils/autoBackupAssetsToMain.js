@@ -444,14 +444,26 @@ export async function runAutoRestoreMain(){
         }
       }, `CRON-WARMUP-${b.id}`)
     }
-    // Notificación: backup → assets (script)
-    try {
-      const notifTitle = completos ? 'Validación de assets en MAIN: todo completo' : 'Restauración automática de assets desde backups completada'
-      const notifBody = completos
-        ? `Cuenta MAIN ${main.alias||'--'} (${main.email||'--'}). Total: ${candidateAssets.length}. Todos existentes. Links regenerados: ${regeneratedLinks}. Duración: ${durMs} ms.`
-        : `Cuenta MAIN ${main.alias||'--'} (${main.email||'--'}). Total: ${candidateAssets.length}. Restaurados: ${restored}. Existentes: ${skippedExisting}. Links regenerados: ${regeneratedLinks}. No recuperados: ${notRecovered}. Duración: ${durMs} ms.`
-      await prisma.notification.create({ data: { title: notifTitle, body: notifBody, status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'SUCCESS' } })
-    } catch(e){ log.warn('[NOTIF][CRON] No se pudo crear notificación: '+e.message) }
+    // Notificación solo si hubo restauraciones reales para evitar spam cuando todo está completo
+    if (restored > 0) {
+      try {
+        const notifTitle = 'Restauración automática de assets desde backups completada'
+        const notifBody = `Cuenta MAIN ${main.alias||'--'} (${main.email||'--'}). Total: ${candidateAssets.length}. Restaurados: ${restored}. Existentes: ${skippedExisting}. Links regenerados: ${regeneratedLinks}. No recuperados: ${notRecovered}. Duración: ${durMs} ms.`
+        await prisma.notification.create({ data: { title: notifTitle, body: notifBody, status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'SUCCESS' } })
+      } catch(e){ log.warn('[NOTIF][CRON] No se pudo crear notificación (restored>0): '+e.message) }
+    } else if (notRecovered > 0) {
+      // Caso de fallo: había faltantes pero ninguno pudo restaurarse
+      try {
+        const pendingIds = Array.from(needDownload.keys())
+        const notifTitle = 'Fallo en restauración automática de assets'
+        const notifBody = `Cuenta MAIN ${main.alias||'--'} (${main.email||'--'}). Faltantes=${pendingIds.length}. Ninguno restaurado. IDs pendientes: ${pendingIds.slice(0,50).join(', ')}${pendingIds.length>50?' ...':''}. Links regenerados: ${regeneratedLinks}. Duración: ${durMs} ms.`
+        await prisma.notification.create({ data: { title: notifTitle, body: notifBody, status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'ERROR' } })
+        log.warn('[CRON][NOTIF] Generada notificación de fallo en restauración (restored=0 & notRecovered>0)')
+      } catch(e){ log.warn('[NOTIF][CRON][FAIL] No se pudo crear notificación de fallo: '+e.message) }
+    } else {
+      // restored=0 y notRecovered=0 => todos existían, sin spam
+      log.info('[CRON][NOTIF][SKIP] restored=0 pero noRecovered=0 (todos existen, sin restauraciones)')
+    }
     return { ok:true, restored, existing: skippedExisting, regeneratedLinks, notRecovered, total: candidateAssets.length }
   } catch (e){
     log.error(`[CRON][RESTORE] fallo general: ${e.message}`)
