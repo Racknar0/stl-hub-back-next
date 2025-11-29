@@ -88,6 +88,7 @@ router.get('/:id/full-progress', getFullProgress);
 // Estado de archivo staged en uploads/tmp (para flujo SCP) también sin auth
 router.get('/staged-status', getStagedStatus);
 router.get('/staged-status/batch', getStagedStatusBatch);
+router.post('/staged-status/batch', getStagedStatusBatch);
 
 //! A partir de aquí, requieren admin
 router.use(requireAuth, requireAdmin)

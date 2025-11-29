@@ -1034,26 +1034,32 @@ export const getStagedStatus = async (req, res) => {
     }
 };
 
-// GET /api/assets/staged-status/batch?paths=<jsonEncodedArray>&expectedSizes=<jsonEncodedArray>
+// GET/POST /api/assets/staged-status/batch
+// Soporta:
+//  - GET con query:   ?paths=<jsonEncodedArray>&expectedSizes=<jsonEncodedArray>
+//  - POST con body:   { paths: string[], expectedSizes: number[] }
 // Retorna un array de estados [{ path, exists, sizeB, mtimeMs, percent }]
 export const getStagedStatusBatch = async (req, res) => {
     try {
-        const pathsParam = req.query?.paths
-        const expectedParam = req.query?.expectedSizes
+        const isPost = String(req.method).toUpperCase() === 'POST'
+        const pathsParam = isPost ? (req.body?.paths) : (req.query?.paths)
+        const expectedParam = isPost ? (req.body?.expectedSizes) : (req.query?.expectedSizes)
         let paths = []
         let expectedSizes = []
         try {
-            paths = Array.isArray(pathsParam) ? pathsParam : JSON.parse(String(pathsParam || '[]'))
+            if (Array.isArray(pathsParam)) paths = pathsParam
+            else paths = JSON.parse(String(pathsParam || '[]'))
         } catch { paths = [] }
         try {
-            expectedSizes = Array.isArray(expectedParam) ? expectedParam : JSON.parse(String(expectedParam || '[]'))
+            if (Array.isArray(expectedParam)) expectedSizes = expectedParam
+            else expectedSizes = JSON.parse(String(expectedParam || '[]'))
         } catch { expectedSizes = [] }
 
         if (!Array.isArray(paths) || paths.length === 0) {
             return res.status(400).json({ message: 'paths array required' })
         }
-        // Normalizar tamaños
-        expectedSizes = (expectedSizes || []).map((v) => Number(v || 0))
+    // Normalizar tamaños
+    expectedSizes = (expectedSizes || []).map((v) => Number(v || 0))
 
         const tmpRoot = path.resolve(TEMP_DIR) + path.sep; // uploads/tmp/
 
