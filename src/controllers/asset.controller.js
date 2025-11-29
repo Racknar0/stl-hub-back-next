@@ -1034,6 +1034,63 @@ export const getStagedStatus = async (req, res) => {
     }
 };
 
+// GET /api/assets/staged-status/batch?paths=<jsonEncodedArray>&expectedSizes=<jsonEncodedArray>
+// Retorna un array de estados [{ path, exists, sizeB, mtimeMs, percent }]
+export const getStagedStatusBatch = async (req, res) => {
+    try {
+        const pathsParam = req.query?.paths
+        const expectedParam = req.query?.expectedSizes
+        let paths = []
+        let expectedSizes = []
+        try {
+            paths = Array.isArray(pathsParam) ? pathsParam : JSON.parse(String(pathsParam || '[]'))
+        } catch { paths = [] }
+        try {
+            expectedSizes = Array.isArray(expectedParam) ? expectedParam : JSON.parse(String(expectedParam || '[]'))
+        } catch { expectedSizes = [] }
+
+        if (!Array.isArray(paths) || paths.length === 0) {
+            return res.status(400).json({ message: 'paths array required' })
+        }
+        // Normalizar tamaños
+        expectedSizes = (expectedSizes || []).map((v) => Number(v || 0))
+
+        const tmpRoot = path.resolve(TEMP_DIR) + path.sep; // uploads/tmp/
+
+        const results = paths.map((raw, idx) => {
+            const rel = String(raw || '').trim()
+            const normRel = rel.replace(/\\/g, '/').replace(/^\/+/, '')
+            const abs = path.join(UPLOADS_DIR, normRel)
+            const absResolved = path.resolve(abs)
+            if (!absResolved.startsWith(tmpRoot)) {
+                return { path: normRel, exists: false, sizeB: 0, mtimeMs: 0, percent: undefined, error: 'invalid path' }
+            }
+            let exists = false
+            let sizeB = 0
+            let mtimeMs = 0
+            try {
+                const st = fs.statSync(absResolved)
+                if (st.isFile()) {
+                    exists = true
+                    sizeB = Number(st.size)
+                    mtimeMs = Number(st.mtimeMs)
+                }
+            } catch {}
+            const expected = Number(expectedSizes[idx] || 0)
+            let percent = undefined
+            if (exists && expected > 0) {
+                percent = Math.max(0, Math.min(100, Math.floor((sizeB / expected) * 100)))
+            }
+            return { path: normRel, exists, sizeB, mtimeMs, percent }
+        })
+
+        return res.json({ ok: true, data: results })
+    } catch (e) {
+        console.error('[ASSETS] staged-status batch error:', e)
+        return res.status(500).json({ message: 'Error getting staged-status batch' })
+    }
+}
+
 // GET /api/assets/scp-config (admin-only)
 // Devuelve configuración de SCP desde el servidor (no incluye password)
 export const getScpConfig = async (_req, res) => {

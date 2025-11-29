@@ -26,6 +26,7 @@ import {
   checkAssetUnique,
   testUploadSpeed,
   getStagedStatus,
+  getStagedStatusBatch,
   getScpConfig,
   getUploadsRoot,
 } from '../../controllers/asset.controller.js';
@@ -86,6 +87,7 @@ router.get('/:id/replicas', listAssetReplicas);
 router.get('/:id/full-progress', getFullProgress);
 // Estado de archivo staged en uploads/tmp (para flujo SCP) también sin auth
 router.get('/staged-status', getStagedStatus);
+router.get('/staged-status/batch', getStagedStatusBatch);
 
 //! A partir de aquí, requieren admin
 router.use(requireAuth, requireAdmin)
