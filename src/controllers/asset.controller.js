@@ -237,7 +237,7 @@ function toJsonSafe(value) {
 // Listar y obtener
 export const listAssets = async (req, res) => {
     try {
-        const { q = '', pageIndex, pageSize, plan, isPremium } = req.query;
+    const { q = '', pageIndex, pageSize, plan, isPremium, accountId, accountAlias } = req.query;
         const hasPagination = pageIndex !== undefined && pageSize !== undefined;
 
         // Construir filtro dinámico
@@ -259,6 +259,19 @@ export const listAssets = async (req, res) => {
             if (b === 'true') where.isPremium = true;
             if (b === 'false') where.isPremium = false;
         }
+
+        // Filtro por cuenta (ID directo o alias -> ID)
+        let accIdFilter = null;
+        if (accountId !== undefined && accountId !== null && String(accountId).length) {
+            const asNum = Number(accountId);
+            if (Number.isFinite(asNum) && asNum > 0) accIdFilter = asNum;
+        } else if (accountAlias && String(accountAlias).trim().length) {
+            try {
+                const acc = await prisma.megaAccount.findFirst({ where: { alias: { contains: String(accountAlias).trim() } }, select: { id: true } });
+                if (acc?.id) accIdFilter = acc.id;
+            } catch {}
+        }
+        if (accIdFilter) where.accountId = accIdFilter;
 
         if (hasPagination) {
             const take = Math.max(1, Math.min(1000, Number(pageSize) || 50));
