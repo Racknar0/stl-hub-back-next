@@ -97,3 +97,15 @@ export const markAllNotificationsRead = async (req,res) => {
     res.status(500).json({ message:'Error marcando notificaciones' })
   }
 }
+
+// Eliminar todas las notificaciones de tipo AUTOMATION
+export const clearAutomationNotifications = async (req,res) => {
+  try {
+    const result = await prisma.notification.deleteMany({ where: { type: 'AUTOMATION' } })
+    log.info(`[NOTIF][CLEAR_AUTOMATION] deleted=${result.count}`)
+    res.json({ ok: true, deleted: result.count })
+  } catch (e) {
+    log.error('[NOTIF][CLEAR_AUTOMATION] '+e.message)
+    res.status(500).json({ message: 'Error limpiando notificaciones de automatizaciones' })
+  }
+}
