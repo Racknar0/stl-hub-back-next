@@ -243,7 +243,12 @@ export const listAssets = async (req, res) => {
         // Construir filtro dinámico
         const where = {};
         if (q) {
-            where.title = { contains: String(q) };
+            const qStr = String(q);
+            // Buscar tanto por título visible como por nombre de archivo (si existe en el modelo)
+            where.OR = [
+                { title: { contains: qStr } },
+                { archiveName: { contains: qStr } },
+            ];
         }
         // plan=free|premium o isPremium=true|false
         const planStr = String(plan || '').toLowerCase();
