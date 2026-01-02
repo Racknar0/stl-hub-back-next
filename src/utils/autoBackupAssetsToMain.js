@@ -1,15 +1,18 @@
 import { PrismaClient } from '@prisma/client'
 import { decryptToJson } from './cryptoUtils.js'
 import { withMegaLock } from './megaQueue.js'
-import { spawn } from 'child_process'
+import { spawn, execSync } from 'child_process'
 import path from 'path'
 import fs from 'fs'
 import { fileURLToPath } from 'url'
 import { log } from './logger.js'
 
 /*
-  Script: validateAssetsOnLastAccount (FINAL - CON TIMEOUT ANTI-CUELGUE)
-  Versión: PROD - HTTP FORZADO
+  Script: validateAssetsOnLastAccount (FINAL V3 - ZOMBIE KILLER EDITION)
+  Mejoras:
+    - Reinicio forzoso del servidor MEGA si hay errores (fix "login in progress").
+    - Autenticación de proxy mediante flags separadas (--username/--password).
+    - Timeout robusto y manejo de errores crítico.
 */
 
 const prisma = new PrismaClient()
@@ -20,7 +23,7 @@ const DEFAULT_FREE_QUOTA_MB = Number(process.env.MEGA_FREE_QUOTA_MB) || 20480
 const UPLOADS_ACTIVE_FLAG = process.env.UPLOADS_ACTIVE_FLAG || path.join(UPLOADS_DIR, 'sync-cache', 'uploads-active.lock')
 
 // ==========================================
-// SISTEMA DE PROXIES (Protocolo HTTP Forzado)
+// SISTEMA DE PROXIES
 // ==========================================
 const PROXY_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'proxies.txt');
 let PROXY_LIST = [];
@@ -29,29 +32,10 @@ let CURRENT_PROXY = null;
 try {
   if (fs.existsSync(PROXY_FILE)) {
     const content = fs.readFileSync(PROXY_FILE, 'utf-8');
+    // Guardamos las líneas crudas, las procesamos al momento de usar
     PROXY_LIST = content.split(/\r?\n/)
       .map(l => l.trim())
-      .filter(l => l && !l.startsWith('#'))
-      .map(line => {
-        // Detectar si la línea ya tiene http/socks. Si no, o si es user:pass@ip...,
-        // la convertimos forzosamente a formato HTTP válido para tus proxies.
-        
-        let clean = line;
-        // Si viene como socks5://..., lo cambiamos a http:// porque tus proxies son HTTP
-        if (clean.startsWith('socks5://')) clean = clean.replace('socks5://', 'http://');
-        else if (!clean.startsWith('http://')) {
-            // Si no tiene prefijo, asumimos que necesita http://
-            // Manejo de formato: IP:PORT:USER:PASS -> http://USER:PASS@IP:PORT
-            const parts = clean.split(':');
-            if (parts.length === 4 && !clean.includes('@')) {
-               clean = `http://${parts[2]}:${parts[3]}@${parts[0]}:${parts[1]}`;
-            } else if (!clean.startsWith('http://')) {
-               // Si es user:pass@ip:port o ip:port, solo agregamos http://
-               clean = `http://${clean}`;
-            }
-        }
-        return clean;
-      });
+      .filter(l => l && !l.startsWith('#'));
     log.info(`[INIT] Proxies cargados: ${PROXY_LIST.length}`);
   } else {
     log.warn('[INIT] NO se encontró proxies.txt. Se usará IP DIRECTA.');
@@ -60,32 +44,62 @@ try {
   log.error(`[INIT] Error leyendo proxies: ${e.message}`);
 }
 
+// Función para reiniciar el servidor si se queda "tonto"
+async function resetMegaServer() {
+  log.warn('[MEGA] Ejecutando reinicio de emergencia del servidor MEGA...');
+  try {
+    try { await runCmd('mega-quit', [], { quiet: true, timeoutMs: 5000 }); } catch {}
+    try { execSync('pkill -9 -f mega-cmd-server'); } catch {} // Matar a la fuerza
+    await sleep(5000); // Esperar que el SO libere recursos
+    // Al ejecutar version, el server arranca solo
+    try { await runCmd('mega-version', [], { quiet: true, timeoutMs: 10000 }); } catch {}
+    log.info('[MEGA] Servidor reiniciado correctamente.');
+  } catch (e) {
+    log.error(`[MEGA] Fallo al reiniciar servidor: ${e.message}`);
+  }
+}
+
 async function setRandomProxy() {
   if (!PROXY_LIST || PROXY_LIST.length === 0) return;
-  const proxy = PROXY_LIST[Math.floor(Math.random() * PROXY_LIST.length)];
-  try {
-    await runCmd('mega-proxy', [proxy], { quiet: true });
-    CURRENT_PROXY = proxy;
-    log.info(`[PROXY] Aplicado: ${proxy}`);
-  } catch (e) {
-    await clearProxy();
+  
+  // Limpiamos primero por seguridad
+  await clearProxy();
+
+  const raw = PROXY_LIST[Math.floor(Math.random() * PROXY_LIST.length)];
+  const parts = raw.split(':');
+  
+  // Asumimos formato IP:PORT:USER:PASS (el de Webshare)
+  if (parts.length === 4) {
+    const [ip, port, user, pass] = parts;
+    const proxyUrl = `http://${ip}:${port}`;
+    try {
+      // Usamos flags separadas, es más robusto
+      await runCmd('mega-proxy', [proxyUrl, `--username=${user}`, `--password=${pass}`], { quiet: true });
+      CURRENT_PROXY = proxyUrl;
+      log.info(`[PROXY] Aplicado: ${proxyUrl}`);
+    } catch (e) {
+      log.warn(`[PROXY] Falló al aplicar ${proxyUrl}: ${e.message}`);
+      await clearProxy();
+    }
+  } else {
+    // Fallback para otros formatos
+    log.warn(`[PROXY] Formato desconocido, saltando: ${raw}`);
   }
 }
 
 async function clearProxy() {
-  try { await runCmd('mega-proxy', ['-d'], { quiet: true }); } catch {}
+  try { await runCmd('mega-proxy', ['--none'], { quiet: true }); } catch {}
   CURRENT_PROXY = null;
 }
 
 // ==========================================
-// FUNCIONES AUXILIARES (CON TIMEOUT)
+// FUNCIONES AUXILIARES
 // ==========================================
 
 function buildCtx(acc){ 
     return acc ? `accId=${acc.id} alias=${acc.alias||'--'} email=${acc.email||'--'}` : '' 
 }
 
-// ESTA ES LA FUNCIÓN QUE EVITA QUE SE CUELGUE
 function runCmd(cmd, args = [], { quiet = false, timeoutMs = 0 } = {}) {
   const printable = `${cmd} ${(args || []).join(' ')}`.trim();
   log.verbose(`[CRON] cmd ${printable}`);
@@ -95,12 +109,10 @@ function runCmd(cmd, args = [], { quiet = false, timeoutMs = 0 } = {}) {
     let settled = false;
     let timer = null;
 
-    // Si pasamos timeoutMs, activamos el reloj de la muerte
     if (timeoutMs > 0) {
       timer = setTimeout(() => {
         if (settled) return;
         settled = true;
-        // Matamos el proceso agresivamente
         try { child.kill('SIGKILL'); } catch {} 
         const msg = `TIMEOUT ${cmd} after ${timeoutMs}ms`;
         if (!quiet) log.warn(`[CRON] ${msg}`);
@@ -116,7 +128,7 @@ function runCmd(cmd, args = [], { quiet = false, timeoutMs = 0 } = {}) {
       if (settled) return;
       settled = true;
       if (code === 0) return resolve({ out, err });
-      if (!quiet) log.warn(`[CRON] fallo cmd ${cmd} code=${code} msg=${(err || out).slice(0, 160)}`);
+      if (!quiet && !err.includes('No proxy')) log.warn(`[CRON] fallo cmd ${cmd} code=${code} msg=${(err || out).slice(0, 160)}`);
       reject(new Error(err || out || `${cmd} exited ${code}`));
     });
     
@@ -146,11 +158,7 @@ function parseSizeToMB(str){
   return Math.round(num * factor)
 }
 
-// Truncado seguro para cuerpos de notificación (evita errores de columna demasiado larga)
-// Límite conservador para columnas VARCHAR cortas (sin cambiar modelo)
-const NOTIF_BODY_MAX = Number(process.env.NOTIF_BODY_MAX) || 240;
-
-function truncateBody(s, max = NOTIF_BODY_MAX) {
+function truncateBody(s, max = 240) {
   if (s == null) return null;
   const str = String(s);
   return str.length > max ? str.slice(0, max - 3) + '...' : str;
@@ -176,12 +184,12 @@ async function getAccountMetrics(base){
 async function megaLogin(payload, ctx) {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      // AQUÍ ESTÁ LA CLAVE: timeoutMs de 45 segundos.
-      // Si el proxy no responde en 45s, se cancela y salta al catch.
+      const TIMEOUT_LOGIN = 60000; // 60s para asegurar conexión con proxies lentos
+
       if (payload?.type === 'session' && payload.session) {
-        await runCmd('mega-login', [payload.session], { quiet: true, timeoutMs: 45000 });
+        await runCmd('mega-login', [payload.session], { quiet: true, timeoutMs: TIMEOUT_LOGIN });
       } else if (payload?.username && payload?.password) {
-        await runCmd('mega-login', [payload.username, payload.password], { quiet: true, timeoutMs: 10000 });
+        await runCmd('mega-login', [payload.username, payload.password], { quiet: true, timeoutMs: TIMEOUT_LOGIN });
       } else {
         throw new Error('Credenciales inválidas');
       }
@@ -190,16 +198,20 @@ async function megaLogin(payload, ctx) {
     } catch (e) {
       log.warn(`[MEGA][LOGIN][FAIL] intento=${attempt} ${ctx} msg=${e.message}`);
       
-      // Fallback: si falla con proxy, probamos UNA VEZ sin proxy para asegurar conexión
+      // Si fallamos, asumimos estado corrupto y reiniciamos servidor
+      await resetMegaServer();
+      await clearProxy();
+
+      // Fallback: Intento sin proxy después del reinicio
       try {
-        await clearProxy();
-        if (payload?.type === 'session') await runCmd('mega-login', [payload.session], { quiet: true, timeoutMs: 30000 });
-        else await runCmd('mega-login', [payload.username, payload.password], { quiet: true, timeoutMs: 30000 });
+        if (payload?.type === 'session') await runCmd('mega-login', [payload.session], { quiet: true, timeoutMs: 40000 });
+        else await runCmd('mega-login', [payload.username, payload.password], { quiet: true, timeoutMs: 40000 });
+        
         log.info(`[MEGA][LOGIN][OK][FALLBACK] ${ctx} (sin proxy)`);
         return;
       } catch (ef) {}
 
-      await sleep(1000 * attempt);
+      await sleep(2000 * attempt);
     }
   }
 }
@@ -216,7 +228,6 @@ export async function runAutoRestoreMain(){
   const maxAssets = process.env.MAX_ASSETS!==undefined ? Number(process.env.MAX_ASSETS) : null
   let main
   
-  // Limitar velocidad
   try {
      await runCmd('mega-speed-limit', ['-d', '2048'], { quiet:true });
      await runCmd('mega-speed-limit', ['-u', '2048'], { quiet:true });
@@ -232,7 +243,6 @@ export async function runAutoRestoreMain(){
     }
     try { fs.writeFileSync(RUN_LOCK, String(new Date().toISOString())) } catch{}
     
-    // Check uploads active
     try {
       const st = fs.existsSync(UPLOADS_ACTIVE_FLAG) ? fs.statSync(UPLOADS_ACTIVE_FLAG) : null
       if (st){
@@ -245,7 +255,6 @@ export async function runAutoRestoreMain(){
       }
     } catch(e){}
 
-    // Seleccionar MAIN
     if (forced){
       main = await prisma.megaAccount.findUnique({ where:{ id:forced }, include:{ credentials:true, backups:{ include:{ backupAccount:{ include:{ credentials:true } } } } } })
       if (!main) throw new Error(`Main forzada inválida`)
@@ -265,7 +274,6 @@ export async function runAutoRestoreMain(){
 
     if (maxAssets === 0) return { ok:true, skipped:true, reason:'MAX_ASSETS_ZERO' }
 
-    // Obtener Assets
     let candidateAssets = await prisma.asset.findMany({
       where: { accountId: main.id },
       select: { id: true, slug: true, archiveName: true, megaLink: true }
@@ -498,8 +506,12 @@ export async function runAutoRestoreMain(){
         await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody), status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'SUCCESS' } })
       } catch(e){ log.warn('[NOTIF][CRON] No se pudo crear notificación (restored>0): '+e.message) }
     } else if (notRecovered > 0) {
-      const pendingIds = Array.from(needDownload.keys())
-      log.warn(`[CRON][FALLO] Restauración automática incompleta. MAIN ${main.alias||'--'} (${main.email||'--'}). Faltantes=${pendingIds.length}. Ninguno restaurado. IDs pendientes (primeros 50): ${pendingIds.slice(0,50).join(', ')}${pendingIds.length>50?' ...':''}. Links regenerados: ${regeneratedLinks}. Duración: ${durMs} ms.`)
+      try {
+        const pendingIds = Array.from(needDownload.keys())
+        const notifTitle = 'Fallo en restauración automática de assets'
+        const notifBody = `Cuenta MAIN ${main.alias||'--'} (${main.email||'--'}). Faltantes=${pendingIds.length}. Ninguno restaurado. IDs pendientes: ${pendingIds.slice(0,50).join(', ')}${pendingIds.length>50?' ...':''}. Links regenerados: ${regeneratedLinks}. Duración: ${durMs} ms.`
+        await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody), status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'ERROR' } })
+      } catch(e){ log.warn('[NOTIF][CRON][FAIL] No se pudo crear notificación de fallo: '+e.message) }
     } else {
       log.info('[CRON][NOTIF][SKIP] restored=0 pero noRecovered=0 (todos existen, sin restauraciones)')
     }
@@ -528,5 +540,5 @@ export async function runAutoRestoreMain(){
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  runAutoRestoreMain().then(r=>{ if(!r.ok) process.exitCode=1 })
+  runAutoRestoreMain().then(r=>{ if(!r.ok) process.exitCode=1 })
 }
