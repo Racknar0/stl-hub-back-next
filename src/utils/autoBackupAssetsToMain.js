@@ -380,16 +380,7 @@ export async function runAutoRestoreMain() {
             : null;
     let main;
     try {
-        // Intento de aplicar límites de velocidad global para reducir riesgo de ban.
-        // Esto es un ajuste de comportamiento: si falla, seguimos adelante sin bloquear la ejecución.
-        try {
-            await runCmd('mega-speed-limit', ['-d', '2048'], { quiet: true }); // 2 MB/s descarga
-            await runCmd('mega-speed-limit', ['-u', '2048'], { quiet: true }); // 2 MB/s subida
-        } catch (e) {
-            log.warn(
-                '[CRON][MEGA] No se pudo aplicar mega-speed-limit: ' + e.message
-            );
-        }
+
     // --- Control de concurrencia: evitar solapamiento de ejecuciones ---
     // Si existe el archivo RUN_LOCK y es reciente, asumimos que otra corrida
     // está activa y evitamos ejecutarnos para no interferir con ella.
