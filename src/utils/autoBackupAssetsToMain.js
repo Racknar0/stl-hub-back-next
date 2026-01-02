@@ -44,6 +44,8 @@ const UPLOADS_ACTIVE_FLAG = process.env.UPLOADS_ACTIVE_FLAG || path.join(UPLOADS
 // ==========================================
 const PROXY_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'proxies.txt');
 let PROXY_LIST = [];
+// Proxy actualmente aplicado (para trazabilidad en logs)
+let CURRENT_PROXY = null;
 
 // Carga automática de proxies.txt (se guardan las líneas en crudo y se normalizan al aplicar)
 try {
@@ -109,6 +111,7 @@ async function setRandomProxy() {
     try {
       await runCmd('mega-proxy', [proxy], { quiet: true });
       log.info(`[PROXY] Aplicado: ${proxy}`);
+      CURRENT_PROXY = proxy;
       return;
     } catch (e) {
       // Intentar siguiente variante
@@ -121,6 +124,7 @@ async function setRandomProxy() {
 
 async function clearProxy() {
   try { await runCmd('mega-proxy', ['-d'], { quiet: true }); } catch {}
+  CURRENT_PROXY = null;
 }
 // ==========================================
 
@@ -234,7 +238,7 @@ async function megaLogin(payload, ctx){
       if (payload?.type==='session' && payload.session) await runCmd('mega-login',[payload.session],{ quiet:true })
       else if (payload?.username && payload?.password) await runCmd('mega-login',[payload.username,payload.password],{ quiet:true })
       else throw new Error('Credenciales inválidas')
-      log.info(`[MEGA][LOGIN][OK] ${ctx} intento=${attempt}`)
+      log.info(`[MEGA][LOGIN][OK] ${ctx} intento=${attempt} proxy=${CURRENT_PROXY? 'on' : 'off'}${CURRENT_PROXY? ` value=${CURRENT_PROXY}` : ''}`)
       return
     } catch (e){
       log.warn(`[MEGA][LOGIN][FAIL] intento=${attempt} ${ctx} msg=${e.message}`)
