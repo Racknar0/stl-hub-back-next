@@ -49,6 +49,20 @@ const UPLOADS_ACTIVE_FLAG =
     path.join(UPLOADS_DIR, 'sync-cache', 'uploads-active.lock');
 
 // ==========================================
+// FLAG DE DIAGNÓSTICO PARA DESACTIVAR PROXY
+// ------------------------------------------
+// Si se activa, se ignora por completo el uso de `mega-proxy` y se fuerza
+// conexión directa. Útil para comprobar si los bloqueos/errores provienen
+// del uso de proxy.
+// - Forzar manualmente aquí poniendo FORCE_DISABLE_PROXY=true
+// - O usar variable de entorno: DISABLE_MEGA_PROXY=1
+// ==========================================
+const FORCE_DISABLE_PROXY = true; // cambia a true para desactivar proxies desde código
+const DISABLE_PROXY =
+    FORCE_DISABLE_PROXY ||
+    ['1', 'true', 'TRUE'].includes(String(process.env.DISABLE_MEGA_PROXY || '').trim());
+
+// ==========================================
 // SISTEMA DE PROXIES Y ANTI-BAN
 // ------------------------------------------
 // - Carga `proxies.txt` (formato opcional IP:PORT:USER:PASS o URL ya formada).
@@ -90,6 +104,12 @@ try {
 }
 
 async function setRandomProxy() {
+    if (DISABLE_PROXY) {
+        log.info('[PROXY][SKIP] Proxy deshabilitado por flag; usando conexión directa');
+        // Aseguramos que no quede ningún proxy previo configurado
+        try { await runCmd('mega-proxy', ['-d'], { quiet: true }); } catch {}
+        return null;
+    }
     if (!PROXY_LIST || PROXY_LIST.length === 0) return null;
     const proxy = PROXY_LIST[Math.floor(Math.random() * PROXY_LIST.length)];
     log.info(`[PROXY][SET] Conectando usando proxy: ${proxy}`);
