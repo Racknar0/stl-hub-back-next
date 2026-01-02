@@ -336,6 +336,7 @@ export async function runAutoRestoreMain(){
       log.info('[CRON] MAIN seleccionada sin assets para procesar. Se actualizarán métricas y backups, no hay nada que restaurar.')
       // Actualizar métricas de MAIN aunque no haya assets
       await withMegaLock(async () => {
+        await setRandomProxy();
         try {
           const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
           await megaLogout(buildCtx(main)); await megaLogin(payload, buildCtx(main))
@@ -357,6 +358,7 @@ export async function runAutoRestoreMain(){
         if (!b?.credentials) continue
         const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
         await withMegaLock(async () => {
+          await setRandomProxy();
           try {
             await megaLogout(buildCtx(b)); await megaLogin(payloadB, buildCtx(b))
             const baseB = (b.baseFolder||'/').replaceAll('\\','/')
@@ -392,6 +394,7 @@ export async function runAutoRestoreMain(){
 
     // FASE 1: Escaneo en MAIN (existentes vs faltantes) y re-export de links faltantes
     await withMegaLock(async () => {
+      await setRandomProxy();
       const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
       await megaLogout(buildCtx(main))
       await megaLogin(payload, buildCtx(main))
@@ -449,6 +452,7 @@ export async function runAutoRestoreMain(){
         if (!needDownload.size) break
         const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
         await withMegaLock( async () => {
+          await setRandomProxy();
           await megaLogout(buildCtx(b)); await megaLogin(payloadB, buildCtx(b))
           for (const [assetId, asset] of Array.from(needDownload.entries())){
             const remoteBaseB = (b.baseFolder||'/').replaceAll('\\','/')
@@ -473,6 +477,7 @@ export async function runAutoRestoreMain(){
 
     // FASE 3: Subir a MAIN y exportar link
     await withMegaLock(async () => {
+      await setRandomProxy();
       if (recovered.size){
         const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
         await megaLogout(buildCtx(main)); await megaLogin(payload, buildCtx(main))
@@ -516,6 +521,7 @@ export async function runAutoRestoreMain(){
       if (!b?.credentials) continue
       const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
       await withMegaLock(async () => {
+        await setRandomProxy();
         try {
           await megaLogout(buildCtx(b));
           await megaLogin(payloadB, buildCtx(b))
