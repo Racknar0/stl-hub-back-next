@@ -22,6 +22,18 @@ if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive:true })
 const DEFAULT_FREE_QUOTA_MB = Number(process.env.MEGA_FREE_QUOTA_MB) || 20480
 const UPLOADS_ACTIVE_FLAG = process.env.UPLOADS_ACTIVE_FLAG || path.join(UPLOADS_DIR, 'sync-cache', 'uploads-active.lock')
 
+function uploadsAreActiveNow(){
+  try {
+    const st = fs.existsSync(UPLOADS_ACTIVE_FLAG) ? fs.statSync(UPLOADS_ACTIVE_FLAG) : null;
+    if (!st) return false;
+    const ageMin = (Date.now() - st.mtimeMs) / 60000;
+    const maxIdleMin = process.env.UPLOADS_ACTIVE_MAX_IDLE_MIN ? Number(process.env.UPLOADS_ACTIVE_MAX_IDLE_MIN) : 60;
+    return ageMin < maxIdleMin;
+  } catch {
+    return false;
+  }
+}
+
 // ==========================================
 // SISTEMA DE PROXIES
 // ==========================================
@@ -54,6 +66,10 @@ try {
 
 // Función para reiniciar el servidor si se queda "tonto"
 async function resetMegaServer() {
+  if (uploadsAreActiveNow()) {
+    log.warn('[MEGA] Reinicio de servidor MEGA BLOQUEADO: hay subidas activas (uploads-active.lock).');
+    return;
+  }
   log.warn('[MEGA] Ejecutando reinicio de emergencia del servidor MEGA...');
   try {
     try { await runCmd('mega-quit', [], { quiet: true, timeoutMs: 5000 }); } catch {}
@@ -178,6 +194,25 @@ function truncateBody(s, max = 240) {
   return str.length > max ? str.slice(0, max - 3) + '...' : str;
 }
 
+// Prisma/Mysql: Notification.body históricamente fue VARCHAR(191)
+const NOTIFICATION_BODY_MAX = 191;
+
+async function notifyAutomationError({ title, body }) {
+  try {
+    await prisma.notification.create({
+      data: {
+        title,
+        body: truncateBody(body, NOTIFICATION_BODY_MAX),
+        status: 'UNREAD',
+        type: 'AUTOMATION',
+        typeStatus: 'ERROR'
+      }
+    });
+  } catch (e) {
+    log.warn(`[NOTIF] No se pudo crear notificación: ${e.message}`);
+  }
+}
+
 function stripAnsi(s='') {
   return String(s).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
 }
@@ -281,7 +316,11 @@ async function megaLogin(payload, ctx) {
       }
       
       // Si fallamos, asumimos estado corrupto y reiniciamos servidor
-      await resetMegaServer();
+      if (uploadsAreActiveNow()) {
+        log.warn(`[MEGA][LOGIN] No reinicio MEGAcmd por subidas activas. ${ctx}`);
+      } else {
+        await resetMegaServer();
+      }
       await clearProxy();
 
       // Fallback: Intento sin proxy después del reinicio
@@ -574,6 +613,10 @@ export async function runAutoRestoreMain(){
           }
         } catch(e){
           log.warn(`[CRON][WARMUP][WARN] No se pudo autenticar backup id=${b.id}: ${e.message}`)
+          await notifyAutomationError({
+            title: 'Fallo validación/autenticación BACKUP (CRON)',
+            body: `Backup id=${b.id} alias=${b.alias||'--'} email=${b.email||'--'} | error=${e.message}`
+          })
         } finally {
           try { await megaLogout(buildCtx(b)) } catch{}
           await clearProxy();
@@ -585,14 +628,14 @@ export async function runAutoRestoreMain(){
       try {
         const notifTitle = 'Restauración automática de assets desde backups completada'
         const notifBody = `Cuenta MAIN ${main.alias||'--'} (${main.email||'--'}). Total: ${candidateAssets.length}. Restaurados: ${restored}. Existentes: ${skippedExisting}. Links regenerados: ${regeneratedLinks}. No recuperados: ${notRecovered}. Duración: ${durMs} ms.`
-        await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody), status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'SUCCESS' } })
+        await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody, NOTIFICATION_BODY_MAX), status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'SUCCESS' } })
       } catch(e){ log.warn('[NOTIF][CRON] No se pudo crear notificación (restored>0): '+e.message) }
     } else if (notRecovered > 0) {
       try {
         const pendingIds = Array.from(needDownload.keys())
         const notifTitle = 'Fallo en restauración automática de assets'
         const notifBody = `Cuenta MAIN ${main.alias||'--'} (${main.email||'--'}). Faltantes=${pendingIds.length}. Ninguno restaurado. IDs pendientes: ${pendingIds.slice(0,50).join(', ')}${pendingIds.length>50?' ...':''}. Links regenerados: ${regeneratedLinks}. Duración: ${durMs} ms.`
-        await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody), status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'ERROR' } })
+        await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody, NOTIFICATION_BODY_MAX), status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'ERROR' } })
       } catch(e){ log.warn('[NOTIF][CRON][FAIL] No se pudo crear notificación de fallo: '+e.message) }
     } else {
       log.info('[CRON][NOTIF][SKIP] restored=0 pero noRecovered=0 (todos existen, sin restauraciones)')
@@ -605,7 +648,7 @@ export async function runAutoRestoreMain(){
       await prisma.notification.create({
         data: {
           title: 'Error en restauración automática de backups',
-          body: truncateBody(errBody),
+          body: truncateBody(errBody, NOTIFICATION_BODY_MAX),
           status: 'UNREAD',
           type: 'AUTOMATION',
           typeStatus: 'ERROR'
