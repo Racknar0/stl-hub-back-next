@@ -90,14 +90,32 @@ try {
 }
 
 async function setRandomProxy() {
-    if (!PROXY_LIST || PROXY_LIST.length === 0) return;
+    if (!PROXY_LIST || PROXY_LIST.length === 0) return null;
     const proxy = PROXY_LIST[Math.floor(Math.random() * PROXY_LIST.length)];
-    log.info(`************** [PROXY][SET] Conectando usando proxy: ${proxy}`);
+    log.info(`[PROXY][SET] Conectando usando proxy: ${proxy}`);
     try {
         await runCmd('mega-proxy', [proxy], { quiet: true });
+        return proxy;
     } catch (e) {
         // Si falla poner el proxy, limpiamos para evitar errores de red
-        await clearProxy();
+        try { await clearProxy(); } catch {}
+        log.warn(`[PROXY][SET][FAIL] proxy=${proxy} msg=${e.message}`);
+        // Crear notificación tipo AUTOMATION para visibilidad del fallo de proxy
+        try {
+            await prisma.notification.create({
+                data: {
+                    title: 'Fallo al aplicar proxy',
+                    body: `No se pudo aplicar proxy ${proxy}: ${e.message}`,
+                    status: 'UNREAD',
+                    type: 'AUTOMATION',
+                    typeStatus: 'ERROR',
+                },
+            });
+        } catch (ne) {
+            log.warn('[NOTIF][PROXY] No se pudo crear notificación: ' + ne.message);
+        }
+        // Propagar error para que el llamador lo capture
+        throw new Error(`Failed to set proxy ${proxy}: ${e.message}`);
     }
 }
 
