@@ -146,6 +146,13 @@ function parseSizeToMB(str){
   return Math.round(num * factor)
 }
 
+// Truncado seguro para cuerpos de notificación (evita errores de columna demasiado larga)
+function truncateBody(s, max = 1000) {
+  if (s == null) return null;
+  const str = String(s);
+  return str.length > max ? str.slice(0, max - 3) + '...' : str;
+}
+
 async function getAccountMetrics(base){
   const dfCmd = 'mega-df', duCmd = 'mega-du', findCmd = 'mega-find'
   let storageUsedMB=0, storageTotalMB=0, fileCount=0, folderCount=0, storageSource='none'
@@ -171,7 +178,7 @@ async function megaLogin(payload, ctx) {
       if (payload?.type === 'session' && payload.session) {
         await runCmd('mega-login', [payload.session], { quiet: true, timeoutMs: 45000 });
       } else if (payload?.username && payload?.password) {
-        await runCmd('mega-login', [payload.username, payload.password], { quiet: true, timeoutMs: 45000 });
+        await runCmd('mega-login', [payload.username, payload.password], { quiet: true, timeoutMs: 10000 });
       } else {
         throw new Error('Credenciales inválidas');
       }
@@ -485,14 +492,14 @@ export async function runAutoRestoreMain(){
       try {
         const notifTitle = 'Restauración automática de assets desde backups completada'
         const notifBody = `Cuenta MAIN ${main.alias||'--'} (${main.email||'--'}). Total: ${candidateAssets.length}. Restaurados: ${restored}. Existentes: ${skippedExisting}. Links regenerados: ${regeneratedLinks}. No recuperados: ${notRecovered}. Duración: ${durMs} ms.`
-        await prisma.notification.create({ data: { title: notifTitle, body: notifBody, status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'SUCCESS' } })
+        await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody, 1000), status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'SUCCESS' } })
       } catch(e){ log.warn('[NOTIF][CRON] No se pudo crear notificación (restored>0): '+e.message) }
     } else if (notRecovered > 0) {
       try {
         const pendingIds = Array.from(needDownload.keys())
         const notifTitle = 'Fallo en restauración automática de assets'
         const notifBody = `Cuenta MAIN ${main.alias||'--'} (${main.email||'--'}). Faltantes=${pendingIds.length}. Ninguno restaurado. IDs pendientes: ${pendingIds.slice(0,50).join(', ')}${pendingIds.length>50?' ...':''}. Links regenerados: ${regeneratedLinks}. Duración: ${durMs} ms.`
-        await prisma.notification.create({ data: { title: notifTitle, body: notifBody, status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'ERROR' } })
+        await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody, 1000), status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'ERROR' } })
       } catch(e){ log.warn('[NOTIF][CRON][FAIL] No se pudo crear notificación de fallo: '+e.message) }
     } else {
       log.info('[CRON][NOTIF][SKIP] restored=0 pero noRecovered=0 (todos existen, sin restauraciones)')
@@ -501,10 +508,11 @@ export async function runAutoRestoreMain(){
   } catch (e){
     log.error(`[CRON][RESTORE] fallo general: ${e.message}`)
     try {
+      const errBody = `Ocurrió un error al restaurar backups hacia assets (MAIN id=${main?.id||'?'} alias=${main?.alias||'--'}): ${e.message}`
       await prisma.notification.create({
         data: {
           title: 'Error en restauración automática de backups',
-          body: `Ocurrió un error al restaurar backups hacia assets (MAIN id=${main?.id||'?'} alias=${main?.alias||'--'}): ${e.message}`,
+          body: truncateBody(errBody, 1000),
           status: 'UNREAD',
           type: 'AUTOMATION',
           typeStatus: 'ERROR'
