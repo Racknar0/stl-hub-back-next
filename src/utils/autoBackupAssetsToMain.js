@@ -38,6 +38,12 @@ const UPLOADS_ACTIVE_FLAG = process.env.UPLOADS_ACTIVE_FLAG || path.join(UPLOADS
 const PROXY_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'proxies.txt');
 let PROXY_LIST = [];
 
+// Toggle básico CONTROLADO EN CÓDIGO (sin variables de entorno)
+// Cambia USE_BASIC_PROXY a true para activar el uso de proxy.
+// Si BASIC_PROXY_URL está vacío, se usará un proxy aleatorio de proxies.txt (si existe).
+const USE_BASIC_PROXY = false
+const BASIC_PROXY_URL = '' // ejemplo: 'socks5://usuario:pass@ip:puerto'
+
 // Carga automática de proxies.txt
 try {
   if (fs.existsSync(PROXY_FILE)) {
@@ -76,6 +82,30 @@ async function clearProxy() {
   try { await runCmd('mega-proxy', ['-d'], { quiet: true }); } catch {}
 }
 // ==========================================
+
+// Helper simple: aplica proxy si está habilitado por ENV (o usa uno aleatorio de proxies.txt)
+async function applyBasicProxyIfEnabled(){
+  if (!USE_BASIC_PROXY) return false
+  try {
+    if (BASIC_PROXY_URL){
+      await runCmd('mega-proxy', [BASIC_PROXY_URL], { quiet:true })
+      log.info('[PROXY] Aplicado BASIC_PROXY_URL')
+      return true
+    }
+    if (PROXY_LIST && PROXY_LIST.length){
+      const proxy = PROXY_LIST[Math.floor(Math.random()*PROXY_LIST.length)]
+      await runCmd('mega-proxy', [proxy], { quiet:true })
+      log.info(`[PROXY] Aplicado proxy de lista: ${proxy}`)
+      return true
+    }
+    log.warn('[PROXY] ENABLE_BASIC_PROXY activo pero no hay BASIC_PROXY_URL ni proxies.txt')
+    return false
+  } catch (e){
+    log.warn('[PROXY] No se pudo aplicar proxy básico: '+e.message)
+    try { await clearProxy() } catch {}
+    return false
+  }
+}
 
 
 
@@ -286,6 +316,7 @@ export async function runAutoRestoreMain(){
       // Actualizar métricas de MAIN aunque no haya assets
       await withMegaLock(async () => {
         try {
+          await applyBasicProxyIfEnabled()
           const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
           await megaLogout(buildCtx(main)); await megaLogin(payload, buildCtx(main))
           const base = (main.baseFolder||'/').replaceAll('\\','/')
@@ -296,7 +327,7 @@ export async function runAutoRestoreMain(){
           }})
           log.info(`[CRON][MÉTRICAS][MAIN] alias=${main.alias||'--'} usados=${m.storageUsedMB}MB de ${m.storageTotalMB}MB | archivos=${m.fileCount} carpetas=${m.folderCount} (fuente=${m.storageSource})`)
         } catch(e){ log.warn('[CRON][MÉTRICAS][MAIN][WARN] '+e.message) }
-        finally { try { await megaLogout(buildCtx(main)) } catch{} }
+        finally { try { await megaLogout(buildCtx(main)) } catch{} try { await clearProxy() } catch{} }
       }, 'CRON-NO-ASSETS-MAIN')
 
       // Warmup de BACKUPs al final
@@ -307,6 +338,7 @@ export async function runAutoRestoreMain(){
         const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
         await withMegaLock(async () => {
           try {
+            await applyBasicProxyIfEnabled()
             await megaLogout(buildCtx(b)); await megaLogin(payloadB, buildCtx(b))
             const baseB = (b.baseFolder||'/').replaceAll('\\','/')
             try {
@@ -321,7 +353,7 @@ export async function runAutoRestoreMain(){
               log.warn(`[CRON][MÉTRICAS][BACKUP][WARN] No se pudieron obtener métricas de alias=${b.alias||'--'}: ${me.message}`)
             }
           } catch(e){ log.warn(`[CRON][WARMUP][WARN] No se pudo autenticar backup id=${b.id}: ${e.message}`) }
-          finally { try { await megaLogout(buildCtx(b)) } catch{} }
+          finally { try { await megaLogout(buildCtx(b)) } catch{} try { await clearProxy() } catch{} }
         }, `CRON-WARMUP-NO-ASSETS-${b.id}`)
       }
 
@@ -341,6 +373,7 @@ export async function runAutoRestoreMain(){
 
     // FASE 1: Escaneo en MAIN (existentes vs faltantes) y re-export de links faltantes
     await withMegaLock(async () => {
+      await applyBasicProxyIfEnabled()
       const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
       await megaLogout(buildCtx(main))
       await megaLogin(payload, buildCtx(main))
@@ -389,6 +422,7 @@ export async function runAutoRestoreMain(){
         log.info(`[CRON][MÉTRICAS][MAIN] alias=${main.alias||'--'} usados=${m.storageUsedMB}MB de ${m.storageTotalMB}MB | archivos=${m.fileCount} carpetas=${m.folderCount} (fuente=${m.storageSource})`)
       } catch(e){ log.warn(`[CRON][MÉTRICAS][MAIN][WARN] No se pudo actualizar métricas: ${e.message}`) }
       await megaLogout(buildCtx(main))
+      try { await clearProxy() } catch{}
     }, 'CRON-PHASE1')
     log.info(`[CRON][RESUMEN][FASE1] existentes=${existingSet.size} faltantes=${needDownload.size} linksRegenerados=${regeneratedLinks}`)
 
@@ -398,6 +432,7 @@ export async function runAutoRestoreMain(){
         if (!needDownload.size) break
         const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
         await withMegaLock( async () => {
+          await applyBasicProxyIfEnabled()
           await megaLogout(buildCtx(b)); await megaLogin(payloadB, buildCtx(b))
           for (const [assetId, asset] of Array.from(needDownload.entries())){
             const remoteBaseB = (b.baseFolder||'/').replaceAll('\\','/')
@@ -416,12 +451,14 @@ export async function runAutoRestoreMain(){
             } catch (e){ log.warn(`[CRON][DESCARGA] fallo asset=${asset.id} desde backup=${b.id} -> ${e.message}`) }
           }
           await megaLogout(buildCtx(b))
+          try { await clearProxy() } catch{}
         }, `CRON-DL-${b.id}`)
       }
     }
 
     // FASE 3: Subir a MAIN y exportar link
     await withMegaLock(async () => {
+      await applyBasicProxyIfEnabled()
       if (recovered.size){
         const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
         await megaLogout(buildCtx(main)); await megaLogin(payload, buildCtx(main))
@@ -445,6 +482,7 @@ export async function runAutoRestoreMain(){
         }
         await megaLogout(buildCtx(main))
       }
+      try { await clearProxy() } catch{}
     }, 'CRON-PHASE3')
 
     const skippedExisting = existingSet.size
@@ -466,6 +504,7 @@ export async function runAutoRestoreMain(){
       const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
       await withMegaLock(async () => {
         try {
+          await applyBasicProxyIfEnabled()
           await megaLogout(buildCtx(b));
           await megaLogin(payloadB, buildCtx(b))
           const remoteBaseB = (b.baseFolder||'/').replaceAll('\\','/')
@@ -492,6 +531,7 @@ export async function runAutoRestoreMain(){
           log.warn(`[CRON][WARMUP][WARN] No se pudo autenticar backup id=${b.id}: ${e.message}`)
         } finally {
           try { await megaLogout(buildCtx(b)) } catch{}
+          try { await clearProxy() } catch{}
         }
       }, `CRON-WARMUP-${b.id}`)
     }
@@ -540,5 +580,24 @@ export async function runAutoRestoreMain(){
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  runAutoRestoreMain().then(r=>{ if(!r.ok) process.exitCode=1 })
+  // Modo de prueba básico del proxy: node autoBackupAssetsToMain.js --proxy-smoke
+  if (process.argv.includes('--proxy-smoke')){
+    (async ()=>{
+      try {
+        const main = await prisma.megaAccount.findFirst({ where:{ type:'main', suspended:false }, include:{ credentials:true } })
+        if (!main || !main.credentials){ log.warn('[SMOKE] No hay MAIN con credenciales'); return }
+        await clearProxy()
+        const applied = await applyBasicProxyIfEnabled()
+        const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
+        await megaLogout('[SMOKE]')
+        await megaLogin(payload, buildCtx(main))
+        const res = await runCmd('mega-ls', ['/'], { quiet:true })
+        log.info(`[SMOKE] mega-ls / ok, length=${(res.out||'').length} proxy=${applied?'on':'off'}`)
+        await megaLogout(buildCtx(main))
+      } catch (e){ log.warn('[SMOKE] fallo: '+e.message) }
+      finally { try { await clearProxy() } catch{} try { await prisma.$disconnect() } catch{} }
+    })()
+  } else {
+    runAutoRestoreMain().then(r=>{ if(!r.ok) process.exitCode=1 })
+  }
 }
