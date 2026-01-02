@@ -30,6 +30,12 @@ let PROXY_LIST = [];
 let CURRENT_PROXY = null;
 const PROXY_CURL_TEST_URL = 'https://www.google.com';
 const PROXY_CURL_TIMEOUT_S = 10;
+const STICKY_PROXY_ENABLED = true; // sticky por cuenta durante TODO el run
+const STICKY_PROXY_MAX_TRIES = 5;  // cuántos proxies probar al asignar
+const STICKY_PROXY_REFRESH_ON_LOGIN_FAIL = true; // si falla login, reintenta reasignando proxy
+
+// Cache en memoria: accountKey -> { raw, proxyUrl } donde raw es línea IP:PORT:USER:PASS o null (direct)
+const STICKY_PROXY_BY_ACCOUNT = new Map();
 
 try {
   if (fs.existsSync(PROXY_FILE)) {
@@ -100,6 +106,12 @@ async function clearProxy() {
 
 function buildCtx(acc){ 
     return acc ? `accId=${acc.id} alias=${acc.alias||'--'} email=${acc.email||'--'}` : '' 
+}
+
+function getAccountKey(acc){
+  if (!acc) return 'unknown';
+  // id es lo más estable, pero por si viene null en algún contexto, caemos a email
+  return `id=${acc.id ?? 'NA'}|email=${acc.email ?? 'NA'}`;
 }
 
 function runCmd(cmd, args = [], { quiet = false, timeoutMs = 0 } = {}) {
@@ -243,6 +255,30 @@ async function megaLogin(payload, ctx) {
       return;
     } catch (e) {
       log.warn(`[MEGA][LOGIN][FAIL] intento=${attempt} ${ctx} msg=${e.message}`);
+
+      // Si tenemos sticky por cuenta, intentamos refrescar el proxy asignado y reintentar una vez
+      if (STICKY_PROXY_ENABLED && STICKY_PROXY_REFRESH_ON_LOGIN_FAIL && payload && attempt === 1) {
+        try {
+          // ctx incluye accId=..., lo extraemos para best-effort
+          const mId = String(ctx || '').match(/accId=(\d+)/);
+          const accId = mId ? Number(mId[1]) : null;
+          if (accId) {
+            const key = `id=${accId}|email=`; // email no siempre está en ctx
+            // Borramos cualquier asignación que coincida por prefijo id para forzar reasignación
+            for (const k of Array.from(STICKY_PROXY_BY_ACCOUNT.keys())) {
+              if (k.startsWith(`id=${accId}|`)) STICKY_PROXY_BY_ACCOUNT.delete(k);
+            }
+          }
+          await setValidatedProxy(STICKY_PROXY_MAX_TRIES);
+          // Reintento inmediato con el nuevo estado de proxy
+          if (payload?.type === 'session') await runCmd('mega-login', [payload.session], { quiet: true, timeoutMs: TIMEOUT_LOGIN });
+          else await runCmd('mega-login', [payload.username, payload.password], { quiet: true, timeoutMs: TIMEOUT_LOGIN });
+          log.info(`[MEGA][LOGIN][OK][STICKY-REFRESH] ${ctx} proxy=${CURRENT_PROXY || 'off'}`);
+          return;
+        } catch (er) {
+          // seguimos con el flujo normal de reset
+        }
+      }
       
       // Si fallamos, asumimos estado corrupto y reiniciamos servidor
       await resetMegaServer();
@@ -344,7 +380,7 @@ export async function runAutoRestoreMain(){
     if (!candidateAssets.length){
       log.info('[CRON] MAIN sin assets. Actualizando métricas...')
       await withMegaLock(async () => {
-        await setValidatedProxy(5);
+        await setStickyProxyForAccount(main);
         try {
           const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
           await megaLogout(buildCtx(main)); await megaLogin(payload, buildCtx(main))
@@ -361,7 +397,7 @@ export async function runAutoRestoreMain(){
         if (!b?.credentials) continue
         await sleep(2000); 
         await withMegaLock(async () => {
-          await setValidatedProxy(5);
+          await setStickyProxyForAccount(b);
           try {
              const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
              await megaLogout(buildCtx(b)); await megaLogin(payloadB, buildCtx(b))
@@ -383,7 +419,7 @@ export async function runAutoRestoreMain(){
 
     // FASE 1: MAIN (Scan)
     await withMegaLock(async () => {
-      await setValidatedProxy(5);
+      await setStickyProxyForAccount(main);
       const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
       await megaLogout(buildCtx(main))
       await megaLogin(payload, buildCtx(main))
@@ -442,7 +478,7 @@ export async function runAutoRestoreMain(){
         if (!needDownload.size) break
         const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
         await withMegaLock( async () => {
-          await setValidatedProxy(5);
+          await setStickyProxyForAccount(b);
           await megaLogout(buildCtx(b)); await megaLogin(payloadB, buildCtx(b))
           for (const [assetId, asset] of Array.from(needDownload.entries())){
             const remoteBaseB = (b.baseFolder||'/').replaceAll('\\','/')
@@ -469,7 +505,7 @@ export async function runAutoRestoreMain(){
     // FASE 3: Subir a MAIN y exportar link
     await withMegaLock(async () => {
       if (recovered.size){
-        await setValidatedProxy(5);
+        await setStickyProxyForAccount(main);
         const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
         await megaLogout(buildCtx(main)); await megaLogin(payload, buildCtx(main))
         for (const [assetId, info] of recovered.entries()){
@@ -512,7 +548,7 @@ export async function runAutoRestoreMain(){
       if (!b?.credentials) continue
       const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
       await withMegaLock(async () => {
-        await setValidatedProxy(5);
+        await setStickyProxyForAccount(b);
         try {
           await megaLogout(buildCtx(b));
           await megaLogin(payloadB, buildCtx(b))
@@ -674,4 +710,82 @@ async function setValidatedProxy(maxTries = 5) {
   log.warn('[PROXY][VALIDATION] Ningún proxy pasó la validación. Continuando sin proxy.');
   await clearProxy();
   return { ok: false, reason: 'ALL_FAILED' };
+}
+
+async function applyProxyRaw(raw){
+  if (!raw) {
+    await clearProxy();
+    return { ok: true, proxy: null, mode: 'direct' };
+  }
+  const built = buildHttpProxyAuthUrl(raw);
+  if (!built) {
+    await clearProxy();
+    return { ok: false, reason: 'FORMATO_INVALIDO' };
+  }
+  await runCmd('mega-proxy', [built.proxyUrl, `--username=${built.user}`, `--password=${built.pass}`], { quiet: true });
+  CURRENT_PROXY = built.proxyUrl;
+  return { ok: true, proxy: built.proxyUrl, mode: 'proxy' };
+}
+
+async function setStickyProxyForAccount(acc, { maxTries = STICKY_PROXY_MAX_TRIES, forceRefresh = false } = {}) {
+  if (!STICKY_PROXY_ENABLED) {
+    await setValidatedProxy(maxTries);
+    return { ok: true, sticky: false, proxy: CURRENT_PROXY || null };
+  }
+
+  const key = getAccountKey(acc);
+  const cached = STICKY_PROXY_BY_ACCOUNT.get(key);
+
+  // Si ya tenemos asignación (proxy o directo), la reutilizamos
+  if (cached && !forceRefresh) {
+    try {
+      await applyProxyRaw(cached.raw);
+      log.info(`[PROXY][STICKY] Reutilizando para ${key}: ${cached.proxyUrl || 'direct'}`);
+      return { ok: true, sticky: true, proxy: cached.proxyUrl || null };
+    } catch (e) {
+      // Si aplicar falla, forzamos reasignación
+      log.warn(`[PROXY][STICKY] Falló re-aplicar para ${key}: ${e.message}. Reasignando...`);
+      STICKY_PROXY_BY_ACCOUNT.delete(key);
+    }
+  }
+
+  // Si no hay proxies, fijamos DIRECTO y lo cacheamos
+  if (!PROXY_LIST || PROXY_LIST.length === 0) {
+    await clearProxy();
+    STICKY_PROXY_BY_ACCOUNT.set(key, { raw: null, proxyUrl: null });
+    log.info(`[PROXY][STICKY] ${key}: direct (no proxies)`);
+    return { ok: true, sticky: true, proxy: null };
+  }
+
+  // Intentamos asignar un proxy válido y lo cacheamos
+  await clearProxy();
+  const tries = Math.min(Math.max(Number(maxTries) || 1, 1), PROXY_LIST.length);
+  const startIdx = Math.floor(Math.random() * PROXY_LIST.length);
+
+  for (let i = 0; i < tries; i++) {
+    const raw = PROXY_LIST[(startIdx + i) % PROXY_LIST.length];
+    const masked = maskProxyForLogs(raw);
+
+    const v = await validateProxyWithCurl(raw);
+    if (!v.ok) {
+      log.warn(`[PROXY][STICKY] VALIDATION FAIL ${key} ${masked} reason=${v.reason}`);
+      continue;
+    }
+
+    try {
+      const applied = await applyProxyRaw(raw);
+      STICKY_PROXY_BY_ACCOUNT.set(key, { raw, proxyUrl: applied.proxy });
+      log.info(`[PROXY][STICKY] Asignado a ${key}: ${applied.proxy} (curl=${v.code || 'ok'})`);
+      return { ok: true, sticky: true, proxy: applied.proxy };
+    } catch (e) {
+      log.warn(`[PROXY][STICKY] APPLY FAIL ${key} ${masked}: ${e.message}`);
+      await clearProxy();
+    }
+  }
+
+  // Si no hay ninguno válido, fijamos DIRECTO y lo cacheamos
+  await clearProxy();
+  STICKY_PROXY_BY_ACCOUNT.set(key, { raw: null, proxyUrl: null });
+  log.warn(`[PROXY][STICKY] ${key}: direct (no proxy válido)`);
+  return { ok: true, sticky: true, proxy: null };
 }
