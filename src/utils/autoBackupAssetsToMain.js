@@ -117,38 +117,69 @@ async function applyBasicProxyIfEnabled(){
   }
 }
 
-// Helper para ejecutar comandos con timeout
-function runCmdWithTimeout(cmd, args = [], timeoutMs = 10000, { quiet = false } = {}) {
+// =======================================================
+// CORRECCIÓN: runCmd unificado (con soporte de Timeout)
+// =======================================================
+function runCmd(cmd, args = [], { quiet = false, timeoutMs = 0 } = {}) {
   const printable = `${cmd} ${(args || []).join(' ')}`.trim();
   log.verbose(`[CRON] cmd ${printable}`);
+  
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { shell: true });
     let out = '', err = '';
-    const timer = setTimeout(() => {
-      child.kill('SIGTERM');
-      reject(new Error(`Timeout alcanzado (${timeoutMs}ms) para comando: ${cmd}`));
-    }, timeoutMs);
-    child.stdout.on('data', d => out += d.toString());
-    child.stderr.on('data', d => err += d.toString());
-    child.on('close', code => {
-      clearTimeout(timer);
+    let settled = false;
+    let timer = null;
+
+    // Lógica de Timeout
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { child.kill('SIGKILL'); } catch {} // Matar proceso forzosamente
+        const msg = `TIMEOUT ${cmd} after ${timeoutMs}ms`;
+        if (!quiet) log.warn(`[CRON] ${msg}`);
+        reject(new Error(msg));
+      }, timeoutMs);
+    }
+
+    child.stdout.on('data', (d) => (out += d.toString()));
+    child.stderr.on('data', (d) => (err += d.toString()));
+
+    child.on('close', (code) => {
+      if (timer) clearTimeout(timer);
+      if (settled) return; // Si ya saltó el timeout, ignoramos el cierre
+      settled = true;
+
       if (code === 0) return resolve({ out, err });
-      if (!quiet) log.warn(`[CRON] fallo cmd ${cmd} code=${code} msg=${(err || out).slice(0, 160)}`);
+      
+      if (!quiet) {
+        log.warn(`[CRON] fallo cmd ${cmd} code=${code} msg=${(err || out).slice(0, 160)}`);
+      }
       reject(new Error(err || out || `${cmd} exited ${code}`));
+    });
+
+    child.on('error', (e) => {
+      if (timer) clearTimeout(timer);
+      if (!settled) {
+        settled = true;
+        reject(e);
+      }
     });
   });
 }
 
-// Validar proxy antes de usarlo
+// Validación de proxy usando runCmd corregido
 async function validateProxy(proxyUrl) {
   try {
     log.info(`[PROXY] Validando proxy: ${proxyUrl}`);
-    const testCmd = await runCmdWithTimeout('curl', ['--proxy', proxyUrl, '--max-time', '5', 'https://www.google.com'], 5000, { quiet: true });
-    if (testCmd.out.includes('DOCTYPE')) {
+    // Usamos timeout de 5 segundos para la validación
+    const testCmd = await runCmd('curl', ['--proxy', proxyUrl, '--max-time', '5', 'https://www.google.com'], { quiet: true, timeoutMs: 5000 });
+    
+    if (testCmd.out.includes('DOCTYPE') || testCmd.out.includes('html')) {
       log.info(`[PROXY] Proxy validado correctamente: ${proxyUrl}`);
       return true;
     }
-    log.warn(`[PROXY] Proxy no válido: ${proxyUrl}`);
+    log.warn(`[PROXY] Proxy responde pero contenido inválido: ${proxyUrl}`);
     return false;
   } catch (e) {
     log.warn(`[PROXY] Error validando proxy: ${proxyUrl}, ${e.message}`);
@@ -156,29 +187,42 @@ async function validateProxy(proxyUrl) {
   }
 }
 
-// Modificar megaLogin para incluir fallback sin proxy
+
 async function megaLogin(payload, ctx) {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       if (payload?.type === 'session' && payload.session) {
-        await runCmdWithTimeout('mega-login', [payload.session], 15000, { quiet: true });
+        // Timeout de 45 seg para login
+        await runCmd('mega-login', [payload.session], { quiet: true, timeoutMs: 45000 });
       } else if (payload?.username && payload?.password) {
-        await runCmdWithTimeout('mega-login', [payload.username, payload.password], 15000, { quiet: true });
+        await runCmd('mega-login', [payload.username, payload.password], { quiet: true, timeoutMs: 45000 });
       } else {
         throw new Error('Credenciales inválidas');
       }
-      log.info(`[MEGA][LOGIN][OK] ${ctx} intento=${attempt}`)
-      return
+      log.info(`[MEGA][LOGIN][OK] ${ctx} intento=${attempt}`);
+      return;
     } catch (e) {
-      log.warn(`[MEGA][LOGIN][FAIL] intento=${attempt} ${ctx} msg=${e.message}`)
-      if (attempt === 1 && USE_BASIC_PROXY) {
-        log.info('[MEGA][LOGIN] Intentando sin proxy...')
-        await clearProxy()
-      }
-      await sleep(500 * attempt)
+      log.warn(`[MEGA][LOGIN][FAIL] intento=${attempt} ${ctx} msg=${e.message}`);
+      
+      // Fallback: intentar sin proxy si falla
+      try {
+        await clearProxy();
+        // Reintento sin proxy con timeout de 30s
+        if (payload?.type === 'session') {
+           await runCmd('mega-login', [payload.session], { quiet: true, timeoutMs: 30000 });
+        } else {
+           await runCmd('mega-login', [payload.username, payload.password], { quiet: true, timeoutMs: 30000 });
+        }
+        log.info(`[MEGA][LOGIN][OK][FALLBACK] ${ctx} (sin proxy)`);
+        return;
+      } catch (ef) {}
+
+      await sleep(1000 * attempt);
     }
   }
 }
+
+
 async function megaLogout(ctx){ try { await runCmd('mega-logout',[],{ quiet:true }); log.info(`[MEGA][LOGOUT][OK] ${ctx}`) } catch(e){ log.warn(`[MEGA][LOGOUT][WARN] ${ctx} ${e.message}`) } }
 
 export async function runAutoRestoreMain(){
