@@ -41,7 +41,7 @@ let PROXY_LIST = [];
 // Toggle básico CONTROLADO EN CÓDIGO (sin variables de entorno)
 // Cambia USE_BASIC_PROXY a true para activar el uso de proxy.
 // Si BASIC_PROXY_URL está vacío, se usará un proxy aleatorio de proxies.txt (si existe).
-const USE_BASIC_PROXY = false
+const USE_BASIC_PROXY = true
 const BASIC_PROXY_URL = '' // ejemplo: 'socks5://usuario:pass@ip:puerto'
 
 // Carga automática de proxies.txt
