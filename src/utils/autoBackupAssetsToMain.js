@@ -88,15 +88,25 @@ async function applyBasicProxyIfEnabled(){
   if (!USE_BASIC_PROXY) return false
   try {
     if (BASIC_PROXY_URL){
-      await runCmd('mega-proxy', [BASIC_PROXY_URL], { quiet:true })
-      log.info('[PROXY] Aplicado BASIC_PROXY_URL')
-      return true
+      const isValid = await validateProxy(BASIC_PROXY_URL);
+      if (isValid) {
+        await runCmd('mega-proxy', [BASIC_PROXY_URL], { quiet: true });
+        log.info('[PROXY] Aplicado BASIC_PROXY_URL')
+        return true
+      }
+      log.warn('[PROXY] BASIC_PROXY_URL no es válido')
+      return false
     }
     if (PROXY_LIST && PROXY_LIST.length){
       const proxy = PROXY_LIST[Math.floor(Math.random()*PROXY_LIST.length)]
-      await runCmd('mega-proxy', [proxy], { quiet:true })
-      log.info(`[PROXY] Aplicado proxy de lista: ${proxy}`)
-      return true
+      const isValid = await validateProxy(proxy);
+      if (isValid) {
+        await runCmd('mega-proxy', [proxy], { quiet: true });
+        log.info(`[PROXY] Aplicado proxy de lista: ${proxy}`)
+        return true
+      }
+      log.warn('[PROXY] Ningún proxy de la lista es válido')
+      return false
     }
     log.warn('[PROXY] ENABLE_BASIC_PROXY activo pero no hay BASIC_PROXY_URL ni proxies.txt')
     return false
@@ -107,121 +117,65 @@ async function applyBasicProxyIfEnabled(){
   }
 }
 
-
-
-
-
-function runCmd(cmd, args = [], { quiet=false } = {}) {
-  const printable = `${cmd} ${(args||[]).join(' ')}`.trim()
-  log.verbose(`[CRON] cmd ${printable}`)
+// Helper para ejecutar comandos con timeout
+function runCmdWithTimeout(cmd, args = [], timeoutMs = 10000, { quiet = false } = {}) {
+  const printable = `${cmd} ${(args || []).join(' ')}`.trim();
+  log.verbose(`[CRON] cmd ${printable}`);
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { shell:true })
-    let out='', err=''
-    child.stdout.on('data', d=> out += d.toString())
-    child.stderr.on('data', d=> err += d.toString())
+    const child = spawn(cmd, args, { shell: true });
+    let out = '', err = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error(`Timeout alcanzado (${timeoutMs}ms) para comando: ${cmd}`));
+    }, timeoutMs);
+    child.stdout.on('data', d => out += d.toString());
+    child.stderr.on('data', d => err += d.toString());
     child.on('close', code => {
-      if (code===0) return resolve({ out, err })
-      if (!quiet) log.warn(`[CRON] fallo cmd ${cmd} code=${code} msg=${(err||out).slice(0,160)}`)
-      reject(new Error(err||out||`${cmd} exited ${code}`))
-    })
-  })
+      clearTimeout(timer);
+      if (code === 0) return resolve({ out, err });
+      if (!quiet) log.warn(`[CRON] fallo cmd ${cmd} code=${code} msg=${(err || out).slice(0, 160)}`);
+      reject(new Error(err || out || `${cmd} exited ${code}`));
+    });
+  });
 }
 
-function pickFirstFileFromLs(lsOut){
-  const lines = String(lsOut).split(/\r?\n/).map(l=>l.trim()).filter(Boolean)
-  const withExt = lines.filter(l => /\.[A-Za-z0-9]{1,10}$/.test(l))
-  return (withExt[0] || lines[0]) || null
-}
-
-function buildCtx(acc){ return acc?`accId=${acc.id} alias=${acc.alias||'--'} email=${acc.email||'--'}`:'' }
-
-function sleep(ms){ return new Promise(r=>setTimeout(r, ms)) }
-
-function parseSizeToMB(str){
-  if (!str) return 0
-  const s = String(str).trim().toUpperCase()
-  const m = s.match(/[\d.,]+\s*[KMGT]?B/)
-  if (!m) return 0
-  const num = parseFloat((m[0].match(/[\d.,]+/) || ['0'])[0].replace(',', '.'))
-  const unit = (m[0].match(/[KMGT]?B/) || ['MB'])[0]
-  const factor = unit === 'KB' ? 1/1024 : unit === 'MB' ? 1 : unit === 'GB' ? 1024 : unit === 'TB' ? 1024*1024 : 1/(1024*1024)
-  return Math.round(num * factor)
-}
-
-async function getAccountMetrics(base){
-  const dfCmd = 'mega-df'
-  const duCmd = 'mega-du'
-  const findCmd = 'mega-find'
-  let storageUsedMB=0, storageTotalMB=0, fileCount=0, folderCount=0
-  let storageSource='none'
+// Validar proxy antes de usarlo
+async function validateProxy(proxyUrl) {
   try {
-    const df = await runCmd(dfCmd, ['-h'], { quiet: true })
-    const txt = (df.out || df.err || '').toString()
-    let m = txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i)
-      || txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i)
-      || txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i)
-      || txt.match(/almacenamiento\s+de\s+la\s+cuenta\s*:\s*([^\n]+?)\s*de\s*([^\n]+)/i)
-      || txt.match(/almacenamiento\s*:\s*([\d.,]+\s*[KMGT]?B)\s*de\s*([\d.,]+\s*[KMGT]?B)/i)
-    if (m){ storageUsedMB = parseSizeToMB(m[1]); storageTotalMB = parseSizeToMB(m[2]); storageSource='df -h' }
-    if (!storageTotalMB){
-      const p = txt.match(/storage[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:of|de)\s*([\d.,]+\s*[KMGT]?B)/i)
-        || txt.match(/almacenamiento[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:de|of)\s*([\d.,]+\s*[KMGT]?B)/i)
-      if (p){
-        storageTotalMB = parseSizeToMB(p[2])
-        const pct = parseFloat(String(p[1]).replace(',', '.'))
-        if (!isNaN(pct) && isFinite(pct)) storageUsedMB = Math.round((pct/100)*storageTotalMB)
-        storageSource = storageSource==='none' ? 'df -h (pct)' : storageSource
-      }
+    log.info(`[PROXY] Validando proxy: ${proxyUrl}`);
+    const testCmd = await runCmdWithTimeout('curl', ['--proxy', proxyUrl, '--max-time', '5', 'https://www.google.com'], 5000, { quiet: true });
+    if (testCmd.out.includes('DOCTYPE')) {
+      log.info(`[PROXY] Proxy validado correctamente: ${proxyUrl}`);
+      return true;
     }
-  } catch {}
-  if (!storageTotalMB){
-    try {
-      const df = await runCmd(dfCmd, [], { quiet: true })
-      const txt = (df.out || df.err || '').toString()
-      let m = txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i)
-        || txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i)
-        || txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i)
-        || txt.match(/almacenamiento\s+de\s+la\s+cuenta\s*:\s*([^\n]+?)\s*de\s*([^\n]+)/i)
-        || txt.match(/almacenamiento\s*:\s*([\d.,]+\s*[KMGT]?B)\s*de\s*([\d.,]+\s*[KMGT]?B)/i)
-      if (m){ storageUsedMB = parseSizeToMB(m[1]); storageTotalMB = parseSizeToMB(m[2]); storageSource = storageSource==='none' ? 'df' : storageSource }
-    } catch {}
+    log.warn(`[PROXY] Proxy no válido: ${proxyUrl}`);
+    return false;
+  } catch (e) {
+    log.warn(`[PROXY] Error validando proxy: ${proxyUrl}, ${e.message}`);
+    return false;
   }
-  if (!storageUsedMB){
-    try {
-      const du = await runCmd(duCmd, ['-h', base || '/'], { quiet: true })
-      const txt = (du.out || du.err || '').toString()
-      const mm = txt.match(/[\r\n]*\s*([\d.,]+\s*[KMGT]?B)/i) || txt.match(/([\d.,]+\s*[KMGT]?B)/i)
-      if (mm){ storageUsedMB = parseSizeToMB(mm[1]); storageSource = storageSource==='none' ? 'du -h' : storageSource }
-    } catch {}
-  }
-  try {
-    const f = await runCmd(findCmd, [base || '/', '--type=f'], { quiet: true })
-    fileCount = (f.out || '').split(/\r?\n/).filter(Boolean).length
-  } catch {
-    try { const f = await runCmd(findCmd, ['--type=f', base || '/'], { quiet: true }); fileCount = (f.out || '').split(/\r?\n/).filter(Boolean).length } catch {}
-  }
-  try {
-    const d = await runCmd(findCmd, [base || '/', '--type=d'], { quiet: true })
-    folderCount = (d.out || '').split(/\r?\n/).filter(Boolean).length
-  } catch {
-    try { const d = await runCmd(findCmd, ['--type=d', base || '/'], { quiet: true }); folderCount = (d.out || '').split(/\r?\n/).filter(Boolean).length } catch {}
-  }
-  if (!storageTotalMB || storageTotalMB<=0) storageTotalMB = DEFAULT_FREE_QUOTA_MB
-  if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB
-  return { storageUsedMB, storageTotalMB, fileCount, folderCount, storageSource }
 }
 
-async function megaLogin(payload, ctx){
-  for (let attempt=1; attempt<=3; attempt++){
+// Modificar megaLogin para incluir fallback sin proxy
+async function megaLogin(payload, ctx) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      if (payload?.type==='session' && payload.session) await runCmd('mega-login',[payload.session],{ quiet:true })
-      else if (payload?.username && payload?.password) await runCmd('mega-login',[payload.username,payload.password],{ quiet:true })
-      else throw new Error('Credenciales inválidas')
+      if (payload?.type === 'session' && payload.session) {
+        await runCmdWithTimeout('mega-login', [payload.session], 15000, { quiet: true });
+      } else if (payload?.username && payload?.password) {
+        await runCmdWithTimeout('mega-login', [payload.username, payload.password], 15000, { quiet: true });
+      } else {
+        throw new Error('Credenciales inválidas');
+      }
       log.info(`[MEGA][LOGIN][OK] ${ctx} intento=${attempt}`)
       return
-    } catch (e){
+    } catch (e) {
       log.warn(`[MEGA][LOGIN][FAIL] intento=${attempt} ${ctx} msg=${e.message}`)
-      await new Promise(r=>setTimeout(r, 500*attempt))
+      if (attempt === 1 && USE_BASIC_PROXY) {
+        log.info('[MEGA][LOGIN] Intentando sin proxy...')
+        await clearProxy()
+      }
+      await sleep(500 * attempt)
     }
   }
 }
