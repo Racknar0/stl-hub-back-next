@@ -126,17 +126,35 @@ async function clearProxy() {
 }
 // ==========================================
 
-function runCmd(cmd, args = [], { quiet = false } = {}) {
+function runCmd(cmd, args = [], { quiet = false, timeoutMs } = {}) {
     const printable = `${cmd} ${(args || []).join(' ')}`.trim();
     log.verbose(`[CRON] cmd ${printable}`);
     return new Promise((resolve, reject) => {
         const child = spawn(cmd, args, { shell: true });
         let out = '',
             err = '';
+        let settled = false;
+        let killed = false;
+        let timer = null;
+        if (timeoutMs && Number(timeoutMs) > 0) {
+            timer = setTimeout(() => {
+                if (settled) return;
+                killed = true;
+                try { child.kill('SIGTERM'); } catch {}
+                // Forzar kill si no termina en 2s
+                setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 2000);
+                if (!quiet) log.warn(`[CRON] timeout cmd ${cmd} after ${timeoutMs}ms`);
+                settled = true;
+                reject(new Error(`TIMEOUT ${cmd} ${timeoutMs}ms`));
+            }, timeoutMs);
+        }
         child.stdout.on('data', (d) => (out += d.toString()));
         child.stderr.on('data', (d) => (err += d.toString()));
         child.on('close', (code) => {
-            if (code === 0) return resolve({ out, err });
+            if (timer) { try { clearTimeout(timer) } catch {} }
+            if (settled) return; // ya hemos hecho timeout
+            settled = true;
+            if (code === 0 && !killed) return resolve({ out, err });
             if (!quiet)
                 log.warn(
                     `[CRON] fallo cmd ${cmd} code=${code} msg=${(
@@ -326,24 +344,35 @@ async function getAccountMetrics(base) {
 }
 
 async function megaLogin(payload, ctx) {
+    // En algunos entornos Linux, mega-login puede quedarse colgado (especialmente con proxies).
+    // Aplicamos timeout y un fallback sin proxy si falla el intento inicial.
     for (let attempt = 1; attempt <= 3; attempt++) {
         try {
             if (payload?.type === 'session' && payload.session) {
-                await runCmd('mega-login', [payload.session], { quiet: true });
+                await runCmd('mega-login', [payload.session], { quiet: true, timeoutMs: 45000 });
             } else if (payload?.username && payload?.password) {
-                await runCmd('mega-login', [payload.username, payload.password], {
-                    quiet: true,
-                });
+                await runCmd('mega-login', [payload.username, payload.password], { quiet: true, timeoutMs: 45000 });
             } else {
                 throw new Error('Credenciales inválidas');
             }
             log.info(`[MEGA][LOGIN][OK] ${ctx} intento=${attempt}`);
             return;
         } catch (e) {
-            log.warn(
-                `[MEGA][LOGIN][FAIL] intento=${attempt} ${ctx} msg=${e.message}`
-            );
-            await sleep(500 * attempt);
+            log.warn(`[MEGA][LOGIN][FAIL] intento=${attempt} ${ctx} msg=${e.message}`);
+            // Fallback: intentar sin proxy si hay uno activo y el login falla/timeout
+            try {
+                await clearProxy();
+                if (payload?.type === 'session' && payload.session) {
+                    await runCmd('mega-login', [payload.session], { quiet: true, timeoutMs: 30000 });
+                } else if (payload?.username && payload?.password) {
+                    await runCmd('mega-login', [payload.username, payload.password], { quiet: true, timeoutMs: 30000 });
+                }
+                log.info(`[MEGA][LOGIN][OK][FALLBACK] ${ctx} intento=${attempt} (sin proxy)`);
+                return;
+            } catch (ef) {
+                log.warn(`[MEGA][LOGIN][FALLBACK][FAIL] ${ctx} intento=${attempt} msg=${ef.message}`);
+            }
+            await sleep(1000 * attempt);
         }
     }
 }
