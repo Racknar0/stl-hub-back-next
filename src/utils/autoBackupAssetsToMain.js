@@ -28,6 +28,8 @@ const UPLOADS_ACTIVE_FLAG = process.env.UPLOADS_ACTIVE_FLAG || path.join(UPLOADS
 const PROXY_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'proxies.txt');
 let PROXY_LIST = [];
 let CURRENT_PROXY = null;
+const PROXY_CURL_TEST_URL = 'https://www.google.com';
+const PROXY_CURL_TIMEOUT_S = 10;
 
 try {
   if (fs.existsSync(PROXY_FILE)) {
@@ -298,7 +300,7 @@ export async function runAutoRestoreMain(){
     if (!candidateAssets.length){
       log.info('[CRON] MAIN sin assets. Actualizando métricas...')
       await withMegaLock(async () => {
-        await setRandomProxy(); 
+        await setValidatedProxy(5);
         try {
           const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
           await megaLogout(buildCtx(main)); await megaLogin(payload, buildCtx(main))
@@ -315,7 +317,7 @@ export async function runAutoRestoreMain(){
         if (!b?.credentials) continue
         await sleep(2000); 
         await withMegaLock(async () => {
-          await setRandomProxy();
+          await setValidatedProxy(5);
           try {
              const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
              await megaLogout(buildCtx(b)); await megaLogin(payloadB, buildCtx(b))
@@ -337,7 +339,7 @@ export async function runAutoRestoreMain(){
 
     // FASE 1: MAIN (Scan)
     await withMegaLock(async () => {
-      await setRandomProxy();
+      await setValidatedProxy(5);
       const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
       await megaLogout(buildCtx(main))
       await megaLogin(payload, buildCtx(main))
@@ -396,7 +398,7 @@ export async function runAutoRestoreMain(){
         if (!needDownload.size) break
         const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
         await withMegaLock( async () => {
-          await setRandomProxy();
+          await setValidatedProxy(5);
           await megaLogout(buildCtx(b)); await megaLogin(payloadB, buildCtx(b))
           for (const [assetId, asset] of Array.from(needDownload.entries())){
             const remoteBaseB = (b.baseFolder||'/').replaceAll('\\','/')
@@ -423,7 +425,7 @@ export async function runAutoRestoreMain(){
     // FASE 3: Subir a MAIN y exportar link
     await withMegaLock(async () => {
       if (recovered.size){
-        await setRandomProxy();
+        await setValidatedProxy(5);
         const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
         await megaLogout(buildCtx(main)); await megaLogin(payload, buildCtx(main))
         for (const [assetId, info] of recovered.entries()){
@@ -466,7 +468,7 @@ export async function runAutoRestoreMain(){
       if (!b?.credentials) continue
       const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
       await withMegaLock(async () => {
-        await setRandomProxy();
+        await setValidatedProxy(5);
         try {
           await megaLogout(buildCtx(b));
           await megaLogin(payloadB, buildCtx(b))
@@ -541,4 +543,91 @@ export async function runAutoRestoreMain(){
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   runAutoRestoreMain().then(r=>{ if(!r.ok) process.exitCode=1 })
+}
+
+function maskProxyForLogs(raw) {
+  // raw esperado: IP:PORT:USER:PASS
+  const parts = String(raw || '').split(':');
+  if (parts.length !== 4) return String(raw || '').slice(0, 64);
+  const [ip, port, user] = parts;
+  return `${ip}:${port}:${user}:***`;
+}
+
+function buildHttpProxyAuthUrl(raw) {
+  // raw esperado: IP:PORT:USER:PASS
+  const parts = String(raw || '').split(':');
+  if (parts.length !== 4) return null;
+  const [ip, port, user, pass] = parts;
+  return { ip, port, user, pass, proxyUrl: `http://${ip}:${port}`, proxyAuthUrl: `http://${user}:${pass}@${ip}:${port}` };
+}
+
+async function validateProxyWithCurl(raw) {
+  const built = buildHttpProxyAuthUrl(raw);
+  if (!built) return { ok: false, reason: 'FORMATO_INVALIDO' };
+
+  // -I: HEAD, -L: follow redirects, -sS: silent but show errors
+  // --proxy: set proxy, --max-time: timeout
+  const args = [
+    '-I',
+    '-L',
+    '-sS',
+    '--proxy',
+    built.proxyAuthUrl,
+    '--max-time',
+    String(PROXY_CURL_TIMEOUT_S),
+    PROXY_CURL_TEST_URL,
+  ];
+
+  try {
+    const r = await runCmd('curl', args, { quiet: true, timeoutMs: (PROXY_CURL_TIMEOUT_S + 2) * 1000 });
+    const txt = (r.out || r.err || '').toString();
+    // Consideramos OK si curl logró una respuesta HTTP (código 200-399 típico en la primera línea)
+    const m = txt.match(/HTTP\/[0-9.]+\s+(\d{3})/i);
+    const code = m ? Number(m[1]) : 0;
+    if (code >= 200 && code < 400) return { ok: true, code };
+    return { ok: false, reason: `HTTP_${code || 'NO_HTTP'}` };
+  } catch (e) {
+    return { ok: false, reason: e.message || 'CURL_ERROR' };
+  }
+}
+
+async function setValidatedProxy(maxTries = 5) {
+  if (!PROXY_LIST || PROXY_LIST.length === 0) {
+    CURRENT_PROXY = null;
+    return { ok: false, reason: 'NO_PROXIES' };
+  }
+
+  // Siempre partimos limpio
+  await clearProxy();
+
+  const tries = Math.min(Math.max(Number(maxTries) || 1, 1), PROXY_LIST.length);
+  const startIdx = Math.floor(Math.random() * PROXY_LIST.length);
+
+  for (let i = 0; i < tries; i++) {
+    const raw = PROXY_LIST[(startIdx + i) % PROXY_LIST.length];
+    const masked = maskProxyForLogs(raw);
+
+    const v = await validateProxyWithCurl(raw);
+    if (!v.ok) {
+      log.warn(`[PROXY][VALIDATION] FAIL ${masked} reason=${v.reason}`);
+      continue;
+    }
+
+    const built = buildHttpProxyAuthUrl(raw);
+    if (!built) continue;
+
+    try {
+      await runCmd('mega-proxy', [built.proxyUrl, `--username=${built.user}`, `--password=${built.pass}`], { quiet: true });
+      CURRENT_PROXY = built.proxyUrl;
+      log.info(`[PROXY][VALIDATION] OK ${built.proxyUrl} (curl=${v.code || 'ok'})`);
+      return { ok: true, proxy: built.proxyUrl };
+    } catch (e) {
+      log.warn(`[PROXY] Falló al aplicar ${built.proxyUrl}: ${e.message}`);
+      await clearProxy();
+    }
+  }
+
+  log.warn('[PROXY][VALIDATION] Ningún proxy pasó la validación. Continuando sin proxy.');
+  await clearProxy();
+  return { ok: false, reason: 'ALL_FAILED' };
 }
