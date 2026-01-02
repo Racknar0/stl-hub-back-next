@@ -34,25 +34,26 @@ const UPLOADS_ACTIVE_FLAG = process.env.UPLOADS_ACTIVE_FLAG || path.join(UPLOADS
 
 // ==========================================
 // NUEVO: SISTEMA DE PROXIES Y ANTI-BAN
+//  - Soporta entradas sin esquema (sin http/socks5)
+//  - Formatos soportados en proxies.txt:
+//    * ip:port
+//    * user:pass@ip:port
+//    * ip:port:user:pass
+//    * http://user:pass@ip:port
+//    * socks5://user:pass@ip:port
 // ==========================================
 const PROXY_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'proxies.txt');
 let PROXY_LIST = [];
 
-// Carga automática de proxies.txt
+// Carga automática de proxies.txt (se guardan las líneas en crudo y se normalizan al aplicar)
 try {
   if (fs.existsSync(PROXY_FILE)) {
     const content = fs.readFileSync(PROXY_FILE, 'utf-8');
     PROXY_LIST = content.split(/\r?\n/)
       .map(l => l.trim())
       .filter(l => l && !l.startsWith('#'))
-      .map(line => {
-        // Tu formato es IP:PORT:USER:PASS -> Convertimos a URL de MEGA
-        const parts = line.split(':');
-        if (parts.length === 4) {
-          return `socks5://${parts[2]}:${parts[3]}@${parts[0]}:${parts[1]}`;
-        }
-        return line; // Si ya viene formateado lo dejamos igual
-      });
+      // Mantener las líneas en crudo; la normalización se hace al aplicarlas
+      ;
     log.info(`[INIT] Proxies cargados: ${PROXY_LIST.length}`);
   } else {
     log.warn('[INIT] NO se encontró proxies.txt. Se usará IP DIRECTA (Riesgo de Ban).');
@@ -61,15 +62,61 @@ try {
   log.error(`[INIT] Error leyendo proxies: ${e.message}`);
 }
 
+// Genera variantes válidas a partir de una línea cruda de proxy
+function getProxyVariants(raw){
+  const line = String(raw || '').trim();
+  const variants = [];
+  if (!line) return variants;
+  // Si ya tiene esquema, usar tal cual
+  if (/^(https?:\/\/|socks5:\/\/)/i.test(line)) {
+    variants.push(line);
+    return variants;
+  }
+  // user:pass@ip:port
+  if (/^[^\s@:]+:[^\s@:]+@[^\s:]+:\d+$/.test(line)) {
+    variants.push(line); // sin esquema
+    variants.push(`http://${line}`);
+    variants.push(`socks5://${line}`);
+    return variants;
+  }
+  // ip:port:user:pass
+  const parts = line.split(':');
+  if (parts.length === 4) {
+    const [ip, port, user, pass] = parts;
+    const noScheme = `${user}:${pass}@${ip}:${port}`;
+    variants.push(noScheme); // sin esquema
+    variants.push(`http://${noScheme}`);
+    variants.push(`socks5://${noScheme}`);
+    return variants;
+  }
+  // ip:port
+  if (/^[^\s:]+:\d+$/.test(line)) {
+    variants.push(line); // sin esquema
+    variants.push(`http://${line}`);
+    variants.push(`socks5://${line}`);
+    return variants;
+  }
+  // Fallback: usar tal cual
+  variants.push(line);
+  return variants;
+}
+
 async function setRandomProxy() {
   if (!PROXY_LIST || PROXY_LIST.length === 0) return;
-  const proxy = PROXY_LIST[Math.floor(Math.random() * PROXY_LIST.length)];
-  try {
-    await runCmd('mega-proxy', [proxy], { quiet: true });
-  } catch (e) {
-    // Si falla poner el proxy, limpiamos para evitar errores de red
-    await clearProxy();
+  const raw = PROXY_LIST[Math.floor(Math.random() * PROXY_LIST.length)];
+  const candidates = getProxyVariants(raw);
+  for (const proxy of candidates){
+    try {
+      await runCmd('mega-proxy', [proxy], { quiet: true });
+      log.info(`[PROXY] Aplicado: ${proxy}`);
+      return;
+    } catch (e) {
+      // Intentar siguiente variante
+      log.warn(`[PROXY] Fallo aplicando ${proxy}: ${e.message}`);
+    }
   }
+  // Si ninguna variante funcionó, limpiar
+  await clearProxy();
 }
 
 async function clearProxy() {
