@@ -147,7 +147,10 @@ function parseSizeToMB(str){
 }
 
 // Truncado seguro para cuerpos de notificación (evita errores de columna demasiado larga)
-function truncateBody(s, max = 1000) {
+// Límite conservador para columnas VARCHAR cortas (sin cambiar modelo)
+const NOTIF_BODY_MAX = Number(process.env.NOTIF_BODY_MAX) || 240;
+
+function truncateBody(s, max = NOTIF_BODY_MAX) {
   if (s == null) return null;
   const str = String(s);
   return str.length > max ? str.slice(0, max - 3) + '...' : str;
@@ -492,14 +495,14 @@ export async function runAutoRestoreMain(){
       try {
         const notifTitle = 'Restauración automática de assets desde backups completada'
         const notifBody = `Cuenta MAIN ${main.alias||'--'} (${main.email||'--'}). Total: ${candidateAssets.length}. Restaurados: ${restored}. Existentes: ${skippedExisting}. Links regenerados: ${regeneratedLinks}. No recuperados: ${notRecovered}. Duración: ${durMs} ms.`
-        await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody, 1000), status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'SUCCESS' } })
+  await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody), status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'SUCCESS' } })
       } catch(e){ log.warn('[NOTIF][CRON] No se pudo crear notificación (restored>0): '+e.message) }
     } else if (notRecovered > 0) {
       try {
         const pendingIds = Array.from(needDownload.keys())
         const notifTitle = 'Fallo en restauración automática de assets'
         const notifBody = `Cuenta MAIN ${main.alias||'--'} (${main.email||'--'}). Faltantes=${pendingIds.length}. Ninguno restaurado. IDs pendientes: ${pendingIds.slice(0,50).join(', ')}${pendingIds.length>50?' ...':''}. Links regenerados: ${regeneratedLinks}. Duración: ${durMs} ms.`
-        await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody, 1000), status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'ERROR' } })
+  await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody), status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'ERROR' } })
       } catch(e){ log.warn('[NOTIF][CRON][FAIL] No se pudo crear notificación de fallo: '+e.message) }
     } else {
       log.info('[CRON][NOTIF][SKIP] restored=0 pero noRecovered=0 (todos existen, sin restauraciones)')
@@ -512,7 +515,7 @@ export async function runAutoRestoreMain(){
       await prisma.notification.create({
         data: {
           title: 'Error en restauración automática de backups',
-          body: truncateBody(errBody, 1000),
+          body: truncateBody(errBody),
           status: 'UNREAD',
           type: 'AUTOMATION',
           typeStatus: 'ERROR'
