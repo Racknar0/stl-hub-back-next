@@ -498,12 +498,8 @@ export async function runAutoRestoreMain(){
         await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody), status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'SUCCESS' } })
       } catch(e){ log.warn('[NOTIF][CRON] No se pudo crear notificación (restored>0): '+e.message) }
     } else if (notRecovered > 0) {
-      try {
-        const pendingIds = Array.from(needDownload.keys())
-        const notifTitle = 'Fallo en restauración automática de assets'
-        const notifBody = `Cuenta MAIN ${main.alias||'--'} (${main.email||'--'}). Faltantes=${pendingIds.length}. Ninguno restaurado. IDs pendientes: ${pendingIds.slice(0,50).join(', ')}${pendingIds.length>50?' ...':''}. Links regenerados: ${regeneratedLinks}. Duración: ${durMs} ms.`
-        await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody), status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'ERROR' } })
-      } catch(e){ log.warn('[NOTIF][CRON][FAIL] No se pudo crear notificación de fallo: '+e.message) }
+      const pendingIds = Array.from(needDownload.keys())
+      log.warn(`[CRON][FALLO] Restauración automática incompleta. MAIN ${main.alias||'--'} (${main.email||'--'}). Faltantes=${pendingIds.length}. Ninguno restaurado. IDs pendientes (primeros 50): ${pendingIds.slice(0,50).join(', ')}${pendingIds.length>50?' ...':''}. Links regenerados: ${regeneratedLinks}. Duración: ${durMs} ms.`)
     } else {
       log.info('[CRON][NOTIF][SKIP] restored=0 pero noRecovered=0 (todos existen, sin restauraciones)')
     }
