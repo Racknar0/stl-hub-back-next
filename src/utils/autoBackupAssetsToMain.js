@@ -742,11 +742,13 @@ export async function runAutoRestoreMain() {
                 main.credentials.encTag
             );
             await megaLogout(buildCtx(main));
+            log.info('[TRACE][PHASE1] Logout MAIN completado; iniciando login...');
             await megaLogin(payload, buildCtx(main));
             const remoteBaseMain = (main.baseFolder || '/').replaceAll(
                 '\\',
                 '/'
             );
+            log.info(`[TRACE][PHASE1] Login MAIN OK; base remota: ${remoteBaseMain}. Escaneo de ${candidateAssets.length} assets...`);
             for (let i = 0; i < candidateAssets.length; i++) {
                 const asset = candidateAssets[i];
                 const remoteFolder = path.posix.join(
@@ -758,10 +760,13 @@ export async function runAutoRestoreMain() {
                     : null;
                 let lsOut = '';
                 try {
+                    log.verbose(`[TRACE][PHASE1] [${i + 1}/${candidateAssets.length}] mega-ls ${remoteFolder}`);
+                    const _tLs = Date.now();
                     const ls = await runCmd('mega-ls', [remoteFolder], {
                         quiet: true,
                     });
                     lsOut = ls.out;
+                    log.verbose(`[TRACE][PHASE1] mega-ls OK (${remoteFolder}) en ${Date.now() - _tLs}ms`);
                 } catch {}
                 const lines = String(lsOut)
                     .split(/\r?\n/)
@@ -887,7 +892,9 @@ export async function runAutoRestoreMain() {
                         );
                     }
                     await megaLogout(buildCtx(b));
+                    log.info(`[TRACE][BACKUP][PHASE2] Logout backup id=${b.id} alias=${b.alias||'--'} OK; iniciando login...`);
                     await megaLogin(payloadB, buildCtx(b));
+                    log.info(`[TRACE][BACKUP][PHASE2] Login backup id=${b.id} alias=${b.alias||'--'} OK`);
                     for (const [assetId, asset] of Array.from(
                         needDownload.entries()
                     )) {
@@ -901,12 +908,15 @@ export async function runAutoRestoreMain() {
                         );
                         let lsOut = '';
                         try {
+                            log.verbose(`[TRACE][BACKUP][PHASE2] mega-ls ${remoteFolderB}`);
+                            const _tLsB = Date.now();
                             const ls = await runCmd(
                                 'mega-ls',
                                 [remoteFolderB],
                                 { quiet: true }
                             );
                             lsOut = ls.out;
+                            log.verbose(`[TRACE][BACKUP][PHASE2] mega-ls OK (${remoteFolderB}) en ${Date.now()-_tLsB}ms`);
                         } catch {
                             continue;
                         }
@@ -921,9 +931,12 @@ export async function runAutoRestoreMain() {
                             `restore-${asset.id}-${Date.now()}-${fileName}`
                         );
                         try {
+                            log.verbose(`[TRACE][BACKUP][PHASE2] mega-get ${remoteFile} -> ${localTemp}`);
+                            const _tGet = Date.now();
                             await runCmd('mega-get', [remoteFile, localTemp], {
                                 quiet: true,
                             });
+                            log.verbose(`[TRACE][BACKUP][PHASE2] mega-get OK en ${Date.now()-_tGet}ms (${remoteFile})`);
                             if (fs.existsSync(localTemp)) {
                                 const size = fs.statSync(localTemp).size;
                                 recovered.set(asset.id, {
@@ -978,7 +991,9 @@ export async function runAutoRestoreMain() {
                     main.credentials.encTag
                 );
                 await megaLogout(buildCtx(main));
+                log.info('[TRACE][PHASE3] Logout MAIN OK; iniciando login...');
                 await megaLogin(payload, buildCtx(main));
+                log.info('[TRACE][PHASE3] Login MAIN OK; iniciando subidas...');
                 for (const [assetId, info] of recovered.entries()) {
                     const asset = assetMap.get(assetId);
                     const remoteBase = (main.baseFolder || '/').replaceAll(
@@ -990,6 +1005,7 @@ export async function runAutoRestoreMain() {
                         asset.slug
                     );
                     try {
+                        log.verbose(`[TRACE][PHASE3] mega-mkdir ${remoteFolder}`);
                         await runCmd('mega-mkdir', ['-p', remoteFolder], {
                             quiet: true,
                         });
@@ -999,14 +1015,19 @@ export async function runAutoRestoreMain() {
                         info.fileName
                     );
                     try {
+                        log.verbose(`[TRACE][PHASE3] mega-put ${info.localTemp} -> ${remoteFile}`);
+                        const _tPut = Date.now();
                         await runCmd('mega-put', [info.localTemp, remoteFile], {
                             quiet: true,
                         });
+                        log.verbose(`[TRACE][PHASE3] mega-put OK en ${Date.now()-_tPut}ms (${remoteFile})`);
                         try {
+                            log.verbose(`[TRACE][PHASE3] mega-export -d ${remoteFile}`);
                             await runCmd('mega-export', ['-d', remoteFile], {
                                 quiet: true,
                             });
                         } catch {}
+                        log.verbose(`[TRACE][PHASE3] mega-export -a ${remoteFile}`);
                         const exp = await runCmd(
                             'mega-export',
                             ['-a', remoteFile],
