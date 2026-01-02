@@ -166,21 +166,65 @@ function truncateBody(s, max = 240) {
   return str.length > max ? str.slice(0, max - 3) + '...' : str;
 }
 
+function stripAnsi(s='') {
+  return String(s).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
+}
+
 async function getAccountMetrics(base){
-  const dfCmd = 'mega-df', duCmd = 'mega-du', findCmd = 'mega-find'
-  let storageUsedMB=0, storageTotalMB=0, fileCount=0, folderCount=0, storageSource='none'
+  // base se deja por compatibilidad (por si luego se usa mega-du/mega-find)
+  let storageUsedMB = 0, storageTotalMB = 0;
+  let fileCount = 0, folderCount = 0;
+  let storageSource = 'none';
+
+  let txt = '';
   try {
-    const df = await runCmd(dfCmd, ['-h'], { quiet: true })
-    const txt = (df.out || df.err || '').toString()
-    let m = txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i)
-      || txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i)
-      || txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i)
-    if (m){ storageUsedMB = parseSizeToMB(m[1]); storageTotalMB = parseSizeToMB(m[2]); storageSource='df -h' }
-  } catch {}
-  
-  if (!storageTotalMB) storageTotalMB = DEFAULT_FREE_QUOTA_MB
-  if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB
-  return { storageUsedMB, storageTotalMB, fileCount, folderCount, storageSource }
+    const df = await runCmd('mega-df', ['-h'], { quiet: true, timeoutMs: 15000 });
+    txt = stripAnsi((df.out || df.err || '').toString());
+
+    // Formato nuevo (MEGAcmd recientes):
+    //   USED STORAGE: 18.11 GB  90.53% of 20.00 GB
+    //   Cloud drive:  18.11 GB in 69 file(s) and 69 folder(s)
+    let m = txt.match(/USED\s+STORAGE:\s*([\d.,]+\s*[KMGT]?B).*?\bof\s*([\d.,]+\s*[KMGT]?B)/i);
+    if (!m) {
+      // fallback por si cambia el wording
+      m = txt.match(/\bUSED\s+STORAGE\b.*?([\d.,]+\s*[KMGT]?B).*?\bof\s*([\d.,]+\s*[KMGT]?B)/i);
+    }
+    if (m) {
+      storageUsedMB = parseSizeToMB(m[1]);
+      storageTotalMB = parseSizeToMB(m[2]);
+      storageSource = 'df -h USED STORAGE';
+    }
+
+    const c = txt.match(/Cloud\s+drive:\s*[\d.,]+\s*[KMGT]?B\s+in\s+(\d+)\s+file\(s\)\s+and\s+(\d+)\s+folder\(s\)/i);
+    if (c) {
+      fileCount = Number(c[1]) || 0;
+      folderCount = Number(c[2]) || 0;
+      if (storageSource === 'none') storageSource = 'df -h Cloud drive';
+    }
+
+    // Fallback a formatos antiguos que el script ya soportaba (por si el output cambia)
+    if (!storageTotalMB) {
+      const mf = txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i)
+        || txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i)
+        || txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i);
+      if (mf) {
+        storageUsedMB = parseSizeToMB(mf[1]);
+        storageTotalMB = parseSizeToMB(mf[2]);
+        storageSource = storageSource === 'none' ? 'df -h fallback' : storageSource;
+      }
+    }
+
+    if (storageSource === 'none') {
+      log.warn(`[METRICS] No pude parsear mega-df -h. Output (first 400): ${txt.slice(0,400)}`);
+    }
+  } catch (e) {
+    log.warn(`[METRICS] mega-df falló: ${e.message}. Output (first 200): ${txt.slice(0,200)}`);
+  }
+
+  if (!storageTotalMB) storageTotalMB = DEFAULT_FREE_QUOTA_MB;
+  if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB;
+
+  return { storageUsedMB, storageTotalMB, fileCount, folderCount, storageSource };
 }
 
 async function megaLogin(payload, ctx) {
