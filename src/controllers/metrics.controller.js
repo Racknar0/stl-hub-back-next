@@ -12,27 +12,93 @@ export async function getUploadsMetrics(req, res) {
   try {
     const now = new Date()
     const todayStart = startOfDay(now)
+    const twoDaysAgo = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000)
     const threeDaysAgo = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000)
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
     const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+    const sixtyDaysAgo = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000)
+    const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000)
     const threeSixtyFiveDaysAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000)
 
-    const [todayCount, last3dCount, last7dCount, last30dCount, last365dCount, totalCount] = await Promise.all([
+    const sumBytes = async (gte) => {
+      const r = await prisma.asset.aggregate({
+        where: gte ? { createdAt: { gte } } : undefined,
+        _sum: { fileSizeB: true },
+      })
+      return r?._sum?.fileSizeB ?? BigInt(0)
+    }
+
+    const [
+      todayCount,
+      last2dCount,
+      last3dCount,
+      last7dCount,
+      last30dCount,
+      last60dCount,
+      last90dCount,
+      last365dCount,
+      totalCount,
+      todayBytes,
+      last2dBytes,
+      last3dBytes,
+      last7dBytes,
+      last30dBytes,
+      last60dBytes,
+      last90dBytes,
+      last365dBytes,
+      totalBytes,
+    ] = await Promise.all([
       prisma.asset.count({ where: { createdAt: { gte: todayStart } } }),
+      prisma.asset.count({ where: { createdAt: { gte: twoDaysAgo } } }),
       prisma.asset.count({ where: { createdAt: { gte: threeDaysAgo } } }),
       prisma.asset.count({ where: { createdAt: { gte: sevenDaysAgo } } }),
       prisma.asset.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
+      prisma.asset.count({ where: { createdAt: { gte: sixtyDaysAgo } } }),
+      prisma.asset.count({ where: { createdAt: { gte: ninetyDaysAgo } } }),
       prisma.asset.count({ where: { createdAt: { gte: threeSixtyFiveDaysAgo } } }),
       prisma.asset.count(),
+      sumBytes(todayStart),
+      sumBytes(twoDaysAgo),
+      sumBytes(threeDaysAgo),
+      sumBytes(sevenDaysAgo),
+      sumBytes(thirtyDaysAgo),
+      sumBytes(sixtyDaysAgo),
+      sumBytes(ninetyDaysAgo),
+      sumBytes(threeSixtyFiveDaysAgo),
+      sumBytes(undefined),
     ])
+
+    const bytesToGB = (b) => {
+      try {
+        const n = typeof b === 'bigint' ? Number(b) : Number(b || 0)
+        if (!Number.isFinite(n) || n <= 0) return 0
+        return Math.round((n / (1024 ** 3)) * 10) / 10
+      } catch {
+        return 0
+      }
+    }
 
     const data = {
         today: todayCount,
+        last2d: last2dCount,
         last3d: last3dCount,
         lastWeek: last7dCount,
         month: last30dCount,
+        months2: last60dCount,
+        months3: last90dCount,
         lastYear: last365dCount,
         all: totalCount,
+        sizeGB: {
+          today: bytesToGB(todayBytes),
+          last2d: bytesToGB(last2dBytes),
+          last3d: bytesToGB(last3dBytes),
+          lastWeek: bytesToGB(last7dBytes),
+          month: bytesToGB(last30dBytes),
+          months2: bytesToGB(last60dBytes),
+          months3: bytesToGB(last90dBytes),
+          lastYear: bytesToGB(last365dBytes),
+          all: bytesToGB(totalBytes),
+        },
     }
 
     console.log('getUploadsMetrics data', data)
