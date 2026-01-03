@@ -34,6 +34,23 @@ function uploadsAreActiveNow(){
   }
 }
 
+// Si hay subidas activas, NO debemos tocar la sesión global de MEGAcmd.
+async function safeMegaLogout(ctx, why = ''){
+  if (uploadsAreActiveNow()) {
+    log.warn(`[MEGA][LOGOUT][SKIP] subidas activas. ${why ? `why=${why} ` : ''}${ctx || ''}`.trim());
+    return;
+  }
+  return megaLogout(ctx);
+}
+
+async function safeClearProxy(why = ''){
+  if (uploadsAreActiveNow()) {
+    log.warn(`[PROXY][CLEAR][SKIP] subidas activas.${why ? ` why=${why}` : ''}`);
+    return;
+  }
+  return clearProxy();
+}
+
 // ==========================================
 // SISTEMA DE PROXIES
 // ==========================================
@@ -422,13 +439,13 @@ export async function runAutoRestoreMain(){
         await setStickyProxyForAccount(main);
         try {
           const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
-          await megaLogout(buildCtx(main)); await megaLogin(payload, buildCtx(main))
+          await safeMegaLogout(buildCtx(main), 'metrics-main-pre'); await megaLogin(payload, buildCtx(main))
           const m = await getAccountMetrics((main.baseFolder||'/').replaceAll('\\','/'))
           await prisma.megaAccount.update({ where:{ id: main.id }, data:{
             status: 'CONNECTED', lastCheckAt: new Date(),
             storageUsedMB: m.storageUsedMB, storageTotalMB: m.storageTotalMB, fileCount: m.fileCount, folderCount: m.folderCount,
           }})
-        } catch(e){} finally { await megaLogout(buildCtx(main)); await clearProxy(); }
+        } catch(e){} finally { await safeMegaLogout(buildCtx(main), 'metrics-main-finally'); await safeClearProxy('metrics-main-finally'); }
       }, 'CRON-METRICS-MAIN')
       
       // Warmup Backups
@@ -439,13 +456,13 @@ export async function runAutoRestoreMain(){
           await setStickyProxyForAccount(b);
           try {
              const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
-             await megaLogout(buildCtx(b)); await megaLogin(payloadB, buildCtx(b))
+             await safeMegaLogout(buildCtx(b), 'metrics-backup-pre'); await megaLogin(payloadB, buildCtx(b))
              const m = await getAccountMetrics((b.baseFolder||'/').replaceAll('\\','/'))
              await prisma.megaAccount.update({ where:{ id: b.id }, data:{
                 status: 'CONNECTED', lastCheckAt: new Date(),
                 storageUsedMB: m.storageUsedMB, storageTotalMB: m.storageTotalMB, fileCount: m.fileCount, folderCount: m.folderCount,
              }})
-          } catch(e){} finally { await megaLogout(buildCtx(b)); await clearProxy(); }
+          } catch(e){} finally { await safeMegaLogout(buildCtx(b), 'metrics-backup-finally'); await safeClearProxy('metrics-backup-finally'); }
         }, `CRON-METRICS-${b.id}`)
       }
       return { ok:true, skipped:true, reason:'NO_ASSETS' }
@@ -460,7 +477,7 @@ export async function runAutoRestoreMain(){
     await withMegaLock(async () => {
       await setStickyProxyForAccount(main);
       const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
-      await megaLogout(buildCtx(main))
+      await safeMegaLogout(buildCtx(main), 'phase1-main-pre')
       await megaLogin(payload, buildCtx(main))
       const remoteBaseMain = (main.baseFolder||'/').replaceAll('\\','/')
       for (let i=0;i<candidateAssets.length;i++){
@@ -506,8 +523,8 @@ export async function runAutoRestoreMain(){
         })
         log.info(`[CRON][MÉTRICAS][MAIN] alias=${main.alias||'--'} usados=${m.storageUsedMB}MB de ${m.storageTotalMB}MB | archivos=${m.fileCount} carpetas=${m.folderCount} (fuente=${m.storageSource})`)
       } catch(e){ log.warn(`[CRON][MÉTRICAS][MAIN][WARN] No se pudo actualizar métricas: ${e.message}`) }
-      await megaLogout(buildCtx(main))
-      await clearProxy();
+      await safeMegaLogout(buildCtx(main), 'phase1-main-post')
+      await safeClearProxy('phase1-main-post');
     }, 'CRON-PHASE1')
     log.info(`[CRON][RESUMEN][FASE1] existentes=${existingSet.size} faltantes=${needDownload.size} linksRegenerados=${regeneratedLinks}`)
 
@@ -518,7 +535,7 @@ export async function runAutoRestoreMain(){
         const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
         await withMegaLock( async () => {
           await setStickyProxyForAccount(b);
-          await megaLogout(buildCtx(b)); await megaLogin(payloadB, buildCtx(b))
+          await safeMegaLogout(buildCtx(b), 'phase2-backup-pre'); await megaLogin(payloadB, buildCtx(b))
           for (const [assetId, asset] of Array.from(needDownload.entries())){
             const remoteBaseB = (b.baseFolder||'/').replaceAll('\\','/')
             const remoteFolderB = path.posix.join(remoteBaseB, asset.slug)
@@ -535,8 +552,8 @@ export async function runAutoRestoreMain(){
               }
             } catch (e){ log.warn(`[CRON][DESCARGA] fallo asset=${asset.id} desde backup=${b.id} -> ${e.message}`) }
           }
-          await megaLogout(buildCtx(b))
-          await clearProxy();
+          await safeMegaLogout(buildCtx(b), 'phase2-backup-post')
+          await safeClearProxy('phase2-backup-post');
         }, `CRON-DL-${b.id}`)
       }
     }
@@ -546,7 +563,7 @@ export async function runAutoRestoreMain(){
       if (recovered.size){
         await setStickyProxyForAccount(main);
         const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
-        await megaLogout(buildCtx(main)); await megaLogin(payload, buildCtx(main))
+        await safeMegaLogout(buildCtx(main), 'phase3-main-pre'); await megaLogin(payload, buildCtx(main))
         for (const [assetId, info] of recovered.entries()){
           const asset = assetMap.get(assetId)
           const remoteBase = (main.baseFolder||'/').replaceAll('\\','/')
@@ -565,7 +582,7 @@ export async function runAutoRestoreMain(){
           } catch (e){ log.error(`[CRON][SUBIDA] fallo asset=${asset.id} -> ${e.message}`) }
           finally { try { if (fs.existsSync(info.localTemp)) fs.unlinkSync(info.localTemp) } catch{} }
         }
-        await megaLogout(buildCtx(main)); await clearProxy();
+        await safeMegaLogout(buildCtx(main), 'phase3-main-post'); await safeClearProxy('phase3-main-post');
       }
     }, 'CRON-PHASE3')
 
@@ -589,7 +606,7 @@ export async function runAutoRestoreMain(){
       await withMegaLock(async () => {
         await setStickyProxyForAccount(b);
         try {
-          await megaLogout(buildCtx(b));
+          await safeMegaLogout(buildCtx(b), 'warmup-backup-pre');
           await megaLogin(payloadB, buildCtx(b))
           const remoteBaseB = (b.baseFolder||'/').replaceAll('\\','/')
           try {
@@ -618,8 +635,8 @@ export async function runAutoRestoreMain(){
             body: `Backup id=${b.id} alias=${b.alias||'--'} email=${b.email||'--'} | error=${e.message}`
           })
         } finally {
-          try { await megaLogout(buildCtx(b)) } catch{}
-          await clearProxy();
+          try { await safeMegaLogout(buildCtx(b), 'warmup-backup-finally') } catch{}
+          await safeClearProxy('warmup-backup-finally');
         }
       }, `CRON-WARMUP-${b.id}`)
     }
@@ -658,8 +675,13 @@ export async function runAutoRestoreMain(){
     return { ok:false, error:e.message }
   } finally {
     try { if (fs.existsSync(RUN_LOCK)) fs.unlinkSync(RUN_LOCK) } catch{}
-    try { await runCmd('mega-logout',[],{ quiet:true }) } catch{}
-    try { await clearProxy() } catch{}
+    // Nunca tocar sesión/proxy si hay subidas activas (protege uploader en paralelo)
+    if (!uploadsAreActiveNow()) {
+      try { await runCmd('mega-logout',[],{ quiet:true }) } catch{}
+      try { await clearProxy() } catch{}
+    } else {
+      log.warn('[CRON][FINALLY][SKIP] subidas activas: no hago mega-logout/clearProxy');
+    }
     try { await prisma.$disconnect() } catch{}
   }
 }

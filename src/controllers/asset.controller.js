@@ -1129,6 +1129,58 @@ export const getScpConfig = async (_req, res) => {
     }
 };
 
+// POST /api/assets/hold-uploads-active (admin-only)
+// Mantiene el lock global uploads-active durante una ventana larga (ej. modo SCP/formulario/cola)
+// Body:
+//  - minutes?: number (por defecto 360 = 6h)
+//  - label?: string
+//  - action?: 'start' | 'release' (por defecto 'start')
+//  - holdId?: string (requerido para release)
+// Nota: no toca MEGAcmd, solo el flag; el cron ya respeta este flag.
+const uploadsActiveHolds = globalThis.__uploadsActiveHolds || new Map();
+globalThis.__uploadsActiveHolds = uploadsActiveHolds;
+
+export const holdUploadsActive = async (req, res) => {
+    try {
+        const action = String(req.body?.action || 'start').toLowerCase();
+        const label = String(req.body?.label || 'uploads-hold').slice(0, 120);
+
+        // Release temprano
+        if (action === 'release') {
+            const holdId = String(req.body?.holdId || '').trim();
+            if (!holdId) return res.status(400).json({ message: 'holdId requerido' });
+            const entry = uploadsActiveHolds.get(holdId);
+            if (entry) {
+                try { clearTimeout(entry.timeout); } catch {}
+                try { entry.stop && entry.stop(); } catch {}
+                uploadsActiveHolds.delete(holdId);
+            }
+            return res.json({ ok: true, released: true, holdId });
+        }
+
+        const minutesRaw = Number(req.body?.minutes ?? 360);
+        const minutes = Math.max(5, Math.min(24 * 60, Number.isFinite(minutesRaw) ? minutesRaw : 360));
+        const ms = minutes * 60 * 1000;
+
+        // Import dinámico para no romper si el helper no está disponible por alguna razón
+        const { startUploadsActive } = await import('../utils/uploadsActiveFlag.js');
+
+        const holdId = `hold_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const stop = startUploadsActive(`${label}:${holdId}`);
+        const timeout = setTimeout(() => {
+            try { stop && stop(); } catch {}
+            uploadsActiveHolds.delete(holdId);
+        }, ms);
+
+        uploadsActiveHolds.set(holdId, { stop, timeout, untilMs: Date.now() + ms, label });
+
+        return res.json({ ok: true, holdId, minutes, untilMs: Date.now() + ms });
+    } catch (e) {
+        console.error('[ASSETS] hold-uploads-active error:', e);
+        return res.status(500).json({ message: 'Error holding uploads-active', error: String(e.message || e) });
+    }
+};
+
 // GET /api/assets/uploads-root (admin-only, debug)
 export const getUploadsRoot = async (_req, res) => {
     try {

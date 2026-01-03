@@ -29,6 +29,7 @@ import {
   getStagedStatusBatch,
   getScpConfig,
   getUploadsRoot,
+  holdUploadsActive,
 } from '../../controllers/asset.controller.js';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
 import { createBrokenReport } from '../../controllers/brokenReport.controller.js'
@@ -103,6 +104,8 @@ router.get('/check-unique', checkAssetUnique);
 // Nuevo: configuración SCP del servidor (seguro, sin password)
 router.get('/scp-config', getScpConfig);
 router.get('/uploads-root', getUploadsRoot);
+// Nuevo: mantener lock uploads-active durante sesiones largas (modo SCP / rellenar cola)
+router.post('/hold-uploads-active', holdUploadsActive);
 router.put('/:id', updateAsset);
 router.delete('/:id', deleteAsset);
 

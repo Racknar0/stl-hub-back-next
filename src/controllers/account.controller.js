@@ -262,6 +262,7 @@ export const updateAccount = async (req, res) => {
 // Test de conexión ligero: login y ls baseFolder
 export const testAccount = async (req, res) => {
   let didLogin = false;
+  let stopUploadsFlag = null;
   try {
     const id = Number(req.params.id);
   log.info(`Prueba cuenta iniciada id=${id}`);
@@ -270,6 +271,16 @@ export const testAccount = async (req, res) => {
     if (!acc.credentials) return res.status(400).json({ message: 'No credentials stored for this account' });
   // Datos básicos (una sola línea)
   log.verbose(`Cuenta alias=${acc.alias} email=${acc.email} base=${acc.baseFolder}`);
+
+    // Mientras el usuario está "conectando" (y puede tardar), activamos el lock global
+    // para que el CRON no intente mega-logout/reset en paralelo.
+    try {
+      const { startUploadsActive } = await import('../utils/uploadsActiveFlag.js');
+      stopUploadsFlag = startUploadsActive(`connect-test:acc:${id}`);
+    } catch (e) {
+      // No bloqueamos el test si no se pudo activar el flag
+      log.warn(`[ACCOUNTS][TEST] No pude activar uploads-active flag: ${e.message}`);
+    }
 
     const payload = decryptToJson(acc.credentials.encData, acc.credentials.encIv, acc.credentials.encTag);
 
@@ -435,7 +446,19 @@ export const testAccount = async (req, res) => {
     } catch {}
     return res.status(500).json({ message: 'Error testing account', error: String(error.message) });
   } finally {
-  try { await withMegaLock(() => runCmd('mega-logout', []), 'ACCOUNTS-TEST-LOGOUT'); } catch {}
+    // Si hay subidas activas, no tocamos la sesión global.
+    try {
+      const { isUploadsActive } = await import('../utils/uploadsActiveFlag.js');
+      if (!isUploadsActive()) {
+        try { await withMegaLock(() => runCmd('mega-logout', []), 'ACCOUNTS-TEST-LOGOUT'); } catch {}
+      } else {
+        log.warn('[ACCOUNTS][TEST][FINALLY] uploads activos: skip mega-logout');
+      }
+    } catch {
+      // fallback al comportamiento anterior si no podemos cargar helper
+      try { await withMegaLock(() => runCmd('mega-logout', []), 'ACCOUNTS-TEST-LOGOUT'); } catch {}
+    }
+    try { stopUploadsFlag && stopUploadsFlag() } catch {}
   }
 };
 
