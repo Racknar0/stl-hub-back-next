@@ -86,8 +86,12 @@ export const login = async (req, res) => {
       });
     }
 
-    // Crear token JWT (incluye roleId)
-    const token = generateJWT({ id: user.id, roleId: user.roleId });
+        // Crear token JWT (incluye roleId)
+        // roleId === 2 => Admin: token sin vencimiento para evitar cortes durante subidas largas
+        const isAdmin = Number(user.roleId) === 2;
+        const token = isAdmin
+            ? generateJWT({ id: user.id, roleId: user.roleId }, null)
+            : generateJWT({ id: user.id, roleId: user.roleId });
 
         // Actualizar lastLogin en la base de datos
         try {
