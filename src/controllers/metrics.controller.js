@@ -101,7 +101,7 @@ export async function getUploadsMetrics(req, res) {
         },
     }
 
-    console.log('getUploadsMetrics data', data)
+    // console.log('getUploadsMetrics data', data)
 
     return res.json(data)
   } catch (e) {
