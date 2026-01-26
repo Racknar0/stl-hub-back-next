@@ -2,6 +2,93 @@ import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
+const normalizeProfilesPayload = (profiles) => {
+  const arr = Array.isArray(profiles) ? profiles : []
+  const cleaned = []
+  const seen = new Set()
+  for (const p of arr) {
+    const name = String(p?.name || '').trim()
+    if (!name) continue
+    const key = name.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+
+    const categories = Array.isArray(p?.categories) ? p.categories.map(x => String(x).trim()).filter(Boolean) : []
+    const tags = Array.isArray(p?.tags) ? p.tags.map(x => String(x).trim()).filter(Boolean) : []
+    cleaned.push({
+      name,
+      categories: Array.from(new Set(categories.map(x => x.toLowerCase()))),
+      tags: Array.from(new Set(tags.map(x => x.toLowerCase()))),
+    })
+  }
+  return cleaned
+}
+
+export const getMyUploaderProfiles = async (req, res) => {
+  try {
+    const userId = Number(req.user?.id)
+    if (!userId) return res.status(401).json({ message: 'Unauthorized' })
+
+    const row = await prisma.uploaderProfiles.findUnique({
+      where: { userId },
+      select: { profilesJson: true, updatedAt: true }
+    })
+
+    if (!row?.profilesJson) return res.json({ profiles: [], updatedAt: null })
+
+    let parsed = []
+    try {
+      parsed = JSON.parse(row.profilesJson)
+    } catch {
+      parsed = []
+    }
+    const profiles = normalizeProfilesPayload(parsed)
+
+    return res.json({ profiles, updatedAt: row.updatedAt })
+  } catch (e) {
+    console.error('[ME] getMyUploaderProfiles error:', e)
+    return res.status(500).json({ message: 'Error getting uploader profiles' })
+  }
+}
+
+export const upsertMyUploaderProfiles = async (req, res) => {
+  try {
+    const userId = Number(req.user?.id)
+    if (!userId) return res.status(401).json({ message: 'Unauthorized' })
+
+    let profiles = []
+    if (typeof req.body?.profilesJson === 'string') {
+      try {
+        profiles = JSON.parse(req.body.profilesJson)
+      } catch {
+        return res.status(400).json({ message: 'profilesJson inválido' })
+      }
+    } else {
+      profiles = req.body?.profiles
+    }
+
+    const normalized = normalizeProfilesPayload(profiles)
+    const profilesJson = JSON.stringify(normalized)
+
+    // Evitar payloads absurdamente grandes (protección básica)
+    if (profilesJson.length > 500_000) {
+      return res.status(413).json({ message: 'Perfiles demasiado grandes' })
+    }
+
+    const saved = await prisma.uploaderProfiles.upsert({
+      where: { userId },
+      create: { userId, profilesJson },
+      update: { profilesJson },
+      select: { updatedAt: true }
+    })
+
+    return res.json({ ok: true, count: normalized.length, updatedAt: saved.updatedAt })
+  } catch (e) {
+    console.error('[ME] upsertMyUploaderProfiles error:', e)
+    return res.status(500).json({ message: 'Error saving uploader profiles' })
+  }
+}
+
 export const getMyProfile = async (req, res) => {
   try {
     const userId = Number(req.user?.id);

@@ -37,9 +37,26 @@ model user {
   // Relación con pagos
   payments Payment[]
 
+  // Perfiles del uploader (persistidos en DB por usuario)
+  uploaderProfiles uploaderProfiles?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
     @@map("user")
+}
+
+// Perfiles del uploader persistidos por usuario.
+// Se guardan como string JSON para mantener compatibilidad con el formato actual del frontend.
+model uploaderProfiles {
+  id           Int      @id @default(autoincrement())
+  userId       Int      @unique
+  profilesJson String   @db.LongText
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user user @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("uploaderprofiles")
 }
 
 model role {
