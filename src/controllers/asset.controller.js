@@ -234,6 +234,33 @@ function toJsonSafe(value) {
     return value;
 }
 
+function stripExtension(filename) {
+    const s = String(filename || '').trim();
+    if (!s) return '';
+    return s.replace(/\.[^./\\]+$/, '');
+}
+
+function normalizeForCompare(s) {
+    return String(s || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '')
+        .trim();
+}
+
+function uniqueStrings(arr) {
+    const out = [];
+    const seen = new Set();
+    for (const v of arr || []) {
+        const s = String(v || '').trim();
+        if (!s) continue;
+        const key = s.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(s);
+    }
+    return out;
+}
+
 // Listar y obtener
 export const listAssets = async (req, res) => {
     try {
@@ -342,6 +369,88 @@ export const listAssets = async (req, res) => {
     } catch (e) {
         console.error('[ASSETS] list error:', e);
         return res.status(500).json({ message: 'Error listing assets' });
+    }
+};
+
+// Buscar assets similares (para uploader): por nombre de archivo/slug aproximado
+// GET /assets/similar?filename=naruto.rar&limit=8
+export const similarAssets = async (req, res) => {
+    try {
+        const raw = String(req.query?.filename || req.query?.q || '').trim();
+        if (!raw) return res.status(400).json({ message: 'filename required' });
+
+        const limit = Math.max(1, Math.min(25, Number(req.query?.limit) || 8));
+        const base = stripExtension(raw);
+        const baseNorm = normalizeForCompare(base);
+
+        const tokens = uniqueStrings(
+            String(base)
+                .split(/[^a-zA-Z0-9]+/g)
+                .map((t) => String(t || '').trim())
+                .filter((t) => t.length >= 3)
+        ).slice(0, 8);
+
+        const terms = uniqueStrings([base, ...tokens]).filter(Boolean).slice(0, 10);
+
+        const where = {};
+        if (terms.length) {
+            where.OR = terms.flatMap((term) => [
+                { archiveName: { contains: term } },
+                { title: { contains: term } },
+            ]);
+        }
+
+        const items = await prisma.asset.findMany({
+            where,
+            select: {
+                id: true,
+                slug: true,
+                title: true,
+                titleEn: true,
+                archiveName: true,
+                archiveSizeB: true,
+                fileSizeB: true,
+                images: true,
+                isPremium: true,
+                status: true,
+                updatedAt: true,
+                createdAt: true,
+            },
+            take: 80,
+            orderBy: { id: 'desc' },
+        });
+
+        const scored = (items || [])
+            .map((it) => {
+                const name = String(it.archiveName || it.title || '');
+                const nameNorm = normalizeForCompare(name);
+                let score = 0;
+
+                if (baseNorm && nameNorm === baseNorm) score += 100;
+                if (baseNorm && nameNorm.includes(baseNorm)) score += 50;
+
+                for (const t of tokens) {
+                    const tNorm = normalizeForCompare(t);
+                    if (tNorm && nameNorm.includes(tNorm)) score += 10;
+                }
+
+                const imgCount = Array.isArray(it.images) ? it.images.length : 0;
+                score += Math.min(20, imgCount * 2);
+                if (it.archiveName) score += 5;
+
+                return { ...it, _score: score };
+            })
+            .sort((a, b) => {
+                if (b._score !== a._score) return b._score - a._score;
+                return Number(new Date(b.updatedAt)) - Number(new Date(a.updatedAt));
+            })
+            .slice(0, limit);
+
+        const safe = toJsonSafe(scored).map(({ _score, ...rest }) => rest);
+        return res.json({ query: raw, base, tokens, items: safe });
+    } catch (e) {
+        console.error('[ASSETS] similarAssets error:', e);
+        return res.status(500).json({ message: 'Error searching similar assets' });
     }
 };
 

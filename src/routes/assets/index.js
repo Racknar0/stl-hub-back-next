@@ -30,6 +30,7 @@ import {
   getScpConfig,
   getUploadsRoot,
   holdUploadsActive,
+  similarAssets,
 } from '../../controllers/asset.controller.js';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
 import { createBrokenReport } from '../../controllers/brokenReport.controller.js'
@@ -96,6 +97,9 @@ router.use(requireAuth, requireAdmin)
 
 // Nuevo: randomizar freebies
 router.post('/randomize-free', randomizeFree)
+
+// Similaridad por nombre (para uploader)
+router.get('/similar', similarAssets);
 
 // GET /assets?q=texto&pageIndex=0&pageSize=25 para paginación del lado del servidor
 router.get('/', listAssets);
