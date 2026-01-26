@@ -261,6 +261,56 @@ function uniqueStrings(arr) {
     return out;
 }
 
+function stripDigitsKeepLetters(s) {
+    return String(s || '').replace(/\d+/g, '').trim();
+}
+
+function tokenizeSimilarQuery(input) {
+    const base = stripExtension(String(input || '').trim());
+    const baseNoDigits = String(base).replace(/\d+/g, ' ').trim();
+    const baseNorm = normalizeForCompare(base);
+    const baseNoDigitsNorm = normalizeForCompare(baseNoDigits);
+
+    const rawParts = String(base)
+        .split(/[^a-zA-Z0-9]+/g)
+        .map((t) => String(t || '').trim())
+        .filter(Boolean);
+
+    const tokens = [];
+    for (const p of rawParts) {
+        const low = String(p).toLowerCase().trim();
+        if (low.length >= 3) tokens.push(low);
+
+        const noDigits = stripDigitsKeepLetters(low);
+        if (noDigits && noDigits.length >= 3) tokens.push(noDigits);
+
+        // Prefijo para casos como pikachu1 -> pika (y evitar excluir por sufijos/números)
+        const prefixSource = noDigits && noDigits.length >= 4 ? noDigits : low;
+        if (prefixSource && prefixSource.length >= 4) tokens.push(prefixSource.slice(0, 4));
+    }
+
+    const strongTokens = uniqueStrings(tokens)
+        .map((t) => String(t).trim())
+        .filter((t) => t.length >= 3)
+        .slice(0, 12);
+
+    const searchTerms = uniqueStrings([base, baseNoDigits, ...strongTokens])
+        .map((t) => String(t || '').trim())
+        .filter((t) => t.length >= 3)
+        .slice(0, 14);
+
+    return { base, baseNorm, baseNoDigits, baseNoDigitsNorm, strongTokens, searchTerms };
+}
+
+function tokenizeCandidateForScore(s) {
+    const parts = String(s || '')
+        .toLowerCase()
+        .split(/[^a-z0-9]+/g)
+        .map((t) => stripDigitsKeepLetters(t))
+        .filter((t) => t && t.length >= 3);
+    return new Set(parts.map((t) => normalizeForCompare(t)).filter(Boolean));
+}
+
 // Listar y obtener
 export const listAssets = async (req, res) => {
     try {
@@ -373,30 +423,40 @@ export const listAssets = async (req, res) => {
 };
 
 // Buscar assets similares (para uploader): por nombre de archivo/slug aproximado
-// GET /assets/similar?filename=naruto.rar&limit=8
+// GET /assets/similar?filename=naruto.rar&limit=8&sizeB=123456
 export const similarAssets = async (req, res) => {
     try {
         const raw = String(req.query?.filename || req.query?.q || '').trim();
         if (!raw) return res.status(400).json({ message: 'filename required' });
 
         const limit = Math.max(1, Math.min(25, Number(req.query?.limit) || 8));
-        const base = stripExtension(raw);
-        const baseNorm = normalizeForCompare(base);
+        const querySizeB = Number(req.query?.sizeB || req.query?.sizeBytes || 0);
+        const hasQuerySize = Number.isFinite(querySizeB) && querySizeB > 0;
 
-        const tokens = uniqueStrings(
-            String(base)
-                .split(/[^a-zA-Z0-9]+/g)
-                .map((t) => String(t || '').trim())
-                .filter((t) => t.length >= 3)
-        ).slice(0, 8);
+        const { base, baseNorm, baseNoDigits, baseNoDigitsNorm, strongTokens, searchTerms } = tokenizeSimilarQuery(raw);
 
-        const terms = uniqueStrings([base, ...tokens]).filter(Boolean).slice(0, 10);
+        const extractLastSegment = (s) => {
+            const t = String(s || '');
+            const parts = t.split(/[\\/]+/g).filter(Boolean);
+            return parts.length ? parts[parts.length - 1] : t;
+        };
+
+        const stripExt = (s) => {
+            const t = String(s || '');
+            return t.replace(/\.[a-z0-9]{1,6}$/i, '');
+        };
+
+        const getCandidateKey = (it) => {
+            const last = extractLastSegment(it?.archiveName || it?.slug || it?.title || '');
+            return normalizeForCompare(stripExt(last));
+        };
 
         const where = {};
-        if (terms.length) {
-            where.OR = terms.flatMap((term) => [
+        if (searchTerms.length) {
+            where.OR = searchTerms.flatMap((term) => [
                 { archiveName: { contains: term } },
                 { title: { contains: term } },
+                { slug: { contains: safeName(term) } },
             ]);
         }
 
@@ -416,27 +476,67 @@ export const similarAssets = async (req, res) => {
                 updatedAt: true,
                 createdAt: true,
             },
-            take: 80,
+            // subir el pool para evitar perder coincidencias válidas si hay muchos matches (p.ej. "pikachu")
+            take: 900,
             orderBy: { id: 'desc' },
         });
 
+        const queryTokenSet = new Set(
+            (strongTokens || [])
+                .map((t) => normalizeForCompare(stripDigitsKeepLetters(t)))
+                .filter((t) => t && t.length >= 3)
+        );
+
         const scored = (items || [])
             .map((it) => {
-                const name = String(it.archiveName || it.title || '');
-                const nameNorm = normalizeForCompare(name);
+                const candidateText = `${it.archiveName || ''} ${it.title || ''} ${it.titleEn || ''} ${it.slug || ''}`;
+                const nameNorm = normalizeForCompare(candidateText);
+                const keyNorm = getCandidateKey(it);
                 let score = 0;
 
-                if (baseNorm && nameNorm === baseNorm) score += 100;
-                if (baseNorm && nameNorm.includes(baseNorm)) score += 50;
+                // 1) Prioridad máxima: match exacto de nombre (base) contra el archivo/slug (sin extensión)
+                if (baseNorm && keyNorm && keyNorm === baseNorm) score += 260;
+                if (baseNoDigitsNorm && keyNorm && keyNorm === baseNoDigitsNorm) score += 240;
 
-                for (const t of tokens) {
-                    const tNorm = normalizeForCompare(t);
-                    if (tNorm && nameNorm.includes(tNorm)) score += 10;
+                if (baseNoDigitsNorm && nameNorm === baseNoDigitsNorm) score += 120;
+                if (baseNorm && nameNorm === baseNorm) score += 110;
+                if (baseNoDigitsNorm && nameNorm.includes(baseNoDigitsNorm)) score += 70;
+                if (baseNorm && nameNorm.includes(baseNorm)) score += 45;
+
+                for (const t of strongTokens || []) {
+                    const tNorm = normalizeForCompare(stripDigitsKeepLetters(t));
+                    if (tNorm && nameNorm.includes(tNorm)) score += 14;
+                }
+
+                // Bonus por overlap de tokens (evita que un único sufijo/número deje fuera coincidencias claras)
+                if (queryTokenSet.size) {
+                    const candTokenSet = tokenizeCandidateForScore(candidateText);
+                    let hits = 0;
+                    for (const qt of queryTokenSet) {
+                        if (candTokenSet.has(qt)) hits += 1;
+                    }
+                    const ratio = hits / queryTokenSet.size;
+                    score += Math.round(30 * ratio);
                 }
 
                 const imgCount = Array.isArray(it.images) ? it.images.length : 0;
                 score += Math.min(20, imgCount * 2);
                 if (it.archiveName) score += 5;
+
+                // 2) Peso similar (solo suma si ya hay similitud de nombre, para evitar falsos positivos por tamaño)
+                if (hasQuerySize && score >= 20) {
+                    const candSize = Number(it?.fileSizeB ?? it?.archiveSizeB ?? 0);
+                    if (Number.isFinite(candSize) && candSize > 0) {
+                        const denom = Math.max(querySizeB, candSize);
+                        const diffRatio = denom ? Math.abs(candSize - querySizeB) / denom : 1;
+                        // Bonus escalonado (más fuerte cuanto más cercano)
+                        if (diffRatio <= 0.01) score += 70;
+                        else if (diffRatio <= 0.03) score += 55;
+                        else if (diffRatio <= 0.07) score += 38;
+                        else if (diffRatio <= 0.15) score += 20;
+                        else if (diffRatio <= 0.25) score += 10;
+                    }
+                }
 
                 return { ...it, _score: score };
             })
@@ -447,7 +547,7 @@ export const similarAssets = async (req, res) => {
             .slice(0, limit);
 
         const safe = toJsonSafe(scored).map(({ _score, ...rest }) => rest);
-        return res.json({ query: raw, base, tokens, items: safe });
+        return res.json({ query: raw, base, tokens: strongTokens, items: safe });
     } catch (e) {
         console.error('[ASSETS] similarAssets error:', e);
         return res.status(500).json({ message: 'Error searching similar assets' });
