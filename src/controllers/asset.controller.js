@@ -11,6 +11,7 @@ import { checkMegaLinkAlive } from '../utils/megaCheckFiles/megaLinkChecker.js';
 import { maybeCheckMegaOnVisit } from '../utils/megaCheckFiles/visitTriggeredMegaCheck.js';
 
 const prisma = new PrismaClient();
+import { randomizeFreebies, getRandomizeFreebiesCountFromEnv } from '../utils/randomizeFreebies.js';
 
 // Progreso en memoria por assetId (0..100)
 const progressMap = new Map();
@@ -3122,41 +3123,15 @@ export const listPublishedSlugs = async (req, res) => {
 // Randomizar freebies: poner todos los publicados como premium y luego seleccionar N aleatorios para dejarlos gratis
 export const randomizeFree = async (req, res) => {
     try {
-        let n = Number(req.body?.count ?? req.query?.count ?? 0);
-        if (!Number.isFinite(n) || n < 0) n = 0;
+        const bodyCount = req.body?.count;
+        const queryCount = req.query?.count;
+        const hasRequestCount = bodyCount !== undefined || queryCount !== undefined;
+        const envCount = getRandomizeFreebiesCountFromEnv(process.env);
 
-        const where = { status: 'PUBLISHED' };
+        const count = hasRequestCount ? (bodyCount ?? queryCount ?? 0) : envCount;
 
-        // Total de assets publicados
-        const total = await prisma.asset.count({ where });
-        if (total === 0) return res.json({ total: 0, selected: 0 });
-
-        // Paso 1: marcar todos como premium
-        await prisma.asset.updateMany({ where, data: { isPremium: true } });
-
-        // Paso 2: seleccionar N aleatorios para dejar free
-        if (n > 0) {
-            const rows = await prisma.asset.findMany({
-                where,
-                select: { id: true },
-            });
-            const ids = rows.map((r) => r.id);
-            // Fisher-Yates shuffle parcial
-            for (let i = ids.length - 1; i > 0; i--) {
-                const j = Math.floor(Math.random() * (i + 1));
-                const tmp = ids[i];
-                ids[i] = ids[j];
-                ids[j] = tmp;
-            }
-            const pick = ids.slice(0, Math.min(n, ids.length));
-            await prisma.asset.updateMany({
-                where: { id: { in: pick } },
-                data: { isPremium: false },
-            });
-            return res.json({ total, selected: pick.length });
-        }
-
-        return res.json({ total, selected: 0 });
+        const result = await randomizeFreebies({ count, prisma });
+        return res.json({ total: result.total, selected: result.selected, count: result.count });
     } catch (e) {
         console.error('[ASSETS] randomizeFree error:', e);
         return res.status(500).json({ message: 'Error randomizing freebies' });

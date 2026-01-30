@@ -8,7 +8,8 @@
     "dev": "nodemon --env-file=.env server.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "seed": "node ./seed/seed.js",
-    "validate:last": "node ./src/utils/validateLastMeAccount.js"
+    "validate:last": "node ./src/utils/validateLastMeAccount.js",
+    "randomize:freebies": "node --env-file=.env ./src/utils/randomizeFreebiesRunner.js"
   },
   "author": "",
   "license": "ISC",
