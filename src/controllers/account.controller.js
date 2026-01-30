@@ -244,6 +244,28 @@ export const updateAccount = async (req, res) => {
     const id = Number(req.params.id);
   const { alias, email, baseFolder, type, suspended, status } = req.body;
 
+    // Validaciones al cambiar type para evitar estados incoherentes
+    if (type !== undefined) {
+      const current = await prisma.megaAccount.findUnique({
+        where: { id },
+        include: { backups: true, assignedAsBackup: true },
+      });
+      if (!current) return res.status(404).json({ message: 'Account not found' });
+      const nextType = String(type);
+      if (nextType !== current.type) {
+        if (nextType === 'backup' && (current.backups || []).length > 0) {
+          return res.status(400).json({
+            message: 'No se puede cambiar a backup: esta cuenta (main) tiene backups asignados. Quita los backups primero.',
+          });
+        }
+        if (nextType === 'main' && (current.assignedAsBackup || []).length > 0) {
+          return res.status(400).json({
+            message: 'No se puede cambiar a main: esta cuenta está asignada como backup de una o más cuentas. Desasigna primero.',
+          });
+        }
+      }
+    }
+
     const data = {};
     if (alias !== undefined) data.alias = alias;
     if (email !== undefined) data.email = email;
@@ -257,6 +279,57 @@ export const updateAccount = async (req, res) => {
   } catch (error) {
     console.error('Error updating account:', error);
     return res.status(500).json({ message: 'Error updating account' });
+  }
+};
+
+export const deleteAccount = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const acc = await prisma.megaAccount.findUnique({
+      where: { id },
+      include: { backups: true, assignedAsBackup: true },
+    });
+    if (!acc) return res.status(404).json({ message: 'Account not found' });
+
+    const assetsCount = await prisma.asset.count({ where: { accountId: id } });
+    const replicasCount = await prisma.assetReplica.count({ where: { accountId: id } });
+
+    // Regla del usuario: no permitir borrar main si tiene backups asociados
+    if (acc.type === 'main' && (acc.backups || []).length > 0) {
+      return res.status(409).json({
+        message: 'No se puede eliminar una cuenta main con backups asociados. Quita los backups primero.',
+      });
+    }
+
+    // Seguridad: evitar borrar main con assets (previene orfandad o pérdida accidental)
+    if (acc.type === 'main' && assetsCount > 0) {
+      return res.status(409).json({
+        message: `No se puede eliminar una cuenta main con assets asociados (assets=${assetsCount}). Mueve/reasigna los assets primero.`,
+      });
+    }
+
+    await prisma.$transaction(async (tx) => {
+      // Si es backup, puede tener réplicas; las limpiamos.
+      if (replicasCount > 0) {
+        await tx.assetReplica.deleteMany({ where: { accountId: id } });
+      }
+
+      // Desasociar relaciones main<->backup (por si acaso, aunque hay Cascade)
+      await tx.megaAccountBackup.deleteMany({
+        where: { OR: [{ mainAccountId: id }, { backupAccountId: id }] },
+      });
+
+      // Credenciales (no hay cascade explícito)
+      await tx.accountCredential.deleteMany({ where: { accountId: id } });
+
+      // Finalmente, borrar la cuenta
+      await tx.megaAccount.delete({ where: { id } });
+    });
+
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error('Error deleting account:', error);
+    return res.status(500).json({ message: 'Error deleting account' });
   }
 };
 
