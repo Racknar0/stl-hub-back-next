@@ -3,6 +3,7 @@ import { encryptJson, decryptToJson } from '../utils/cryptoUtils.js';
 import { log, isVerbose } from '../utils/logger.js';
 import { spawn } from 'child_process';
 import { withMegaLock } from '../utils/megaQueue.js';
+import { applyRandomMegaProxy, clearMegaProxyIfSafe } from '../utils/megaProxy.js';
 import path from 'path';
 import fs from 'fs';
 
@@ -263,6 +264,7 @@ export const updateAccount = async (req, res) => {
 export const testAccount = async (req, res) => {
   let didLogin = false;
   let stopUploadsFlag = null;
+  let didSetProxy = false;
   try {
     const id = Number(req.params.id);
   log.info(`Prueba cuenta iniciada id=${id}`);
@@ -293,6 +295,13 @@ export const testAccount = async (req, res) => {
 
     const base = (acc.baseFolder || '/').trim();
     await withMegaLock(async () => {
+      // Proxies: aplicar SIEMPRE al conectar (evita que altas/actualizaciones salgan siempre por la misma IP)
+      try {
+        const r = await applyRandomMegaProxy({ ctx: `accId=${id} alias=${acc.alias || '--'}` });
+        didSetProxy = Boolean(r?.enabled);
+      } catch (e) {
+        log.warn(`[ACCOUNTS][TEST] No se pudo aplicar proxy: ${e.message}`);
+      }
       // Limpiar sesiones previas
       try { await runCmd(logoutCmd, []); console.log('[ACCOUNTS] pre-logout ok'); } catch (e) { console.warn('[ACCOUNTS] pre-logout warn:', String(e.message).slice(0,200)); }
       // Login
@@ -458,6 +467,11 @@ export const testAccount = async (req, res) => {
       // fallback al comportamiento anterior si no podemos cargar helper
       try { await withMegaLock(() => runCmd('mega-logout', []), 'ACCOUNTS-TEST-LOGOUT'); } catch {}
     }
+
+    // Si esta llamada aplicó proxy, intentamos limpiar al final (sin afectar subidas activas)
+    try {
+      if (didSetProxy) await clearMegaProxyIfSafe({ ctx: `accId=${req.params.id}` });
+    } catch {}
     try { stopUploadsFlag && stopUploadsFlag() } catch {}
   }
 };
