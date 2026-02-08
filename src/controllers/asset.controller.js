@@ -21,7 +21,80 @@ const replicaProgressMap = new Map();
 
 // Batch en memoria por MAIN accountId: agrupa assets para minimizar mega-login/logout.
 // Nota: MEGAcmd es global, así que esto opera dentro del withMegaLock.
-const megaBatchByMain = new Map(); // mainAccountId -> { pending:Set<assetId>, running:boolean }
+// Estado (best-effort, sólo para UI):
+// { pending:Set<number>, running:boolean, phase:'main'|'backup'|null, mainQueue:number[], mainIndex:number,
+//   backupQueue:number[], backupIndex:number, currentAssetId:number|null,
+//   currentReplicaAssetId:number|null, currentBackupAccountId:number|null }
+const megaBatchByMain = new Map();
+
+function getBatchInfoForAsset(assetId, mainAccountId) {
+    const st = megaBatchByMain.get(Number(mainAccountId));
+    if (!st) return null;
+
+    const safeArr = (a) => (Array.isArray(a) ? a : []);
+    const pendingArr = st.pending ? Array.from(st.pending) : [];
+    const mainQueue = safeArr(st.mainQueue);
+    const backupQueue = safeArr(st.backupQueue);
+
+    const isInPending = pendingArr.includes(assetId);
+    const isInMainQueue = mainQueue.includes(assetId);
+    const isInBackupQueue = backupQueue.includes(assetId);
+
+    let stage = 'idle';
+    let position = null;
+    let total = null;
+
+    if (st.running) {
+        if (st.phase === 'main') {
+            if (st.currentAssetId === assetId) {
+                stage = 'main-uploading';
+                position = (Number(st.mainIndex) || 0) + 1;
+                total = mainQueue.length || null;
+            } else if (isInMainQueue) {
+                stage = 'main-queued';
+                position = mainQueue.indexOf(assetId) + 1;
+                total = mainQueue.length;
+            } else if (isInPending) {
+                stage = 'main-queued';
+                position = pendingArr.indexOf(assetId) + 1;
+                total = pendingArr.length;
+            }
+        } else if (st.phase === 'backup') {
+            if (st.currentReplicaAssetId === assetId) {
+                stage = 'backup-uploading';
+                position = (Number(st.backupIndex) || 0) + 1;
+                total = backupQueue.length || null;
+            } else if (isInBackupQueue) {
+                stage = 'backup-queued';
+                position = backupQueue.indexOf(assetId) + 1;
+                total = backupQueue.length;
+            } else if (isInPending) {
+                stage = 'main-queued';
+                position = pendingArr.indexOf(assetId) + 1;
+                total = pendingArr.length;
+            }
+        } else if (isInPending) {
+            stage = 'main-queued';
+            position = pendingArr.indexOf(assetId) + 1;
+            total = pendingArr.length;
+        }
+    } else if (isInPending) {
+        stage = 'main-queued';
+        position = pendingArr.indexOf(assetId) + 1;
+        total = pendingArr.length;
+    }
+
+    return {
+        mode: 'batch',
+        mainAccountId: Number(mainAccountId),
+        running: !!st.running,
+        phase: st.phase || null,
+        currentAssetId: st.currentAssetId ?? null,
+        currentReplicaAssetId: st.currentReplicaAssetId ?? null,
+        currentBackupAccountId: st.currentBackupAccountId ?? null,
+        asset: { id: assetId, stage, position, total },
+    };
+}
 
 const UPLOADS_DIR = path.resolve('uploads');
 const TEMP_DIR = path.join(UPLOADS_DIR, 'tmp');
@@ -1766,7 +1839,18 @@ export async function enqueueToMegaBatch(assetId) {
 
     let st = megaBatchByMain.get(mainId);
     if (!st) {
-        st = { pending: new Set(), running: false };
+        st = {
+            pending: new Set(),
+            running: false,
+            phase: null,
+            mainQueue: [],
+            mainIndex: 0,
+            backupQueue: [],
+            backupIndex: 0,
+            currentAssetId: null,
+            currentReplicaAssetId: null,
+            currentBackupAccountId: null,
+        };
         megaBatchByMain.set(mainId, st);
     }
     st.pending.add(id);
@@ -1807,10 +1891,21 @@ export async function enqueueToMegaBatch(assetId) {
                 await megaLoginOrThrow(mainPayload, ctxMain);
 
                 const uploadedAssetIds = [];
+                st.phase = 'main';
+                st.mainQueue = [];
+                st.mainIndex = 0;
+                st.backupQueue = [];
+                st.backupIndex = 0;
+                st.currentAssetId = null;
+                st.currentReplicaAssetId = null;
+                st.currentBackupAccountId = null;
                 while (st.pending.size > 0) {
                     const batch = Array.from(st.pending);
                     st.pending.clear();
+                    st.mainQueue = batch.slice();
+                    st.mainIndex = 0;
                     for (const aid of batch) {
+                        st.currentAssetId = aid;
                         try {
                             const okId = await uploadOneAssetMainInCurrentSession(aid, mainAcc);
                             uploadedAssetIds.push(okId);
@@ -1821,6 +1916,8 @@ export async function enqueueToMegaBatch(assetId) {
                         } finally {
                             // En batch dejamos el progreso en memoria hasta 100 o fallo; limpiar best-effort
                             try { progressMap.delete(aid); } catch {}
+                            st.mainIndex = (Number(st.mainIndex) || 0) + 1;
+                            st.currentAssetId = null;
                         }
                     }
                 }
@@ -1832,7 +1929,12 @@ export async function enqueueToMegaBatch(assetId) {
                     .map((b) => b.backupAccount)
                     .filter((b) => b && b.type === 'backup');
 
-                if (!backupAccounts.length || !uploadedAssetIds.length) return;
+                if (!backupAccounts.length || !uploadedAssetIds.length) {
+                    st.phase = null;
+                    st.backupQueue = [];
+                    st.backupIndex = 0;
+                    return;
+                }
 
                 // Proxy BACKUP sticky (si solo hay 1 proxy, reutilizamos). También rota si falla.
                 const ctxBackups = `mainAccId=${mainAcc.id} backups=${backupAccounts.length}`;
@@ -1857,7 +1959,14 @@ export async function enqueueToMegaBatch(assetId) {
                     await megaLogoutBestEffort(`PREV ${bctx}`);
                     await megaLoginOrThrow(payload, bctx);
 
+                    st.phase = 'backup';
+                    st.backupQueue = uploadedAssetIds.slice();
+                    st.backupIndex = 0;
+                    st.currentReplicaAssetId = null;
+                    st.currentBackupAccountId = b.id;
+
                     for (const aid of uploadedAssetIds) {
+                        st.currentReplicaAssetId = aid;
                         try {
                             await replicateOneAssetToBackupInCurrentSession(aid, b);
                         } catch (e) {
@@ -1873,10 +1982,15 @@ export async function enqueueToMegaBatch(assetId) {
                                 }
                             } catch {}
                         }
+                        st.backupIndex = (Number(st.backupIndex) || 0) + 1;
+                        st.currentReplicaAssetId = null;
                     }
 
                     await megaLogoutBestEffort(`POST ${bctx}`);
                 }
+
+                st.phase = null;
+                st.currentBackupAccountId = null;
             }, `BATCH-MAIN-${mainId}`);
         } catch (e) {
             console.error(`[BATCH] error mainAccId=${mainId} msg=${e.message}`);
@@ -1891,6 +2005,10 @@ export async function enqueueToMegaBatch(assetId) {
         } finally {
             try { stopFlag && stopFlag(); } catch {}
             st.running = false;
+            st.phase = null;
+            st.currentAssetId = null;
+            st.currentReplicaAssetId = null;
+            st.currentBackupAccountId = null;
             // Si llegaron más mientras corría y quedaron pendientes, re-disparar.
             if (st.pending.size > 0) {
                 try { enqueueToMegaBatch(Array.from(st.pending)[0]); } catch {}
@@ -2546,6 +2664,7 @@ export const getFullProgress = async (req, res) => {
                 replicasFinished &&
                 haveAll;
         }
+        const batch = getBatchInfoForAsset(id, asset.accountId);
         return res.json({
             main: { status: asset.status, progress: mainProgress },
             replicas: replicaItems,
@@ -2553,6 +2672,7 @@ export const getFullProgress = async (req, res) => {
             overallPercent,
             allDone,
             expectedReplicas,
+            batch,
         });
     } catch (e) {
         console.error('[ASSETS] fullProgress error:', e);
