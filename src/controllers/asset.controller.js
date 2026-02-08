@@ -27,6 +27,10 @@ const replicaProgressMap = new Map();
 //   currentReplicaAssetId:number|null, currentBackupAccountId:number|null }
 const megaBatchByMain = new Map();
 
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function getBatchInfoForAsset(assetId, mainAccountId) {
     const st = megaBatchByMain.get(Number(mainAccountId));
     if (!st) return null;
@@ -1850,10 +1854,12 @@ export async function enqueueToMegaBatch(assetId) {
             currentAssetId: null,
             currentReplicaAssetId: null,
             currentBackupAccountId: null,
+            lastEnqueueAt: Date.now(),
         };
         megaBatchByMain.set(mainId, st);
     }
     st.pending.add(id);
+    st.lastEnqueueAt = Date.now();
 
     if (st.running) return;
     st.running = true;
@@ -1899,27 +1905,44 @@ export async function enqueueToMegaBatch(assetId) {
                 st.currentAssetId = null;
                 st.currentReplicaAssetId = null;
                 st.currentBackupAccountId = null;
-                while (st.pending.size > 0) {
-                    const batch = Array.from(st.pending);
-                    st.pending.clear();
-                    st.mainQueue = batch.slice();
-                    st.mainIndex = 0;
-                    for (const aid of batch) {
-                        st.currentAssetId = aid;
-                        try {
-                            const okId = await uploadOneAssetMainInCurrentSession(aid, mainAcc);
-                            uploadedAssetIds.push(okId);
-                        } catch (e) {
-                            console.error(`[BATCH][MAIN] fail asset=${aid} msg=${e.message}`);
-                            progressMap.delete(aid);
-                            try { await prisma.asset.update({ where: { id: aid }, data: { status: 'FAILED' } }); } catch {}
-                        } finally {
-                            // En batch dejamos el progreso en memoria hasta 100 o fallo; limpiar best-effort
-                            try { progressMap.delete(aid); } catch {}
-                            st.mainIndex = (Number(st.mainIndex) || 0) + 1;
-                            st.currentAssetId = null;
+                // Ventana de batching:
+                // - Consumir todo lo pendiente.
+                // - Si no hay más pending, esperar un "quiet period" corto por si llegan más assets.
+                // Esto reduce ciclos MAIN->BACKUP por asset cuando llegan en ráfaga.
+                const QUIET_MS = Math.max(0, Number(process.env.MEGA_BATCH_QUIET_MS || 20000));
+                const POLL_MS = Math.max(200, Number(process.env.MEGA_BATCH_QUIET_POLL_MS || 500));
+
+                while (true) {
+                    while (st.pending.size > 0) {
+                        const batch = Array.from(st.pending);
+                        st.pending.clear();
+                        st.mainQueue = batch.slice();
+                        st.mainIndex = 0;
+                        for (const aid of batch) {
+                            st.currentAssetId = aid;
+                            try {
+                                const okId = await uploadOneAssetMainInCurrentSession(aid, mainAcc);
+                                uploadedAssetIds.push(okId);
+                            } catch (e) {
+                                console.error(`[BATCH][MAIN] fail asset=${aid} msg=${e.message}`);
+                                progressMap.delete(aid);
+                                try { await prisma.asset.update({ where: { id: aid }, data: { status: 'FAILED' } }); } catch {}
+                            } finally {
+                                // En batch dejamos el progreso en memoria hasta 100 o fallo; limpiar best-effort
+                                try { progressMap.delete(aid); } catch {}
+                                st.mainIndex = (Number(st.mainIndex) || 0) + 1;
+                                st.currentAssetId = null;
+                            }
                         }
                     }
+
+                    // Sin pendientes: esperar quiet si está habilitado
+                    if (!QUIET_MS) break;
+                    const lastAt = Number(st.lastEnqueueAt) || 0;
+                    const delta = Date.now() - lastAt;
+                    if (st.pending.size === 0 && delta >= QUIET_MS) break;
+                    // Si entró algo durante el wait, el loop externo volverá a consumir pending
+                    await sleep(POLL_MS);
                 }
 
                 await megaLogoutBestEffort(`POST-MAIN ${ctxMain}`);

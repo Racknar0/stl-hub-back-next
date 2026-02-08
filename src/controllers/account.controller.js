@@ -371,14 +371,22 @@ export const testAccount = async (req, res) => {
   // Datos básicos (una sola línea)
   log.verbose(`Cuenta alias=${acc.alias} email=${acc.email} base=${acc.baseFolder}`);
 
-    // Mientras el usuario está "conectando" (y puede tardar), activamos el lock global
-    // para que el CRON no intente mega-logout/reset en paralelo.
+    // Minimizar auth requests: si hay subidas activas (batch/SCP/cron), no correr test.
+    // MEGAcmd es global y un test aquí mete mega-login/logout extra y puede interferir.
     try {
-      const { startUploadsActive } = await import('../utils/uploadsActiveFlag.js');
-      stopUploadsFlag = startUploadsActive(`connect-test:acc:${id}`);
+      const mod = await import('../utils/uploadsActiveFlag.js');
+      if (typeof mod?.isUploadsActive === 'function' && mod.isUploadsActive()) {
+        log.warn(`[ACCOUNTS][TEST] uploads activos: skip test accId=${id} alias=${acc.alias || '--'}`);
+        return res.status(409).json({ ok: false, busy: true, message: 'Hay subidas activas. Reintenta el test más tarde.' });
+      }
+      if (typeof mod?.startUploadsActive === 'function') {
+        // Mientras el usuario está "conectando" (y puede tardar), activamos el flag
+        // para que el CRON no intente mega-logout/reset en paralelo.
+        stopUploadsFlag = mod.startUploadsActive(`connect-test:acc:${id}`);
+      }
     } catch (e) {
-      // No bloqueamos el test si no se pudo activar el flag
-      log.warn(`[ACCOUNTS][TEST] No pude activar uploads-active flag: ${e.message}`);
+      // No bloqueamos el test si no se pudo consultar/activar el flag
+      log.warn(`[ACCOUNTS][TEST] uploads-active flag warn: ${e.message}`);
     }
 
     const payload = decryptToJson(acc.credentials.encData, acc.credentials.encIv, acc.credentials.encTag);
