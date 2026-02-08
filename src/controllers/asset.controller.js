@@ -9,6 +9,7 @@ import { withMegaLock } from '../utils/megaQueue.js';
 import { startUploadsActive } from '../utils/uploadsActiveFlag.js';
 import { checkMegaLinkAlive } from '../utils/megaCheckFiles/megaLinkChecker.js';
 import { maybeCheckMegaOnVisit } from '../utils/megaCheckFiles/visitTriggeredMegaCheck.js';
+import { applyMegaProxy, listMegaProxies } from '../utils/megaProxy.js';
 
 const prisma = new PrismaClient();
 import { randomizeFreebies, getRandomizeFreebiesCountFromEnv } from '../utils/randomizeFreebies.js';
@@ -17,6 +18,10 @@ import { randomizeFreebies, getRandomizeFreebiesCountFromEnv } from '../utils/ra
 const progressMap = new Map();
 // Progreso de réplicas: key `${assetId}:${accountId}` -> 0..100
 const replicaProgressMap = new Map();
+
+// Batch en memoria por MAIN accountId: agrupa assets para minimizar mega-login/logout.
+// Nota: MEGAcmd es global, así que esto opera dentro del withMegaLock.
+const megaBatchByMain = new Map(); // mainAccountId -> { pending:Set<assetId>, running:boolean }
 
 const UPLOADS_DIR = path.resolve('uploads');
 const TEMP_DIR = path.join(UPLOADS_DIR, 'tmp');
@@ -925,9 +930,9 @@ export const enqueueUploadToMega = async (req, res) => {
         // Marcar como en proceso y disparar subida real a MEGA en background
         await prisma.asset.update({ where: { id }, data: { status: 'PROCESSING' } });
         setImmediate(() => {
-            enqueueToMegaReal(asset)
+            enqueueToMegaBatch(id)
                 .catch(async (err) => {
-                    console.error('[ASSETS] enqueueToMegaReal error:', err);
+                    console.error('[ASSETS] enqueueToMegaBatch error:', err);
                     try {
                         await prisma.asset.update({ where: { id }, data: { status: 'FAILED' } });
                     } catch {}
@@ -1095,8 +1100,8 @@ export const createAssetFull = async (req, res) => {
             throw e;
         }
 
-        enqueueToMegaReal(created).catch((err) =>
-            console.error('[MEGA-UP] async error:', err)
+        enqueueToMegaBatch(created.id).catch((err) =>
+            console.error('[MEGA-UP][BATCH] async error:', err)
         );
 
         setTimeout(() => cleanTempDir(), 0);
@@ -1494,6 +1499,410 @@ async function safeMkdir(remotePath) {
             return reject(new Error(`${mkdirCmd} exited ${code}`));
         });
     });
+}
+
+function pickTwoStickyProxies() {
+    const proxies = listMegaProxies({});
+    if (!proxies.length) return { proxies: [], mainProxy: null, backupProxy: null };
+    const mainProxy = proxies[0];
+    const backupProxy = proxies[1] || proxies[0];
+    return { proxies, mainProxy, backupProxy };
+}
+
+async function applyProxyOrThrow(role, picked, ctx) {
+    if (!picked) throw new Error(`[BATCH] Sin proxy para ${role}`);
+    const r = await applyMegaProxy(picked, { ctx, timeoutMs: 15000, clearOnFail: false });
+    if (!r?.enabled) throw new Error(`[BATCH] No pude aplicar proxy (${role})`);
+    return r;
+}
+
+async function applyAnyWorkingProxyOrThrow(role, proxies, ctx, maxTries = 10) {
+    const tries = Math.min(Math.max(1, Number(maxTries) || 1), proxies.length);
+    let lastErr = '';
+    for (let i = 0; i < tries; i++) {
+        const p = proxies[i];
+        try {
+            await applyProxyOrThrow(role, p, ctx);
+            return p;
+        } catch (e) {
+            lastErr = e?.message || String(e);
+        }
+    }
+    throw new Error(`[BATCH] Ningún proxy funcionó para ${role}. lastErr=${String(lastErr).slice(0, 200)}`);
+}
+
+async function megaLogoutBestEffort(ctx) {
+    try {
+        await runCmd('mega-logout', []);
+        console.log(`[MEGA][LOGOUT][OK] ${ctx}`);
+    } catch {
+        console.log(`[MEGA][LOGOUT][WARN] ${ctx}`);
+    }
+}
+
+async function megaLoginOrThrow(payload, ctx) {
+    const loginCmd = 'mega-login';
+    if (payload?.type === 'session' && payload.session) {
+        console.log(`[MEGA][LOGIN] session ${ctx}`);
+        await runCmd(loginCmd, [payload.session]);
+    } else if (payload?.username && payload?.password) {
+        console.log(`[MEGA][LOGIN] user/pass ${ctx}`);
+        await runCmd(loginCmd, [payload.username, payload.password]);
+    } else {
+        throw new Error('Invalid credentials payload');
+    }
+    console.log(`[MEGA][LOGIN][OK] ${ctx}`);
+}
+
+async function uploadOneAssetMainInCurrentSession(assetId, mainAcc) {
+    const asset = await prisma.asset.findUnique({ where: { id: assetId } });
+    if (!asset) throw new Error(`Asset not found id=${assetId}`);
+    if (asset.accountId !== mainAcc.id) throw new Error(`Asset ${assetId} no pertenece a main=${mainAcc.id}`);
+
+    preUploadCleanup();
+    const remoteBase = (mainAcc.baseFolder || '/').replaceAll('\\', '/');
+    const remotePath = path.posix.join(remoteBase, asset.slug);
+    const localArchive = asset.archiveName
+        ? path.join(
+              UPLOADS_DIR,
+              asset.archiveName.startsWith('archives')
+                  ? asset.archiveName
+                  : path.join('archives', asset.archiveName)
+          )
+        : null;
+    if (!localArchive || !fs.existsSync(localArchive)) throw new Error('Local archive not found');
+
+    console.log(`[BATCH][MAIN] asset=${asset.id} -> ${remotePath}`);
+    progressMap.set(asset.id, 0);
+
+    let lastLoggedMain = -1;
+    const parseProgress = (buf) => {
+        const txt = buf.toString();
+        let last = null;
+        const re = /([0-9]{1,3}(?:\.[0-9]+)?)\s*%/g;
+        let m;
+        while ((m = re.exec(txt)) !== null) last = m[1];
+        if (last !== null) {
+            const p = Math.max(0, Math.min(100, parseFloat(last)));
+            const prev = progressMap.get(asset.id) || 0;
+            if (p === 100 || p >= prev + 1) progressMap.set(asset.id, p);
+            if (p === 100 || p >= lastLoggedMain + 5) {
+                lastLoggedMain = p;
+                console.log(`[PROGRESO] asset=${asset.id} main ${p}%`);
+            }
+        }
+        if (/upload finished/i.test(txt)) {
+            progressMap.set(asset.id, 100);
+            if (lastLoggedMain !== 100) console.log(`[PROGRESO] asset=${asset.id} main 100%`);
+        }
+    };
+
+    const putCmd = 'mega-put';
+    const exportCmd = 'mega-export';
+
+    await safeMkdir(remotePath);
+    await new Promise((resolve, reject) => {
+        const child = spawn(putCmd, [localArchive, remotePath], { shell: true });
+        attachAutoAcceptTerms(child, 'MEGA PUT');
+        child.stdout.on('data', (d) => parseProgress(d));
+        child.stderr.on('data', (d) => parseProgress(d));
+        child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`${putCmd} exited ${code}`))));
+    });
+
+    // Link público
+    let publicLink = null;
+    try {
+        const remoteFile = path.posix.join(remotePath, path.basename(localArchive));
+        const out = await new Promise((resolve, reject) => {
+            let buf = '';
+            const child = spawn(exportCmd, ['-a', remoteFile], { shell: true });
+            attachAutoAcceptTerms(child, 'UPLOAD EXPORT');
+            child.stdout.on('data', (d) => (buf += d.toString()));
+            child.stderr.on('data', (d) => (buf += d.toString()));
+            child.on('close', (code) => (code === 0 ? resolve(buf) : reject(new Error('export failed'))));
+        });
+        const m = String(out).match(/https?:\/\/mega\.nz\/\S+/i);
+        if (m) {
+            publicLink = m[0];
+            console.log(`[UPLOAD] link generado ${publicLink}`);
+        }
+    } catch (e) {
+        console.warn('[UPLOAD] export warn:', e.message);
+    }
+
+    function stripArchivesPrefix(absPath) {
+        const relFromArchives = path.relative(ARCHIVES_DIR, absPath);
+        if (!relFromArchives.startsWith('..')) return relFromArchives;
+        const relFromUploads = path.relative(UPLOADS_DIR, absPath);
+        return relFromUploads.replace(/^archives[\\/]/i, '');
+    }
+
+    const nameWithoutPrefix = stripArchivesPrefix(localArchive);
+    await prisma.asset.update({
+        where: { id: asset.id },
+        data: { status: 'PUBLISHED', archiveName: nameWithoutPrefix, megaLink: publicLink || undefined },
+    });
+
+    progressMap.set(asset.id, 100);
+    console.log(`[BATCH][MAIN] ok asset=${asset.id}`);
+    return asset.id;
+}
+
+async function ensureReplicaRows(assetId, backupAccounts) {
+    for (const b of backupAccounts) {
+        try {
+            await prisma.assetReplica.upsert({
+                where: { assetId_accountId: { assetId, accountId: b.id } },
+                update: {},
+                create: { assetId, accountId: b.id },
+            });
+        } catch (e) {
+            console.warn('[REPLICA] upsert warn:', e.message);
+        }
+    }
+}
+
+async function replicateOneAssetToBackupInCurrentSession(assetId, backupAcc) {
+    const asset = await prisma.asset.findUnique({
+        where: { id: assetId },
+        include: { account: true },
+    });
+    if (!asset) return;
+    if (!asset.archiveName) return;
+
+    const archiveAbs = path.join(
+        UPLOADS_DIR,
+        asset.archiveName.startsWith('archives') ? asset.archiveName : path.join('archives', asset.archiveName)
+    );
+    if (!fs.existsSync(archiveAbs)) {
+        console.warn('[REPLICA] local archive missing, skip replicas');
+        return;
+    }
+
+    let replica;
+    try {
+        replica = await prisma.assetReplica.findUnique({
+            where: { assetId_accountId: { assetId: asset.id, accountId: backupAcc.id } },
+        });
+    } catch {}
+
+    if (!replica || replica.status !== 'PENDING') return;
+
+    preUploadCleanup();
+    await prisma.assetReplica.update({
+        where: { id: replica.id },
+        data: { status: 'PROCESSING', startedAt: new Date() },
+    });
+
+    const remoteBase = (backupAcc.baseFolder || '/').replaceAll('\\', '/');
+    const remotePath = path.posix.join(remoteBase, asset.slug);
+
+    console.log(`[BATCH][BACKUP] asset=${asset.id} -> backupAcc=${backupAcc.id} path=${remotePath}`);
+
+    const putCmd = 'mega-put';
+    const exportCmd = 'mega-export';
+    let publicLink = null;
+
+    await safeMkdir(remotePath);
+    const fileName = path.basename(archiveAbs);
+    await new Promise((resolve, reject) => {
+        const child = spawn(putCmd, [archiveAbs, remotePath], { shell: true });
+        attachAutoAcceptTerms(child, `REPLICA PUT acc=${backupAcc.id}`);
+        let lastLogged = -1;
+        const parseProgress = (buf) => {
+            const txt = buf.toString();
+            let last = null;
+            const re = /([0-9]{1,3}(?:\.[0-9]+)?)\s*%/g;
+            let m;
+            while ((m = re.exec(txt)) !== null) last = m[1];
+            if (last !== null) {
+                const p = Math.max(0, Math.min(100, parseFloat(last)));
+                const key = `${asset.id}:${backupAcc.id}`;
+                const prev = replicaProgressMap.get(key) || 0;
+                if (p === 100 || p >= prev + 1) replicaProgressMap.set(key, p);
+                if (p === 100 || p >= lastLogged + 5) {
+                    lastLogged = p;
+                    console.log(`[PROGRESO] asset=${asset.id} backup=${backupAcc.id} ${p}%`);
+                }
+            }
+        };
+        child.stdout.on('data', (d) => parseProgress(d));
+        child.stderr.on('data', (d) => parseProgress(d));
+        child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`${putCmd} exited ${code}`))));
+    });
+
+    try {
+        const remoteFile = path.posix.join(remotePath, fileName);
+        const out = await new Promise((resolve, reject) => {
+            let buf = '';
+            const child = spawn(exportCmd, ['-a', remoteFile], { shell: true });
+            attachAutoAcceptTerms(child, 'REPLICA EXPORT');
+            child.stdout.on('data', (d) => (buf += d.toString()));
+            child.stderr.on('data', (d) => (buf += d.toString()));
+            child.on('close', (code) => (code === 0 ? resolve(buf) : reject(new Error('export failed'))));
+        });
+        const m = String(out).match(/https?:\/\/mega\.nz\/\S+/i);
+        if (m) publicLink = m[0];
+    } catch (e) {
+        console.warn('[REPLICA] export warn:', e.message);
+    }
+
+    replicaProgressMap.set(`${asset.id}:${backupAcc.id}`, 100);
+    await prisma.assetReplica.update({
+        where: { id: replica.id },
+        data: { status: 'COMPLETED', finishedAt: new Date(), megaLink: publicLink || undefined, remotePath },
+    });
+    console.log(`[BATCH][BACKUP] ok asset=${asset.id} backupAcc=${backupAcc.id}`);
+}
+
+export async function enqueueToMegaBatch(assetId) {
+    const id = Number(assetId);
+    if (!Number.isFinite(id)) throw new Error('assetId inválido');
+    const asset = await prisma.asset.findUnique({ where: { id } });
+    if (!asset) throw new Error('Asset not found');
+
+    const mainId = Number(asset.accountId);
+    if (!Number.isFinite(mainId)) throw new Error('accountId inválido');
+
+    let st = megaBatchByMain.get(mainId);
+    if (!st) {
+        st = { pending: new Set(), running: false };
+        megaBatchByMain.set(mainId, st);
+    }
+    st.pending.add(id);
+
+    if (st.running) return;
+    st.running = true;
+
+    setImmediate(async () => {
+        const stopFlag = startUploadsActive(`batch:main:${mainId}`);
+        try {
+            await withMegaLock(async () => {
+                const mainAcc = await prisma.megaAccount.findUnique({
+                    where: { id: mainId },
+                    include: {
+                        credentials: true,
+                        backups: {
+                            include: { backupAccount: { include: { credentials: true } } },
+                        },
+                    },
+                });
+                if (!mainAcc) throw new Error('Main account not found');
+                if (!mainAcc.credentials) throw new Error('No credentials stored (main)');
+
+                const { proxies, mainProxy, backupProxy } = pickTwoStickyProxies();
+                const ctxMain = `mainAccId=${mainAcc.id} alias=${mainAcc.alias || '--'}`;
+                if (!proxies.length) {
+                    throw new Error(`[BATCH] Sin proxies válidos. (requisito: nunca IP directa) ${ctxMain}`);
+                }
+
+                // MAIN proxy + login 1 vez
+                await applyAnyWorkingProxyOrThrow('MAIN', proxies, ctxMain, 10);
+                await megaLogoutBestEffort(`PREV ${ctxMain}`);
+                const mainPayload = decryptToJson(
+                    mainAcc.credentials.encData,
+                    mainAcc.credentials.encIv,
+                    mainAcc.credentials.encTag
+                );
+                await megaLoginOrThrow(mainPayload, ctxMain);
+
+                const uploadedAssetIds = [];
+                while (st.pending.size > 0) {
+                    const batch = Array.from(st.pending);
+                    st.pending.clear();
+                    for (const aid of batch) {
+                        try {
+                            const okId = await uploadOneAssetMainInCurrentSession(aid, mainAcc);
+                            uploadedAssetIds.push(okId);
+                        } catch (e) {
+                            console.error(`[BATCH][MAIN] fail asset=${aid} msg=${e.message}`);
+                            progressMap.delete(aid);
+                            try { await prisma.asset.update({ where: { id: aid }, data: { status: 'FAILED' } }); } catch {}
+                        } finally {
+                            // En batch dejamos el progreso en memoria hasta 100 o fallo; limpiar best-effort
+                            try { progressMap.delete(aid); } catch {}
+                        }
+                    }
+                }
+
+                await megaLogoutBestEffort(`POST-MAIN ${ctxMain}`);
+
+                // BACKUPS: el usuario usa 1 backup por main, pero soportamos N.
+                const backupAccounts = (mainAcc.backups || [])
+                    .map((b) => b.backupAccount)
+                    .filter((b) => b && b.type === 'backup');
+
+                if (!backupAccounts.length || !uploadedAssetIds.length) return;
+
+                // Proxy BACKUP sticky (si solo hay 1 proxy, reutilizamos). También rota si falla.
+                const ctxBackups = `mainAccId=${mainAcc.id} backups=${backupAccounts.length}`;
+                const proxyBackupPicked = backupProxy || mainProxy;
+                const orderedBackupProxies = [proxyBackupPicked, ...proxies.filter((p) => p !== proxyBackupPicked)];
+                await applyAnyWorkingProxyOrThrow('BACKUP', orderedBackupProxies, ctxBackups, 10);
+
+                for (const b of backupAccounts) {
+                    if (!b.credentials) {
+                        console.warn(`[BATCH][BACKUP] skip accId=${b.id} sin credenciales`);
+                        continue;
+                    }
+
+                    await ensureReplicaRowsForBatch(uploadedAssetIds, b);
+
+                    const payload = decryptToJson(
+                        b.credentials.encData,
+                        b.credentials.encIv,
+                        b.credentials.encTag
+                    );
+                    const bctx = `backupAccId=${b.id} alias=${b.alias || '--'}`;
+                    await megaLogoutBestEffort(`PREV ${bctx}`);
+                    await megaLoginOrThrow(payload, bctx);
+
+                    for (const aid of uploadedAssetIds) {
+                        try {
+                            await replicateOneAssetToBackupInCurrentSession(aid, b);
+                        } catch (e) {
+                            console.error(`[BATCH][BACKUP] fail asset=${aid} backupAcc=${b.id} msg=${e.message}`);
+                            replicaProgressMap.delete(`${aid}:${b.id}`);
+                            try {
+                                const rep = await prisma.assetReplica.findUnique({ where: { assetId_accountId: { assetId: aid, accountId: b.id } } });
+                                if (rep?.id) {
+                                    await prisma.assetReplica.update({
+                                        where: { id: rep.id },
+                                        data: { status: 'FAILED', errorMessage: e.message, finishedAt: new Date() },
+                                    });
+                                }
+                            } catch {}
+                        }
+                    }
+
+                    await megaLogoutBestEffort(`POST ${bctx}`);
+                }
+            }, `BATCH-MAIN-${mainId}`);
+        } catch (e) {
+            console.error(`[BATCH] error mainAccId=${mainId} msg=${e.message}`);
+            try {
+                const stNow = megaBatchByMain.get(mainId);
+                const pending = stNow ? Array.from(stNow.pending) : [];
+                for (const aid of pending) {
+                    try { await prisma.asset.update({ where: { id: aid }, data: { status: 'FAILED' } }); } catch {}
+                }
+                if (stNow) stNow.pending.clear();
+            } catch {}
+        } finally {
+            try { stopFlag && stopFlag(); } catch {}
+            st.running = false;
+            // Si llegaron más mientras corría y quedaron pendientes, re-disparar.
+            if (st.pending.size > 0) {
+                try { enqueueToMegaBatch(Array.from(st.pending)[0]); } catch {}
+            }
+        }
+    });
+}
+
+async function ensureReplicaRowsForBatch(assetIds, backupAcc) {
+    for (const assetId of assetIds) {
+        await ensureReplicaRows(assetId, [backupAcc]);
+    }
 }
 
 // Helper: Auto-aceptar términos de MEGA y prompts interactivos (Windows/Linux)

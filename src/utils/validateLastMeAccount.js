@@ -4,6 +4,8 @@ import { spawn } from 'child_process';
 import { log } from './logger.js';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import { withMegaLock } from './megaQueue.js';
+import { applyMegaProxy, listMegaProxies } from './megaProxy.js';
 
 /*
   Script: validateLastMeAccount
@@ -24,6 +26,28 @@ import path from 'path';
 const prisma = new PrismaClient();
 
 const DEFAULT_FREE_QUOTA_MB = Number(process.env.MEGA_FREE_QUOTA_MB) || 20480;
+
+async function ensureProxyOrThrow({ ctx, maxTries = 10 } = {}) {
+  const proxies = listMegaProxies({});
+  if (!proxies.length) {
+    throw new Error(`[VALIDAR][PROXY] Sin proxies válidos (no se permite IP directa)${ctx ? ` ${ctx}` : ''}`);
+  }
+  const tries = Math.min(Math.max(1, Number(maxTries) || 1), proxies.length);
+  let lastErr = null;
+  for (let i = 0; i < tries; i++) {
+    const p = proxies[i];
+    try {
+      const r = await applyMegaProxy(p, { ctx: ctx || 'validate:last', timeoutMs: 15000, clearOnFail: false });
+      if (r?.enabled) {
+        log.info(`[VALIDAR][PROXY][OK] ${p.proxyUrl}${ctx ? ` ${ctx}` : ''}`);
+        return p;
+      }
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw new Error(`[VALIDAR][PROXY] Ningún proxy funcionó (no se permite IP directa). lastErr=${String(lastErr?.message || lastErr || '').slice(0, 160)}`);
+}
 
 function runCmd(cmd, args = [], { cwd } = {}) {
   const maskArgs = (c, a) => (c && c.toLowerCase().includes('mega-login') ? ['<hidden>'] : a);
@@ -94,64 +118,41 @@ export async function runValidateLastMeAccount() {
     const duCmd = 'mega-du';
     const findCmd = 'mega-find';
 
-    // Limpiar sesión previa (ignorar errores)
-    try { await runCmd(logoutCmd, []); } catch {}
-
-    // Login
-    try {
-      if (payload?.type === 'session' && payload.session) {
-        await runCmd(loginCmd, [payload.session]);
-      } else if (payload?.username && payload?.password) {
-        await runCmd(loginCmd, [payload.username, payload.password]);
-      } else {
-        throw new Error('Payload de credenciales inválido');
-      }
-  log.info(`[VALIDAR][LOGIN][OK] id=${account.id} alias=${account.alias}`);
-    } catch (e) {
-      const msg = String(e.message || '').toLowerCase();
-      if (!msg.includes('already logged in')) throw e;
-  log.warn(`[VALIDAR][LOGIN][OMITIDO] sesión ya activa para id=${account.id}`);
-    }
+    const accCtx = `accId=${account.id} alias=${account.alias || '--'}`;
 
     const base = (account.baseFolder || '/').trim();
-    if (base && base !== '/') {
-  try { await runCmd(mkdirCmd, ['-p', base]); log.verbose(`[VALIDAR][MKDIR] carpetaBase=${base}`); } catch {}
-    }
-
     let storageUsedMB = 0, storageTotalMB = 0, fileCount = 0, folderCount = 0;
     let storageSource = 'none';
 
-    // Intentar mega-df -h
-    try {
-      const df = await runCmd(dfCmd, ['-h']);
-      const txt = (df.out || df.err || '').toString();
-      let m = txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i)
-        || txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i)
-        || txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i)
-        || txt.match(/almacenamiento\s+de\s+la\s+cuenta\s*:\s*([^\n]+?)\s*de\s*([^\n]+)/i)
-        || txt.match(/almacenamiento\s*:\s*([\d.,]+\s*[KMGT]?B)\s*de\s*([\d.,]+\s*[KMGT]?B)/i);
-      if (m) {
-        storageUsedMB = parseSizeToMB(m[1]);
-        storageTotalMB = parseSizeToMB(m[2]);
-        storageSource = 'df -h';
-      }
-      if (!storageTotalMB) {
-        const p = txt.match(/storage[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:of|de)\s*([\d.,]+\s*[KMGT]?B)/i)
-          || txt.match(/almacenamiento[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:de|of)\s*([\d.,]+\s*[KMGT]?B)/i);
-        if (p) {
-          storageTotalMB = parseSizeToMB(p[2]);
-          const pct = parseFloat(String(p[1]).replace(',', '.'));
-            if (!isNaN(pct) && isFinite(pct)) storageUsedMB = Math.round((pct / 100) * storageTotalMB);
-            storageSource = storageSource === 'none' ? 'df -h (pct)' : storageSource;
-        }
-      }
-    } catch (e) {
-  log.warn('df -h advertencia: ' + String(e.message).slice(0,200));
-    }
+    await withMegaLock(async () => {
+      await ensureProxyOrThrow({ ctx: accCtx, maxTries: 10 });
 
-    if (!storageTotalMB) {
+      // Limpiar sesión previa (ignorar errores)
+      try { await runCmd(logoutCmd, []); } catch {}
+
+      // Login
       try {
-        const df = await runCmd(dfCmd, []);
+        if (payload?.type === 'session' && payload.session) {
+          await runCmd(loginCmd, [payload.session]);
+        } else if (payload?.username && payload?.password) {
+          await runCmd(loginCmd, [payload.username, payload.password]);
+        } else {
+          throw new Error('Payload de credenciales inválido');
+        }
+        log.info(`[VALIDAR][LOGIN][OK] id=${account.id} alias=${account.alias}`);
+      } catch (e) {
+        const msg = String(e.message || '').toLowerCase();
+        if (!msg.includes('already logged in')) throw e;
+        log.warn(`[VALIDAR][LOGIN][OMITIDO] sesión ya activa para id=${account.id}`);
+      }
+
+      if (base && base !== '/') {
+        try { await runCmd(mkdirCmd, ['-p', base]); log.verbose(`[VALIDAR][MKDIR] carpetaBase=${base}`); } catch {}
+      }
+
+      // Intentar mega-df -h
+      try {
+        const df = await runCmd(dfCmd, ['-h']);
         const txt = (df.out || df.err || '').toString();
         let m = txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i)
           || txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i)
@@ -161,43 +162,75 @@ export async function runValidateLastMeAccount() {
         if (m) {
           storageUsedMB = parseSizeToMB(m[1]);
           storageTotalMB = parseSizeToMB(m[2]);
-          storageSource = storageSource === 'none' ? 'df' : storageSource;
+          storageSource = 'df -h';
+        }
+        if (!storageTotalMB) {
+          const p = txt.match(/storage[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:of|de)\s*([\d.,]+\s*[KMGT]?B)/i)
+            || txt.match(/almacenamiento[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:de|of)\s*([\d.,]+\s*[KMGT]?B)/i);
+          if (p) {
+            storageTotalMB = parseSizeToMB(p[2]);
+            const pct = parseFloat(String(p[1]).replace(',', '.'));
+            if (!isNaN(pct) && isFinite(pct)) storageUsedMB = Math.round((pct / 100) * storageTotalMB);
+            storageSource = storageSource === 'none' ? 'df -h (pct)' : storageSource;
+          }
         }
       } catch (e) {
-  log.warn('df advertencia: ' + String(e.message).slice(0,200));
+        log.warn('df -h advertencia: ' + String(e.message).slice(0,200));
       }
-    }
 
-    if (!storageUsedMB) {
+      if (!storageTotalMB) {
+        try {
+          const df = await runCmd(dfCmd, []);
+          const txt = (df.out || df.err || '').toString();
+          let m = txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i)
+            || txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i)
+            || txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i)
+            || txt.match(/almacenamiento\s+de\s+la\s+cuenta\s*:\s*([^\n]+?)\s*de\s*([^\n]+)/i)
+            || txt.match(/almacenamiento\s*:\s*([\d.,]+\s*[KMGT]?B)\s*de\s*([\d.,]+\s*[KMGT]?B)/i);
+          if (m) {
+            storageUsedMB = parseSizeToMB(m[1]);
+            storageTotalMB = parseSizeToMB(m[2]);
+            storageSource = storageSource === 'none' ? 'df' : storageSource;
+          }
+        } catch (e) {
+          log.warn('df advertencia: ' + String(e.message).slice(0,200));
+        }
+      }
+
+      if (!storageUsedMB) {
+        try {
+          const du = await runCmd(duCmd, ['-h', base || '/']);
+          const txt = (du.out || du.err || '').toString();
+          const mm = txt.match(/[\r\n]*\s*([\d.,]+\s*[KMGT]?B)/i) || txt.match(/([\d.,]+\s*[KMGT]?B)/i);
+          if (mm) { storageUsedMB = parseSizeToMB(mm[1]); storageSource = storageSource === 'none' ? 'du -h' : storageSource; }
+        } catch (e) {
+          log.warn('du -h advertencia: ' + String(e.message).slice(0,200));
+        }
+      }
+
+      // Conteos con mega-find
       try {
-        const du = await runCmd(duCmd, ['-h', base || '/']);
-        const txt = (du.out || du.err || '').toString();
-        const mm = txt.match(/[\r\n]*\s*([\d.,]+\s*[KMGT]?B)/i) || txt.match(/([\d.,]+\s*[KMGT]?B)/i);
-        if (mm) { storageUsedMB = parseSizeToMB(mm[1]); storageSource = storageSource === 'none' ? 'du -h' : storageSource; }
+        try {
+          const f = await runCmd(findCmd, [base || '/', '--type=f']);
+          fileCount = (f.out || '').split(/\r?\n/).filter(Boolean).length;
+        } catch {
+          const f = await runCmd(findCmd, ['--type=f', base || '/']);
+          fileCount = (f.out || '').split(/\r?\n/).filter(Boolean).length;
+        }
+        try {
+          const d = await runCmd(findCmd, [base || '/', '--type=d']);
+          folderCount = (d.out || '').split(/\r?\n/).filter(Boolean).length;
+        } catch {
+          const d = await runCmd(findCmd, ['--type=d', base || '/']);
+          folderCount = (d.out || '').split(/\r?\n/).filter(Boolean).length;
+        }
       } catch (e) {
-  log.warn('du -h advertencia: ' + String(e.message).slice(0,200));
+        log.warn('find advertencia: ' + String(e.message).slice(0,200));
       }
-    }
 
-    // Conteos con mega-find
-    try {
-      try {
-        const f = await runCmd(findCmd, [base || '/', '--type=f']);
-        fileCount = (f.out || '').split(/\r?\n/).filter(Boolean).length;
-      } catch {
-        const f = await runCmd(findCmd, ['--type=f', base || '/']);
-        fileCount = (f.out || '').split(/\r?\n/).filter(Boolean).length;
-      }
-      try {
-        const d = await runCmd(findCmd, [base || '/', '--type=d']);
-        folderCount = (d.out || '').split(/\r?\n/).filter(Boolean).length;
-      } catch {
-        const d = await runCmd(findCmd, ['--type=d', base || '/']);
-        folderCount = (d.out || '').split(/\r?\n/).filter(Boolean).length;
-      }
-    } catch (e) {
-  log.warn('find advertencia: ' + String(e.message).slice(0,200));
-    }
+      // Logout best-effort al final del bloque MEGA
+      try { await runCmd(logoutCmd, []); } catch {}
+    }, 'VALIDATE-LAST-MEGA');
 
     if (!storageTotalMB || storageTotalMB <= 0) storageTotalMB = DEFAULT_FREE_QUOTA_MB;
     if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB;
@@ -230,7 +263,17 @@ export async function runValidateLastMeAccount() {
     }
     return { ok: false, error: String(e.message) };
   } finally {
-    try { await runCmd('mega-logout', []); } catch {}
+    // Evitar mega-logout si no podemos asegurar proxy (no se permite IP directa)
+    try {
+      await withMegaLock(async () => {
+        try {
+          await ensureProxyOrThrow({ ctx: 'validate:last cleanup', maxTries: 3 });
+          await runCmd('mega-logout', []);
+        } catch {
+          // skip cleanup
+        }
+      }, 'VALIDATE-LAST-CLEANUP');
+    } catch {}
     try { await prisma.$disconnect(); } catch {}
   log.info(`[VALIDAR][FIN] duracionMs=${Date.now()-tStart}`);
   }

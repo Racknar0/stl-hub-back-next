@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client'
 import { decryptToJson } from '../utils/cryptoUtils.js'
 import { withMegaLock } from '../utils/megaQueue.js'
 import { log, isVerbose } from '../utils/logger.js'
+import { applyMegaProxy, listMegaProxies } from '../utils/megaProxy.js'
 import path from 'path'
 import fs from 'fs'
 import { spawn } from 'child_process'
@@ -34,6 +35,26 @@ function runCmd(cmd, args = [], { quiet=false } = {}) {
 function buildCtx(acc){
   if(!acc) return ''
   return `accId=${acc.id||'?'} alias=${acc.alias||'--'} email=${acc.email||'--'}`
+}
+
+async function ensureProxyOrThrow(ctx) {
+  const proxies = listMegaProxies({});
+  if (!proxies.length) throw new Error(`[RESTORE][PROXY] Sin proxies válidos (no se permite IP directa)${ctx ? ` ${ctx}` : ''}`);
+  const tries = Math.min(10, proxies.length);
+  let lastErr = null;
+  for (let i = 0; i < tries; i++) {
+    const p = proxies[i];
+    try {
+      const r = await applyMegaProxy(p, { ctx: ctx || 'restore', timeoutMs: 15000, clearOnFail: false });
+      if (r?.enabled) {
+        log.info(`[RESTORE][PROXY][OK] ${p.proxyUrl}${ctx ? ` ${ctx}` : ''}`);
+        return p;
+      }
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw new Error(`[RESTORE][PROXY] Ningún proxy funcionó. lastErr=${String(lastErr?.message || lastErr || '').slice(0, 160)}`);
 }
 
 async function megaLogin(payload, accCtx) {
@@ -105,6 +126,7 @@ export const syncBackupsToMain = async (req, res) => {
 
     // =============== FASE 1: SCAN MAIN (1 login) ===============
     await withMegaLock(async () => {
+      await ensureProxyOrThrow(buildCtx(main))
       const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
       await megaLogout(buildCtx(main))
       await megaLogin(payload, buildCtx(main))
@@ -156,6 +178,7 @@ export const syncBackupsToMain = async (req, res) => {
         if (!needDownload.size) break
         const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
         await withMegaLock(async () => {
+          await ensureProxyOrThrow(buildCtx(b))
           await megaLogout(buildCtx(b))
           await megaLogin(payloadB, buildCtx(b))
           for (const [assetId, asset] of Array.from(needDownload.entries())){
@@ -186,6 +209,7 @@ export const syncBackupsToMain = async (req, res) => {
     let restored = 0
     await withMegaLock(async () => {
       if (recovered.size){
+        await ensureProxyOrThrow(buildCtx(main))
         const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
         await megaLogout(buildCtx(main))
         await megaLogin(payload, buildCtx(main))
