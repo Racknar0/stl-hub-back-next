@@ -7,6 +7,8 @@ import { log, isVerbose } from './logger.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PROXY_FILE = path.join(__dirname, 'proxies.txt');
 
+let LAST_APPLIED = null; // { proxyUrl, username, password, raw }
+
 function runCmd(cmd, args = [], { quiet = false, timeoutMs = 0 } = {}) {
   const verbose = typeof isVerbose === 'function' && isVerbose();
   if (!quiet && verbose) {
@@ -78,6 +80,44 @@ function parseProxyLine(raw) {
   };
 }
 
+function shuffleInPlace(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+export function listMegaProxies({ proxyFile, shuffle = true } = {}) {
+  const lines = readProxyLines(proxyFile);
+  const parsed = lines.map(parseProxyLine).filter(Boolean);
+  return shuffle ? shuffleInPlace(parsed) : parsed;
+}
+
+export function getAppliedMegaProxy() {
+  return LAST_APPLIED ? { ...LAST_APPLIED, password: '<hidden>' } : null;
+}
+
+export async function applyMegaProxy(picked, { ctx, timeoutMs = 15000, clearOnFail = true } = {}) {
+  if (!picked || !picked.proxyUrl) throw new Error('Proxy inválido');
+  try {
+    await runCmd(
+      'mega-proxy',
+      [picked.proxyUrl, `--username=${picked.username}`, `--password=${picked.password}`],
+      { quiet: true, timeoutMs }
+    );
+    LAST_APPLIED = picked;
+    log.info(`[MEGA-PROXY] Aplicado ${picked.proxyUrl}${ctx ? ` ${ctx}` : ''}`);
+    return { enabled: true, proxyUrl: picked.proxyUrl, raw: picked.raw };
+  } catch (e) {
+    log.warn(`[MEGA-PROXY] Falló al aplicar proxy: ${e.message}${ctx ? ` ${ctx}` : ''}`);
+    if (clearOnFail) {
+      try { await runCmd('mega-proxy', ['--none'], { quiet: true, timeoutMs: 8000 }); } catch {}
+    }
+    return { enabled: false, error: e.message };
+  }
+}
+
 function pickRandomProxy(lines) {
   if (!lines || lines.length === 0) return null;
   const raw = lines[Math.floor(Math.random() * lines.length)];
@@ -88,21 +128,10 @@ export async function applyRandomMegaProxy({ proxyFile, ctx } = {}) {
   const lines = readProxyLines(proxyFile);
   const picked = pickRandomProxy(lines);
   if (!picked) {
-    log.warn(`[MEGA-PROXY] Sin proxies válidos. Se usará IP directa.${ctx ? ` ${ctx}` : ''}`);
+    log.warn(`[MEGA-PROXY] Sin proxies válidos.${ctx ? ` ${ctx}` : ''}`);
     return { enabled: false };
   }
-
-  try {
-    // Flags separados: más robusto (mismo patrón que en autoBackupAssetsToMain)
-    await runCmd('mega-proxy', [picked.proxyUrl, `--username=${picked.username}`, `--password=${picked.password}`], { quiet: true, timeoutMs: 15000 });
-    log.info(`[MEGA-PROXY] Aplicado ${picked.proxyUrl}${ctx ? ` ${ctx}` : ''}`);
-    return { enabled: true, proxyUrl: picked.proxyUrl };
-  } catch (e) {
-    log.warn(`[MEGA-PROXY] Falló al aplicar proxy: ${e.message}${ctx ? ` ${ctx}` : ''}`);
-    // Intentar dejar la sesión sin proxy si falló
-    try { await runCmd('mega-proxy', ['--none'], { quiet: true, timeoutMs: 8000 }); } catch {}
-    return { enabled: false, error: e.message };
-  }
+  return applyMegaProxy(picked, { ctx, timeoutMs: 15000, clearOnFail: true });
 }
 
 async function uploadsAreActiveNow() {

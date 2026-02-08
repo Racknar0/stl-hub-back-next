@@ -1405,17 +1405,51 @@ export const getUploadsRoot = async (_req, res) => {
 };
 
 async function runCmd(cmd, args = [], options = {}) {
+    const timeoutMs =
+        Number(options.timeoutMs) ||
+        (cmd === 'mega-login'
+            ? Number(process.env.MEGA_LOGIN_TIMEOUT_MS) || 60000
+            : cmd === 'mega-logout'
+              ? Number(process.env.MEGA_LOGOUT_TIMEOUT_MS) || 30000
+              : cmd === 'mega-mkdir'
+                ? Number(process.env.MEGA_MKDIR_TIMEOUT_MS) || 20000
+                : 0);
+
+    const { timeoutMs: _ignored, ...spawnOpts } = options || {};
+
     return new Promise((resolve, reject) => {
-        const child = spawn(cmd, args, { shell: true, ...options });
+        const child = spawn(cmd, args, { shell: true, ...spawnOpts });
+        let settled = false;
+        let to = null;
+        if (timeoutMs > 0) {
+            to = setTimeout(() => {
+                if (settled) return;
+                settled = true;
+                try { child.kill('SIGKILL'); } catch {}
+                try { child.kill(); } catch {}
+                reject(new Error(`${cmd} timeout after ${timeoutMs}ms`));
+            }, timeoutMs);
+        }
         child.stdout.on('data', (d) =>
             console.log(`[MEGA] ${d.toString().trim()}`)
         );
         child.stderr.on('data', (d) =>
             console.error(`[MEGA] ${d.toString().trim()}`)
         );
-        child.on('close', (code) =>
-            code === 0 ? resolve() : reject(new Error(`${cmd} exited ${code}`))
-        );
+        child.on('error', (e) => {
+            if (to) clearTimeout(to);
+            if (settled) return;
+            settled = true;
+            reject(e);
+        });
+        child.on('close', (code) => {
+            if (to) clearTimeout(to);
+            if (settled) return;
+            settled = true;
+            code === 0
+                ? resolve()
+                : reject(new Error(`${cmd} exited ${code}`));
+        });
     });
 }
 
@@ -1425,6 +1459,15 @@ async function safeMkdir(remotePath) {
     return new Promise((resolve, reject) => {
         const child = spawn(mkdirCmd, ['-p', remotePath], { shell: true });
         let stderrBuf = '';
+        const timeoutMs = Number(process.env.MEGA_MKDIR_TIMEOUT_MS) || 20000;
+        let settled = false;
+        const to = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            try { child.kill('SIGKILL'); } catch {}
+            try { child.kill(); } catch {}
+            return reject(new Error(`${mkdirCmd} timeout after ${timeoutMs}ms`));
+        }, timeoutMs);
         child.stdout.on('data', (d) =>
             console.log(`[MEGA] ${d.toString().trim()}`)
         );
@@ -1433,7 +1476,16 @@ async function safeMkdir(remotePath) {
             stderrBuf += s;
             console.error(`[MEGA] ${s.trim()}`);
         });
+        child.on('error', (e) => {
+            clearTimeout(to);
+            if (settled) return;
+            settled = true;
+            return reject(e);
+        });
         child.on('close', (code) => {
+            clearTimeout(to);
+            if (settled) return;
+            settled = true;
             if (code === 0) return resolve();
             if (code === 54 || /Folder already exists/i.test(stderrBuf)) {
                 console.log(`[MEGA] mkdir exists (code=${code}) -> ok`);

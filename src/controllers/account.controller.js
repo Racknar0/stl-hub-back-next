@@ -3,7 +3,7 @@ import { encryptJson, decryptToJson } from '../utils/cryptoUtils.js';
 import { log, isVerbose } from '../utils/logger.js';
 import { spawn } from 'child_process';
 import { withMegaLock } from '../utils/megaQueue.js';
-import { applyRandomMegaProxy, clearMegaProxyIfSafe } from '../utils/megaProxy.js';
+import { applyMegaProxy, listMegaProxies, clearMegaProxyIfSafe } from '../utils/megaProxy.js';
 import path from 'path';
 import fs from 'fs';
 
@@ -19,8 +19,46 @@ const MAX_CMD_CAPTURE_BYTES = (Number(process.env.MEGA_MAX_CAPTURE_KB) || 1024) 
 // Lista de comandos cuyos logs siempre estarán silenciados salvo errores (login/logout)
 const QUIET_MEGA_CMDS = new Set(['mega-login', 'mega-logout']);
 
+const MEGA_LOGIN_TIMEOUT_MS = Number(process.env.MEGA_LOGIN_TIMEOUT_MS) || 60000;
+const MEGA_LOGOUT_TIMEOUT_MS = Number(process.env.MEGA_LOGOUT_TIMEOUT_MS) || 30000;
+const MEGA_MKDIR_TIMEOUT_MS = Number(process.env.MEGA_MKDIR_TIMEOUT_MS) || 20000;
+const MEGA_READONLY_TIMEOUT_MS = Number(process.env.MEGA_READONLY_TIMEOUT_MS) || 30000;
+
+const MEGA_LOGIN_PER_PROXY_TIMEOUT_MS = Number(process.env.MEGA_LOGIN_PER_PROXY_TIMEOUT_MS) || 15000;
+const MEGA_PROXY_ROTATE_MAX_TRIES = Number(process.env.MEGA_PROXY_ROTATE_MAX_TRIES) || 0; // 0 = todas
+
+function attachAutoAcceptTerms(child, label = 'MEGA') {
+  const EOL = '\n';
+  const ACCEPT_REGEXES = [
+    /Do you accept\s+these\s+terms\??/i,
+    /Do you accept.*terms\??/i,
+    /Type '\s*yes\s*' to continue/i,
+    /Acepta[s]? .*t[ée]rminos\??/i,
+    /¿Acepta[s]? los t[ée]rminos\??/i,
+  ];
+  const PROMPT_YNA = /Please enter \[y\]es\/\[n\]o\/\[a\]ll\/none|\[(y|Y)\]es\s*\/\s*\[(n|N)\]o\s*\/\s*\[(a|A)\]ll/i;
+  const PROMPT_YN = /\[(y|Y)\]es\s*\/\s*\[(n|N)\]o/i;
+  const PROMPT_ES_SN = /\[(s|S)\]\s*\/\s*\[(n|N)\]/i;
+
+  const maybeAnswer = (s) => {
+    try {
+      if (ACCEPT_REGEXES.some(r => r.test(s))) child.stdin.write('yes' + EOL);
+      else if (PROMPT_YNA.test(s)) child.stdin.write('a' + EOL);
+      else if (PROMPT_YN.test(s)) child.stdin.write('y' + EOL);
+      else if (PROMPT_ES_SN.test(s)) child.stdin.write('s' + EOL);
+    } catch (e) {
+      // No es crítico; sólo evita cuelgues por prompts
+      try { log.warn(`[${label}] auto-accept warn: ${e.message}`) } catch {}
+    }
+  };
+
+  if (!child?.stdout || !child?.stderr) return;
+  child.stdout.on('data', d => maybeAnswer(d.toString()));
+  child.stderr.on('data', d => maybeAnswer(d.toString()));
+}
+
 // Ejecuta un comando y devuelve stdout/err con logs (sin exponer credenciales) limitando tamaño
-function runCmd(cmd, args = [], { cwd, maxBytes } = {}) {
+function runCmd(cmd, args = [], { cwd, maxBytes, timeoutMs } = {}) {
   const maskArgs = (c, a) => (c && c.toLowerCase().includes('mega-login') ? ['<hidden>'] : a);
   const printable = `${cmd} ${(maskArgs(cmd, args) || []).join(' ')}`.trim();
   if (cmd === 'mega-login') log.info('[MEGA][LOGIN] iniciando (accounts controller)')
@@ -30,9 +68,28 @@ function runCmd(cmd, args = [], { cwd, maxBytes } = {}) {
   if (!quiet && verbose) log.verbose(`Ejecutando comando: ${printable}`);
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { cwd, shell: true });
+    // mega-login/mega-* a veces pueden pedir aceptar términos; evitar cuelgue interactivo
+    if (cmd === 'mega-login' || cmd === 'mega-export' || cmd === 'mega-put') {
+      try { attachAutoAcceptTerms(child, cmd.toUpperCase()); } catch {}
+    }
     let out = '', err = '';
     const limit = maxBytes || MAX_CMD_CAPTURE_BYTES;
     let truncatedOut = false, truncatedErr = false;
+    let settled = false;
+    let to = null;
+
+    const effectiveTimeoutMs = Number(timeoutMs || 0);
+    if (effectiveTimeoutMs > 0) {
+      to = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { child.kill('SIGKILL') } catch {}
+        try { child.kill() } catch {}
+        log.warn(`Timeout comando ${cmd} tras ${effectiveTimeoutMs}ms`);
+        reject(new Error(`${cmd} timeout`));
+      }, effectiveTimeoutMs);
+    }
+
     child.stdout.on('data', (d) => {
       if (!truncatedOut) {
         if (out.length + d.length <= limit) out += d.toString();
@@ -49,7 +106,17 @@ function runCmd(cmd, args = [], { cwd, maxBytes } = {}) {
         }
       }
     });
+    child.on('error', (e) => {
+      if (to) clearTimeout(to);
+      if (settled) return;
+      settled = true;
+      log.error(`Error spawn comando ${cmd}: ${e.message}`);
+      reject(e);
+    });
     child.on('close', (code) => {
+      if (to) clearTimeout(to);
+      if (settled) return;
+      settled = true;
       if (code === 0) {
         if (cmd === 'mega-login') log.info('[MEGA][LOGIN][OK] (accounts controller)')
         if (cmd === 'mega-logout') log.info('[MEGA][LOGOUT][OK] (accounts controller)')
@@ -68,50 +135,7 @@ function runCmd(cmd, args = [], { cwd, maxBytes } = {}) {
 
 // Ejecuta comando con timeout (mata el proceso si excede)
 async function runCmdWithTimeout(cmd, args = [], timeoutMs = 15000, options = {}) {
-  const maskArgs = (c, a) => (c && c.toLowerCase().includes('mega-login') ? ['<hidden>'] : a);
-  const printable = `${cmd} ${(maskArgs(cmd, args) || []).join(' ')}`.trim();
-  if (cmd === 'mega-login') log.info('[MEGA][LOGIN] iniciando (accounts controller)')
-  if (cmd === 'mega-logout') log.info('[MEGA][LOGOUT] iniciando (accounts controller)')
-  const quiet = QUIET_MEGA_CMDS.has(cmd);
-  const verbose = typeof isVerbose === 'function' && isVerbose();
-  if (!quiet && verbose) log.verbose(`Ejecutando (timeout ${timeoutMs}ms): ${printable}`);
-  return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { shell: true, cwd: options.cwd });
-    let out = '', err = '';
-    const limit = options.maxBytes || MAX_CMD_CAPTURE_BYTES;
-    let truncatedOut = false, truncatedErr = false;
-    const to = setTimeout(() => {
-      try { child.kill('SIGKILL') } catch {}
-      log.warn(`Timeout comando ${cmd} tras ${timeoutMs}ms`);
-      reject(new Error(`${cmd} timeout`));
-    }, timeoutMs);
-    child.stdout.on('data', d => {
-      if (!truncatedOut) {
-        if (out.length + d.length <= limit) out += d.toString();
-        else { const slice = limit - out.length; if (slice > 0) out += d.toString().slice(0, slice); truncatedOut = true; }
-      }
-    });
-    child.stderr.on('data', d => {
-      if (!truncatedErr) {
-        if (err.length + d.length <= limit) err += d.toString();
-        else { const slice = limit - err.length; if (slice > 0) err += d.toString().slice(0, slice); truncatedErr = true; }
-      }
-    });
-    child.on('close', code => {
-      clearTimeout(to);
-      if (code === 0) {
-        if (cmd === 'mega-login') log.info('[MEGA][LOGIN][OK] (accounts controller)')
-        if (cmd === 'mega-logout') log.info('[MEGA][LOGOUT][OK] (accounts controller)')
-        if (!quiet && verbose) log.verbose(`OK comando: ${cmd}`);
-        return resolve({ out, err, truncatedOut, truncatedErr });
-      }
-      const msg = (err || out || '').slice(0, 400);
-      if (!(cmd === 'mega-mkdir' && /already exists/i.test(msg)) || verbose) {
-        log.error(`Error comando ${cmd} code=${code} msg=${msg}`);
-      }
-      reject(new Error(err || out || `${cmd} exited ${code}`));
-    });
-  });
+  return runCmd(cmd, args, { cwd: options.cwd, maxBytes: options.maxBytes, timeoutMs });
 }
 
 // Subida con progreso leyendo stderr/stdout incremental de mega-put
@@ -368,34 +392,76 @@ export const testAccount = async (req, res) => {
 
     const base = (acc.baseFolder || '/').trim();
     await withMegaLock(async () => {
-      // Proxies: aplicar SIEMPRE al conectar (evita que altas/actualizaciones salgan siempre por la misma IP)
-      try {
-        const r = await applyRandomMegaProxy({ ctx: `accId=${id} alias=${acc.alias || '--'}` });
-        didSetProxy = Boolean(r?.enabled);
-      } catch (e) {
-        log.warn(`[ACCOUNTS][TEST] No se pudo aplicar proxy: ${e.message}`);
+      const ctx = `accId=${id} alias=${acc.alias || '--'}`;
+
+      // Rotación de proxy + login con timeout corto por intento.
+      // Requisito: no caer a IP directa; si no hay proxy válido o ninguno conecta, abortar.
+      const proxies = listMegaProxies({});
+      if (!proxies.length) {
+        log.error(`[ACCOUNTS][TEST] Sin proxies válidos. Abortando login. ${ctx}`);
+        throw new Error('Sin proxies válidos');
       }
-      // Limpiar sesiones previas
-      try { await runCmd(logoutCmd, []); console.log('[ACCOUNTS] pre-logout ok'); } catch (e) { console.warn('[ACCOUNTS] pre-logout warn:', String(e.message).slice(0,200)); }
-      // Login
-      try {
-        if (payload?.type === 'session' && payload.session) {
-          // login session
-          await runCmd(loginCmd, [payload.session]);
-        } else if (payload?.username && payload?.password) {
-          // login user/pass
-          await runCmd(loginCmd, [payload.username, payload.password]);
-        } else {
-          throw new Error('Invalid credentials payload');
+
+      const maxTries = MEGA_PROXY_ROTATE_MAX_TRIES > 0
+        ? Math.min(MEGA_PROXY_ROTATE_MAX_TRIES, proxies.length)
+        : Math.min(proxies.length, 50);
+
+      let loginOk = false;
+      let lastErr = '';
+      for (let i = 0; i < maxTries; i++) {
+        const p = proxies[i];
+        log.info(`[ACCOUNTS][TEST] Proxy try ${i + 1}/${maxTries} -> ${p.proxyUrl} ${ctx}`);
+
+        const applied = await applyMegaProxy(p, { ctx, timeoutMs: 15000, clearOnFail: false });
+        if (!applied?.enabled) {
+          lastErr = applied?.error || 'apply proxy failed';
+          continue;
         }
-        didLogin = true;
-      } catch (e) {
-  const msg = String(e.message || '').toLowerCase();
-  log.error(`Login fallido: ${msg}`);
-        if (!msg.includes('already logged in')) { throw e }
+        didSetProxy = true;
+
+        // Limpiar sesiones previas
+        try {
+          await runCmdWithTimeout(logoutCmd, [], MEGA_LOGOUT_TIMEOUT_MS);
+          console.log('[ACCOUNTS] pre-logout ok');
+        } catch (e) {
+          console.warn('[ACCOUNTS] pre-logout warn:', String(e.message).slice(0, 200));
+        }
+
+        // Login con timeout de 15s por proxy
+        try {
+          if (payload?.type === 'session' && payload.session) {
+            await runCmdWithTimeout(loginCmd, [payload.session], MEGA_LOGIN_PER_PROXY_TIMEOUT_MS);
+          } else if (payload?.username && payload?.password) {
+            await runCmdWithTimeout(loginCmd, [payload.username, payload.password], MEGA_LOGIN_PER_PROXY_TIMEOUT_MS);
+          } else {
+            throw new Error('Invalid credentials payload');
+          }
+          didLogin = true;
+          loginOk = true;
+          log.info(`[ACCOUNTS][TEST] Login OK via proxy ${p.proxyUrl} ${ctx}`);
+          break;
+        } catch (e) {
+          const msg = String(e.message || '').toLowerCase();
+          lastErr = msg;
+          log.warn(`[ACCOUNTS][TEST] Login FAIL via proxy ${p.proxyUrl} err=${msg} ${ctx}`);
+          if (msg.includes('already logged in')) {
+            didLogin = true;
+            loginOk = true;
+            log.info(`[ACCOUNTS][TEST] Login already-logged-in OK via proxy ${p.proxyUrl} ${ctx}`);
+            break;
+          }
+          // probar siguiente proxy
+          continue;
+        }
       }
+
+      if (!loginOk) {
+        log.error(`[ACCOUNTS][TEST] Ningún proxy conectó (tries=${maxTries}). lastErr=${String(lastErr).slice(0,200)} ${ctx}`);
+        throw new Error(`No se pudo conectar por proxies tras ${maxTries} intentos`);
+      }
+
       if (base && base !== '/') {
-        try { await runCmd(mkdirCmd, ['-p', base]); } catch (e) { /* silencio mkdir */ }
+        try { await runCmdWithTimeout(mkdirCmd, ['-p', base], MEGA_MKDIR_TIMEOUT_MS); } catch (e) { /* silencio mkdir */ }
       }
     }, 'ACCOUNTS-TEST')
 
@@ -528,24 +594,26 @@ export const testAccount = async (req, res) => {
     } catch {}
     return res.status(500).json({ message: 'Error testing account', error: String(error.message) });
   } finally {
+    // Liberar el flag ANTES de decidir si hay subidas activas
+    try { stopUploadsFlag && stopUploadsFlag() } catch {}
+
     // Si hay subidas activas, no tocamos la sesión global.
     try {
       const { isUploadsActive } = await import('../utils/uploadsActiveFlag.js');
       if (!isUploadsActive()) {
-        try { await withMegaLock(() => runCmd('mega-logout', []), 'ACCOUNTS-TEST-LOGOUT'); } catch {}
+        try { await withMegaLock(() => runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS), 'ACCOUNTS-TEST-LOGOUT'); } catch {}
       } else {
         log.warn('[ACCOUNTS][TEST][FINALLY] uploads activos: skip mega-logout');
       }
     } catch {
       // fallback al comportamiento anterior si no podemos cargar helper
-      try { await withMegaLock(() => runCmd('mega-logout', []), 'ACCOUNTS-TEST-LOGOUT'); } catch {}
+      try { await withMegaLock(() => runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS), 'ACCOUNTS-TEST-LOGOUT'); } catch {}
     }
 
     // Si esta llamada aplicó proxy, intentamos limpiar al final (sin afectar subidas activas)
     try {
       if (didSetProxy) await clearMegaProxyIfSafe({ ctx: `accId=${req.params.id}` });
     } catch {}
-    try { stopUploadsFlag && stopUploadsFlag() } catch {}
   }
 };
 
@@ -566,12 +634,12 @@ export const getAccountDetail = async (req, res) => {
     let items = []
     const base = (acc.baseFolder || '/').trim()
     await withMegaLock( async () => {
-      try { await runCmd(logoutCmd, []) } catch {}
+      try { await runCmdWithTimeout(logoutCmd, [], MEGA_LOGOUT_TIMEOUT_MS) } catch {}
       try {
         if (payload?.type === 'session' && payload.session) {
-          await runCmd(loginCmd, [payload.session])
+          await runCmdWithTimeout(loginCmd, [payload.session], MEGA_LOGIN_TIMEOUT_MS)
         } else if (payload?.username && payload?.password) {
-          await runCmd(loginCmd, [payload.username, payload.password])
+          await runCmdWithTimeout(loginCmd, [payload.username, payload.password], MEGA_LOGIN_TIMEOUT_MS)
         } else {
           throw new Error('Invalid credentials payload')
         }
@@ -580,13 +648,13 @@ export const getAccountDetail = async (req, res) => {
         if (!msg.includes('already logged in')) throw e
       }
       if (base && base !== '/') {
-        try { await runCmd(mkdirCmd, ['-p', base]) } catch {}
+        try { await runCmdWithTimeout(mkdirCmd, ['-p', base], MEGA_MKDIR_TIMEOUT_MS) } catch {}
       }
       try {
-        const ls = await runCmd(lsCmd, ['-l', base || '/'])
+        const ls = await runCmdWithTimeout(lsCmd, ['-l', base || '/'], MEGA_READONLY_TIMEOUT_MS)
         items = (ls.out || '').split(/\r?\n/).filter(Boolean)
       } catch {}
-      try { await runCmd(logoutCmd, []) } catch {}
+      try { await runCmdWithTimeout(logoutCmd, [], MEGA_LOGOUT_TIMEOUT_MS) } catch {}
     }, 'ACCOUNTS-DETAIL')
 
     return res.json({
