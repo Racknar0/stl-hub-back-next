@@ -1697,6 +1697,156 @@ function pickTwoStickyProxies() {
     return { proxies, mainProxy, backupProxy };
 }
 
+function parseSizeToMB(str) {
+    if (!str) return 0;
+    const s = String(str).trim().toUpperCase();
+    const m = s.match(/[\d.,]+\s*[KMGT]?B/);
+    if (!m) return 0;
+    const num = parseFloat((m[0].match(/[\d.,]+/) || ['0'])[0].replace(',', '.'));
+    const unit = (m[0].match(/[KMGT]?B/) || ['MB'])[0];
+    const factor =
+        unit === 'KB'
+            ? 1 / 1024
+            : unit === 'MB'
+              ? 1
+              : unit === 'GB'
+                ? 1024
+                : unit === 'TB'
+                  ? 1024 * 1024
+                  : 1 / (1024 * 1024);
+    return Math.round(num * factor);
+}
+
+async function runCmdCapture(cmd, args = [], { timeoutMs = 15000, maxBytes = 1024 * 1024 } = {}) {
+    return new Promise((resolve, reject) => {
+        const child = spawn(cmd, args, { shell: true });
+        let out = '';
+        let err = '';
+        let truncatedOut = false;
+        let truncatedErr = false;
+        let settled = false;
+        const to = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            try { child.kill('SIGKILL'); } catch {}
+            try { child.kill(); } catch {}
+            reject(new Error(`${cmd} timeout after ${timeoutMs}ms`));
+        }, Math.max(1, Number(timeoutMs) || 15000));
+
+        const appendLimited = (prev, chunk, cap, markTruncated) => {
+            if (prev.length + chunk.length <= cap) return { val: prev + chunk, truncated: false };
+            const slice = cap - prev.length;
+            if (slice > 0) return { val: prev + chunk.slice(0, slice), truncated: true };
+            return { val: prev, truncated: true };
+        };
+
+        child.stdout.on('data', (d) => {
+            if (truncatedOut) return;
+            const r = appendLimited(out, d.toString(), maxBytes);
+            out = r.val;
+            if (r.truncated) truncatedOut = true;
+        });
+        child.stderr.on('data', (d) => {
+            if (truncatedErr) return;
+            const r = appendLimited(err, d.toString(), maxBytes);
+            err = r.val;
+            if (r.truncated) truncatedErr = true;
+        });
+        child.on('error', (e) => {
+            clearTimeout(to);
+            if (settled) return;
+            settled = true;
+            reject(e);
+        });
+        child.on('close', (code) => {
+            clearTimeout(to);
+            if (settled) return;
+            settled = true;
+            if (code === 0) return resolve({ out, err, truncatedOut, truncatedErr });
+            reject(new Error(err || out || `${cmd} exited ${code}`));
+        });
+    });
+}
+
+async function refreshAccountStorageFromMegaDfInCurrentSession(accountId, ctx = '') {
+    const id = Number(accountId);
+    if (!Number.isFinite(id) || id <= 0) return;
+
+    const DEFAULT_FREE_QUOTA_MB = Number(process.env.MEGA_FREE_QUOTA_MB) || 20480;
+    const label = ctx ? ` ${ctx}` : '';
+    const parseDfText = (txtRaw) => {
+        const txt = String(txtRaw || '');
+        let storageUsedMB = 0;
+        let storageTotalMB = 0;
+
+        let m =
+            txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i) ||
+            txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i) ||
+            txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i) ||
+            txt.match(/almacenamiento\s+de\s+la\s+cuenta\s*:\s*([^\n]+?)\s*de\s*([^\n]+)/i) ||
+            txt.match(/almacenamiento\s*:\s*([\d.,]+\s*[KMGT]?B)\s*de\s*([\d.,]+\s*[KMGT]?B)/i);
+
+        if (m) {
+            storageUsedMB = parseSizeToMB(m[1]);
+            storageTotalMB = parseSizeToMB(m[2]);
+        }
+
+        if (!storageTotalMB) {
+            const p =
+                txt.match(/storage[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:of|de)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:used|usado)?/i) ||
+                txt.match(/almacenamiento[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:de|of)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:usado|used)?/i);
+            if (p) {
+                storageTotalMB = parseSizeToMB(p[2]);
+                const pct = parseFloat(String(p[1]).replace(',', '.'));
+                if (!Number.isNaN(pct) && Number.isFinite(pct) && storageTotalMB > 0) {
+                    storageUsedMB = Math.round((pct / 100) * storageTotalMB);
+                }
+            }
+        }
+
+        if (!storageTotalMB || storageTotalMB <= 0) storageTotalMB = DEFAULT_FREE_QUOTA_MB;
+        if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB;
+
+        return { storageUsedMB, storageTotalMB };
+    };
+
+    try {
+        const r = await runCmdCapture('mega-df', ['-h'], { timeoutMs: 15000, maxBytes: 512 * 1024 });
+        const txt = (r.out || r.err || '').toString();
+        const { storageUsedMB, storageTotalMB } = parseDfText(txt);
+        await prisma.megaAccount.update({
+            where: { id },
+            data: {
+                storageUsedMB,
+                storageTotalMB,
+                lastCheckAt: new Date(),
+            },
+        });
+        console.log(`[BATCH][SPACE] updated accId=${id} used=${storageUsedMB}MB total=${storageTotalMB}MB${label}`);
+        return;
+    } catch (e) {
+        console.warn(`[BATCH][SPACE] mega-df -h warn accId=${id} msg=${String(e.message).slice(0, 200)}${label}`);
+    }
+
+    // Fallback sin -h
+    try {
+        const r = await runCmdCapture('mega-df', [], { timeoutMs: 15000, maxBytes: 512 * 1024 });
+        const txt = (r.out || r.err || '').toString();
+        const { storageUsedMB, storageTotalMB } = parseDfText(txt);
+        await prisma.megaAccount.update({
+            where: { id },
+            data: {
+                storageUsedMB,
+                storageTotalMB,
+                lastCheckAt: new Date(),
+            },
+        });
+        console.log(`[BATCH][SPACE] updated(accId=${id}) fallback used=${storageUsedMB}MB total=${storageTotalMB}MB${label}`);
+    } catch (e) {
+        console.warn(`[BATCH][SPACE] mega-df fallback warn accId=${id} msg=${String(e.message).slice(0, 200)}${label}`);
+    }
+}
+
 async function applyProxyOrThrow(role, picked, ctx) {
     if (!picked) throw new Error(`[BATCH] Sin proxy para ${role}`);
     const r = await applyMegaProxy(picked, { ctx, timeoutMs: 15000, clearOnFail: false });
@@ -2086,6 +2236,12 @@ export async function enqueueToMegaBatch(assetId) {
                     await sleep(POLL_MS);
                 }
 
+                // Actualizar métricas de espacio de la cuenta MAIN tras completar subidas.
+                // Esto alimenta /dashboard/assets/uploader (header) y /dashboard/accounts.
+                try {
+                    await refreshAccountStorageFromMegaDfInCurrentSession(mainAcc.id, ctxMain);
+                } catch {}
+
                 await megaLogoutBestEffort(`POST-MAIN ${ctxMain}`);
 
                 // BACKUPS: el usuario usa 1 backup por main, pero soportamos N.
@@ -2149,6 +2305,11 @@ export async function enqueueToMegaBatch(assetId) {
                         st.backupIndex = (Number(st.backupIndex) || 0) + 1;
                         st.currentReplicaAssetId = null;
                     }
+
+                    // Actualizar métricas de espacio del BACKUP tras replicar batch.
+                    try {
+                        await refreshAccountStorageFromMegaDfInCurrentSession(b.id, bctx);
+                    } catch {}
 
                     await megaLogoutBestEffort(`POST ${bctx}`);
                 }
