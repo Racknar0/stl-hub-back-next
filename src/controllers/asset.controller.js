@@ -31,6 +31,34 @@ function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isLoginAccessDeniedError(err) {
+    const msg = String(err?.message || err || '').toLowerCase();
+    return msg.includes('access denied') || msg.includes('failed to login');
+}
+
+async function megaLoginWithProxyRotationOrThrow(role, payload, proxies, ctx, { maxTries = 10 } = {}) {
+    const list = Array.isArray(proxies) ? proxies : [];
+    if (!list.length) throw new Error(`[BATCH] Sin proxies válidos para ${role}. (requisito: nunca IP directa) ${ctx}`);
+
+    const tries = Math.min(Math.max(1, Number(maxTries) || 1), list.length);
+    let lastErr = '';
+    for (let i = 0; i < tries; i++) {
+        const p = list[i];
+        try {
+            console.log(`[BATCH][${role}] Proxy try ${i + 1}/${tries} -> ${p?.proxyUrl || '--'} ${ctx}`);
+            await applyProxyOrThrow(role, p, ctx);
+            await megaLogoutBestEffort(`PREV ${ctx}`);
+            await megaLoginOrThrow(payload, ctx);
+            return p;
+        } catch (e) {
+            lastErr = e?.message || String(e);
+            // si el login falla por proxy/account, probamos siguiente proxy
+            continue;
+        }
+    }
+    throw new Error(`[BATCH] No se pudo loguear en ${role} por proxies (tries=${tries}). lastErr=${String(lastErr).slice(0, 200)} ${ctx}`);
+}
+
 function getBatchInfoForAsset(assetId, mainAccountId) {
     const st = megaBatchByMain.get(Number(mainAccountId));
     if (!st) return null;
@@ -1500,15 +1528,29 @@ async function runCmd(cmd, args = [], options = {}) {
     const { timeoutMs: _ignored, ...spawnOpts } = options || {};
 
     return new Promise((resolve, reject) => {
-        const child = spawn(cmd, args, { shell: true, ...spawnOpts });
+        const killTree = () => {
+            // En Linux, con detached podemos matar el grupo y evitar procesos huérfanos cuando shell=true.
+            try {
+                if (process.platform !== 'win32' && child?.pid) {
+                    try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+                }
+            } catch {}
+            try { child.kill('SIGKILL'); } catch {}
+            try { child.kill(); } catch {}
+        };
+
+        const child = spawn(cmd, args, {
+            shell: true,
+            detached: process.platform !== 'win32',
+            ...spawnOpts,
+        });
         let settled = false;
         let to = null;
         if (timeoutMs > 0) {
             to = setTimeout(() => {
                 if (settled) return;
                 settled = true;
-                try { child.kill('SIGKILL'); } catch {}
-                try { child.kill(); } catch {}
+                killTree();
                 reject(new Error(`${cmd} timeout after ${timeoutMs}ms`));
             }, timeoutMs);
         }
@@ -1522,6 +1564,7 @@ async function runCmd(cmd, args = [], options = {}) {
             if (to) clearTimeout(to);
             if (settled) return;
             settled = true;
+            try { killTree(); } catch {}
             reject(e);
         });
         child.on('close', (code) => {
@@ -1867,6 +1910,19 @@ export async function enqueueToMegaBatch(assetId) {
     setImmediate(async () => {
         const stopFlag = startUploadsActive(`batch:main:${mainId}`);
         try {
+            // Debounce de arranque: esperar una ventana corta sin nuevos enqueues antes de loguear.
+            // Esto permite agrupar "cola de 3" cuando los assets llegan en ráfaga.
+            const START_DEBOUNCE_MS = Math.max(0, Number(process.env.MEGA_BATCH_START_DEBOUNCE_MS || 5000));
+            if (START_DEBOUNCE_MS) {
+                while (true) {
+                    const lastAt = Number(st.lastEnqueueAt) || 0;
+                    const delta = Date.now() - lastAt;
+                    if (st.pending.size > 0 && delta >= START_DEBOUNCE_MS) break;
+                    if (st.pending.size === 0) break;
+                    await sleep(Math.min(500, Math.max(50, START_DEBOUNCE_MS - delta)));
+                }
+            }
+
             await withMegaLock(async () => {
                 const mainAcc = await prisma.megaAccount.findUnique({
                     where: { id: mainId },
@@ -1886,15 +1942,13 @@ export async function enqueueToMegaBatch(assetId) {
                     throw new Error(`[BATCH] Sin proxies válidos. (requisito: nunca IP directa) ${ctxMain}`);
                 }
 
-                // MAIN proxy + login 1 vez
-                await applyAnyWorkingProxyOrThrow('MAIN', proxies, ctxMain, 10);
-                await megaLogoutBestEffort(`PREV ${ctxMain}`);
+                // MAIN proxy + login 1 vez (rotando proxy si login falla)
                 const mainPayload = decryptToJson(
                     mainAcc.credentials.encData,
                     mainAcc.credentials.encIv,
                     mainAcc.credentials.encTag
                 );
-                await megaLoginOrThrow(mainPayload, ctxMain);
+                await megaLoginWithProxyRotationOrThrow('MAIN', mainPayload, proxies, ctxMain, { maxTries: 10 });
 
                 const uploadedAssetIds = [];
                 st.phase = 'main';
@@ -1912,8 +1966,11 @@ export async function enqueueToMegaBatch(assetId) {
                 const QUIET_MS = Math.max(0, Number(process.env.MEGA_BATCH_QUIET_MS || 20000));
                 const POLL_MS = Math.max(200, Number(process.env.MEGA_BATCH_QUIET_POLL_MS || 500));
 
+                let idleSince = null;
+
                 while (true) {
                     while (st.pending.size > 0) {
+                        idleSince = null;
                         const batch = Array.from(st.pending);
                         st.pending.clear();
                         st.mainQueue = batch.slice();
@@ -1938,9 +1995,9 @@ export async function enqueueToMegaBatch(assetId) {
 
                     // Sin pendientes: esperar quiet si está habilitado
                     if (!QUIET_MS) break;
-                    const lastAt = Number(st.lastEnqueueAt) || 0;
-                    const delta = Date.now() - lastAt;
-                    if (st.pending.size === 0 && delta >= QUIET_MS) break;
+                    if (!idleSince) idleSince = Date.now();
+                    const idleDelta = Date.now() - idleSince;
+                    if (st.pending.size === 0 && idleDelta >= QUIET_MS) break;
                     // Si entró algo durante el wait, el loop externo volverá a consumir pending
                     await sleep(POLL_MS);
                 }
@@ -1963,7 +2020,8 @@ export async function enqueueToMegaBatch(assetId) {
                 const ctxBackups = `mainAccId=${mainAcc.id} backups=${backupAccounts.length}`;
                 const proxyBackupPicked = backupProxy || mainProxy;
                 const orderedBackupProxies = [proxyBackupPicked, ...proxies.filter((p) => p !== proxyBackupPicked)];
-                await applyAnyWorkingProxyOrThrow('BACKUP', orderedBackupProxies, ctxBackups, 10);
+                // Nota: el login de cada backup rota proxy si falla, pero precalentamos aplicación aquí.
+                await applyAnyWorkingProxyOrThrow('BACKUP', orderedBackupProxies, ctxBackups, 3);
 
                 for (const b of backupAccounts) {
                     if (!b.credentials) {
@@ -1979,8 +2037,7 @@ export async function enqueueToMegaBatch(assetId) {
                         b.credentials.encTag
                     );
                     const bctx = `backupAccId=${b.id} alias=${b.alias || '--'}`;
-                    await megaLogoutBestEffort(`PREV ${bctx}`);
-                    await megaLoginOrThrow(payload, bctx);
+                    await megaLoginWithProxyRotationOrThrow('BACKUP', payload, orderedBackupProxies, bctx, { maxTries: 10 });
 
                     st.phase = 'backup';
                     st.backupQueue = uploadedAssetIds.slice();
