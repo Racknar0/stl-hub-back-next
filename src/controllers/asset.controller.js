@@ -1981,11 +1981,20 @@ export async function enqueueToMegaBatch(assetId) {
             // Debounce de arranque: esperar una ventana corta sin nuevos enqueues antes de loguear.
             // Esto permite agrupar "cola de 3" cuando los assets llegan en ráfaga.
             const START_DEBOUNCE_MS = Math.max(0, Number(process.env.MEGA_BATCH_START_DEBOUNCE_MS || 5000));
+            // Importante: si los enqueues NO paran (SCP/cola grande), no podemos esperar "silencio" infinito.
+            // Máximo de espera para arrancar aunque sigan llegando nuevos assets.
+            const START_DEBOUNCE_MAX_MS = Math.max(0, Number(process.env.MEGA_BATCH_START_DEBOUNCE_MAX_MS || 15000));
+            // Si se acumulan suficientes pendientes, arrancar de inmediato aunque sigan llegando.
+            const START_MIN_PENDING = Math.max(1, Number(process.env.MEGA_BATCH_START_MIN_PENDING || 3));
             if (START_DEBOUNCE_MS) {
+                const startedAt = Date.now();
                 while (true) {
                     const lastAt = Number(st.lastEnqueueAt) || 0;
                     const delta = Date.now() - lastAt;
+                    const elapsed = Date.now() - startedAt;
                     if (st.pending.size > 0 && delta >= START_DEBOUNCE_MS) break;
+                    if (st.pending.size >= START_MIN_PENDING) break;
+                    if (START_DEBOUNCE_MAX_MS && elapsed >= START_DEBOUNCE_MAX_MS) break;
                     if (st.pending.size === 0) break;
                     await sleep(Math.min(500, Math.max(50, START_DEBOUNCE_MS - delta)));
                 }
