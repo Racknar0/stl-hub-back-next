@@ -27,6 +27,24 @@ const replicaProgressMap = new Map();
 //   currentReplicaAssetId:number|null, currentBackupAccountId:number|null }
 const megaBatchByMain = new Map();
 
+// Hold de quiet del batch (por cuenta MAIN): mientras esté activo, NO se pasa a backups.
+// Objetivo: permitir gaps largos (SCP lento) sin arrancar backups entre archivos.
+const megaBatchQuietHolds = globalThis.__megaBatchQuietHolds || new Map();
+globalThis.__megaBatchQuietHolds = megaBatchQuietHolds;
+
+function isMegaBatchQuietHoldActive(mainAccountId) {
+    try {
+        const id = Number(mainAccountId);
+        if (!Number.isFinite(id)) return false;
+        const entry = megaBatchQuietHolds.get(id);
+        if (!entry) return false;
+        const untilMs = Number(entry.untilMs || 0);
+        return Number.isFinite(untilMs) && untilMs > Date.now();
+    } catch {
+        return false;
+    }
+}
+
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1501,6 +1519,56 @@ export const holdUploadsActive = async (req, res) => {
     }
 };
 
+// POST /api/assets/hold-mega-batch-quiet (admin-only)
+// Mantiene un hold por cuenta MAIN para evitar pasar a BACKUP mientras el usuario sigue encolando por SCP.
+// Body:
+//  - mainAccountId: number (requerido)
+//  - minutes?: number (por defecto 20)
+//  - action?: 'start' | 'release' (por defecto 'start')
+//  - label?: string
+export const holdMegaBatchQuiet = async (req, res) => {
+    try {
+        const action = String(req.body?.action || 'start').toLowerCase();
+        const mainAccountId = Number(req.body?.mainAccountId);
+        if (!Number.isFinite(mainAccountId) || mainAccountId <= 0) {
+            return res.status(400).json({ message: 'mainAccountId requerido' });
+        }
+
+        // Release
+        if (action === 'release') {
+            const entry = megaBatchQuietHolds.get(mainAccountId);
+            if (entry) {
+                try { clearTimeout(entry.timeout); } catch {}
+                megaBatchQuietHolds.delete(mainAccountId);
+            }
+            return res.json({ ok: true, released: true, mainAccountId });
+        }
+
+        const label = String(req.body?.label || 'uploader-batch-quiet').slice(0, 120);
+        const minutesRaw = Number(req.body?.minutes ?? 20);
+        const minutes = Math.max(2, Math.min(6 * 60, Number.isFinite(minutesRaw) ? minutesRaw : 20)); // 2 min .. 6h
+        const ms = minutes * 60 * 1000;
+        const untilMs = Date.now() + ms;
+
+        // Reemplazar/renovar
+        const prev = megaBatchQuietHolds.get(mainAccountId);
+        if (prev) {
+            try { clearTimeout(prev.timeout); } catch {}
+            megaBatchQuietHolds.delete(mainAccountId);
+        }
+
+        const timeout = setTimeout(() => {
+            megaBatchQuietHolds.delete(mainAccountId);
+        }, ms);
+        megaBatchQuietHolds.set(mainAccountId, { untilMs, timeout, label });
+
+        return res.json({ ok: true, mainAccountId, untilMs, minutes, label });
+    } catch (e) {
+        console.error('[ASSETS] hold-mega-batch-quiet error:', e);
+        return res.status(500).json({ message: 'Error holding mega batch quiet', error: String(e.message || e) });
+    }
+};
+
 // GET /api/assets/uploads-root (admin-only, debug)
 export const getUploadsRoot = async (_req, res) => {
     try {
@@ -1997,7 +2065,14 @@ export async function enqueueToMegaBatch(assetId) {
                     if (!QUIET_MS) break;
                     if (!idleSince) idleSince = Date.now();
                     const idleDelta = Date.now() - idleSince;
-                    if (st.pending.size === 0 && idleDelta >= QUIET_MS) break;
+                    if (st.pending.size === 0) {
+                        // Si el usuario mantiene un hold activo (SCP lento), no arrancar backups todavía.
+                        if (isMegaBatchQuietHoldActive(mainId)) {
+                            await sleep(POLL_MS);
+                            continue;
+                        }
+                        if (idleDelta >= QUIET_MS) break;
+                    }
                     // Si entró algo durante el wait, el loop externo volverá a consumir pending
                     await sleep(POLL_MS);
                 }

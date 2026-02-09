@@ -30,6 +30,7 @@ import {
   getScpConfig,
   getUploadsRoot,
   holdUploadsActive,
+  holdMegaBatchQuiet,
   similarAssets,
 } from '../../controllers/asset.controller.js';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
@@ -110,6 +111,8 @@ router.get('/scp-config', getScpConfig);
 router.get('/uploads-root', getUploadsRoot);
 // Nuevo: mantener lock uploads-active durante sesiones largas (modo SCP / rellenar cola)
 router.post('/hold-uploads-active', holdUploadsActive);
+// Nuevo: mantener quiet del batch por cuenta MAIN (evita pasar a backups mientras se sigue encolando por SCP)
+router.post('/hold-mega-batch-quiet', holdMegaBatchQuiet);
 router.put('/:id', updateAsset);
 router.delete('/:id', deleteAsset);
 
