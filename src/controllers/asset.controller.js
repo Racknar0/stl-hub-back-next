@@ -54,6 +54,11 @@ function isLoginAccessDeniedError(err) {
     return msg.includes('access denied') || msg.includes('failed to login');
 }
 
+function isNotLoggedInError(err) {
+    const msg = String(err?.message || err || '').toLowerCase();
+    return msg.includes('not logged in') || msg.includes('exited 57') || msg.includes('no active session');
+}
+
 async function megaLoginWithProxyRotationOrThrow(role, payload, proxies, ctx, { maxTries = 10 } = {}) {
     const list = Array.isArray(proxies) ? proxies : [];
     if (!list.length) throw new Error(`[BATCH] Sin proxies válidos para ${role}. (requisito: nunca IP directa) ${ctx}`);
@@ -291,6 +296,61 @@ function removeEmptyDirsUp(startDir, stopDir) {
         }
     } catch (e) {
         console.warn('[CLEANUP] removeEmptyDirsUp warn:', e.message);
+    }
+}
+
+function envFlag(name, defaultValue = false) {
+    const raw = process.env[name];
+    if (raw == null) return !!defaultValue;
+    const v = String(raw).trim().toLowerCase();
+    if (['1', 'true', 'yes', 'y', 'on'].includes(v)) return true;
+    if (['0', 'false', 'no', 'n', 'off'].includes(v)) return false;
+    return !!defaultValue;
+}
+
+async function deleteLocalArchiveIfEligible(assetId, { requiredBackupAccountIds = [], ctx = '' } = {}) {
+    try {
+        // Por defecto: borrar el archivo local cuando termine MAIN + BACKUPs.
+        // Se puede desactivar seteando MEGA_DELETE_LOCAL_ARCHIVE_AFTER_UPLOAD=false
+        if (!envFlag('MEGA_DELETE_LOCAL_ARCHIVE_AFTER_UPLOAD', true)) return;
+
+        const a = await prisma.asset.findUnique({
+            where: { id: Number(assetId) },
+            select: { id: true, status: true, archiveName: true },
+        });
+        if (!a?.archiveName) return;
+        if (a.status !== 'PUBLISHED') return;
+
+        const required = (requiredBackupAccountIds || []).map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0);
+        if (required.length) {
+            const reps = await prisma.assetReplica.findMany({
+                where: { assetId: a.id, accountId: { in: required } },
+                select: { accountId: true, status: true },
+            });
+            const byAcc = new Map(reps.map((r) => [Number(r.accountId), r.status]));
+            const allCompleted = required.every((accId) => byAcc.get(accId) === 'COMPLETED');
+            if (!allCompleted) return;
+        }
+
+        const rel = String(a.archiveName || '').replace(/\\/g, '/').replace(/^\/+/, '');
+        const relWithArchives = rel.startsWith('archives/') ? rel : `archives/${rel}`;
+        const abs = path.resolve(path.join(UPLOADS_DIR, relWithArchives));
+        const root = path.resolve(ARCHIVES_DIR) + path.sep;
+        if (!abs.startsWith(root)) {
+            console.warn(`[BATCH][CLEANUP] skip delete (outside archives) asset=${a.id} abs=${abs}`);
+            return;
+        }
+        if (!fs.existsSync(abs)) return;
+
+        try {
+            fs.unlinkSync(abs);
+            removeEmptyDirsUp(path.dirname(abs), ARCHIVES_DIR);
+            console.log(`[BATCH][CLEANUP] deleted local archive asset=${a.id} ${ctx}`);
+        } catch (e) {
+            console.warn(`[BATCH][CLEANUP] delete warn asset=${a.id} msg=${e.message} ${ctx}`);
+        }
+    } catch (e) {
+        console.warn(`[BATCH][CLEANUP] error asset=${assetId} msg=${e.message} ${ctx}`);
     }
 }
 
@@ -1569,6 +1629,73 @@ export const holdMegaBatchQuiet = async (req, res) => {
     }
 };
 
+// POST /api/assets/cut-mega-batch-to-backups (admin-only)
+// Solicita cortar la fase MAIN del batch para una cuenta principal y pasar directamente a BACKUP.
+// Efecto:
+// - Termina el asset MAIN actual (no lo mata a mitad).
+// - Descarta assets MAIN pendientes/no iniciados (se marcan como FAILED para que aparezcan como ERROR y se puedan reintentar).
+// - Libera el hold batch-quiet si existe (para que BACKUP pueda arrancar).
+export const cutMegaBatchToBackups = async (req, res) => {
+    try {
+        const mainAccountId = Number(req.body?.mainAccountId);
+        if (!Number.isFinite(mainAccountId) || mainAccountId <= 0) {
+            return res.status(400).json({ message: 'mainAccountId requerido' });
+        }
+
+        const st = megaBatchByMain.get(mainAccountId);
+        if (!st || !st.running) {
+            return res.status(409).json({ message: 'No hay un batch activo para esta cuenta' });
+        }
+
+        // Pedir el corte
+        st.cutToBackupsRequested = true;
+        st.cutRequestedAt = Date.now();
+
+        // Liberar quiet-hold (si estaba activo) para permitir pasar a backups.
+        try {
+            const entry = megaBatchQuietHolds.get(mainAccountId);
+            if (entry) {
+                try { clearTimeout(entry.timeout); } catch {}
+                megaBatchQuietHolds.delete(mainAccountId);
+            }
+        } catch {}
+
+        const pendingIds = st.pending ? Array.from(st.pending) : [];
+        try { st.pending && st.pending.clear(); } catch {}
+
+        const mainQueue = Array.isArray(st.mainQueue) ? st.mainQueue.slice() : [];
+        const mainIndex = Number(st.mainIndex) || 0;
+        const dropFrom = st.currentAssetId ? (mainIndex + 1) : mainIndex;
+        const queuedIds = mainQueue.slice(Math.max(0, dropFrom));
+
+        const toFail = Array.from(new Set([...(pendingIds || []), ...(queuedIds || [])]))
+            .map((n) => Number(n))
+            .filter((n) => Number.isFinite(n) && n > 0);
+
+        // Marcar como FAILED los descartados para que el usuario los vea como ERROR/reintente.
+        for (const id of toFail) {
+            try {
+                await prisma.asset.update({ where: { id }, data: { status: 'FAILED' } });
+            } catch {}
+        }
+
+        return res.json({
+            ok: true,
+            mainAccountId,
+            phase: st.phase || null,
+            currentAssetId: st.currentAssetId ?? null,
+            dropped: {
+                pending: pendingIds.length,
+                mainQueueNotStarted: queuedIds.length,
+                failedIds: toFail.length,
+            },
+        });
+    } catch (e) {
+        console.error('[ASSETS] cut-mega-batch-to-backups error:', e);
+        return res.status(500).json({ message: 'Error cutting mega batch', error: String(e.message || e) });
+    }
+};
+
 // GET /api/assets/uploads-root (admin-only, debug)
 export const getUploadsRoot = async (_req, res) => {
     try {
@@ -2196,29 +2323,66 @@ export async function enqueueToMegaBatch(assetId) {
                 let idleSince = null;
 
                 while (true) {
-                    while (st.pending.size > 0) {
+                    while (st.pending.size > 0 && !st.cutToBackupsRequested) {
                         idleSince = null;
                         const batch = Array.from(st.pending);
                         st.pending.clear();
                         st.mainQueue = batch.slice();
                         st.mainIndex = 0;
-                        for (const aid of batch) {
+                        for (let i = 0; i < batch.length; i++) {
+                            const aid = batch[i];
+                            if (st.cutToBackupsRequested) {
+                                // Corte solicitado: no iniciar más MAIN en este batch.
+                                break;
+                            }
+
                             st.currentAssetId = aid;
                             try {
-                                const okId = await uploadOneAssetMainInCurrentSession(aid, mainAcc);
+                                // Si MEGAcmd pierde la sesión (proxy inestable / timeout / error previo),
+                                // los siguientes comandos fallan con "Not logged in" (exit 57). Reintentamos 1 vez con re-login.
+                                let okId = null;
+                                try {
+                                    okId = await uploadOneAssetMainInCurrentSession(aid, mainAcc);
+                                } catch (e) {
+                                    if (isNotLoggedInError(e)) {
+                                        console.warn(`[BATCH][MAIN] session lost before/while asset=${aid} -> relogin & retry`);
+                                        await megaLoginWithProxyRotationOrThrow('MAIN', mainPayload, proxies, ctxMain, { maxTries: 3 });
+                                        okId = await uploadOneAssetMainInCurrentSession(aid, mainAcc);
+                                    } else {
+                                        throw e;
+                                    }
+                                }
                                 uploadedAssetIds.push(okId);
                             } catch (e) {
                                 console.error(`[BATCH][MAIN] fail asset=${aid} msg=${e.message}`);
                                 progressMap.delete(aid);
                                 try { await prisma.asset.update({ where: { id: aid }, data: { status: 'FAILED' } }); } catch {}
+
+                                // Evitar fallos en cascada: si un comando deja a MEGAcmd sin sesión,
+                                // re-loguear para que el resto de la cola pueda continuar.
+                                try {
+                                    if (isNotLoggedInError(e) || isLoginAccessDeniedError(e) || String(e?.message || '').includes('mega-put exited')) {
+                                        await megaLoginWithProxyRotationOrThrow('MAIN', mainPayload, proxies, ctxMain, { maxTries: 3 });
+                                    }
+                                } catch (reLoginErr) {
+                                    console.warn(`[BATCH][MAIN] relogin-after-fail warn asset=${aid} msg=${reLoginErr?.message || reLoginErr}`);
+                                }
                             } finally {
                                 // En batch dejamos el progreso en memoria hasta 100 o fallo; limpiar best-effort
                                 try { progressMap.delete(aid); } catch {}
                                 st.mainIndex = (Number(st.mainIndex) || 0) + 1;
                                 st.currentAssetId = null;
                             }
+
+                            // Si alguien pidió corte mientras subíamos este asset, salimos del batch y pasamos a BACKUP.
+                            if (st.cutToBackupsRequested) {
+                                break;
+                            }
                         }
                     }
+
+                    // Corte solicitado: no esperar quiet window y pasar a BACKUP.
+                    if (st.cutToBackupsRequested) break;
 
                     // Sin pendientes: esperar quiet si está habilitado
                     if (!QUIET_MS) break;
@@ -2226,7 +2390,7 @@ export async function enqueueToMegaBatch(assetId) {
                     const idleDelta = Date.now() - idleSince;
                     if (st.pending.size === 0) {
                         // Si el usuario mantiene un hold activo (SCP lento), no arrancar backups todavía.
-                        if (isMegaBatchQuietHoldActive(mainId)) {
+                        if (isMegaBatchQuietHoldActive(mainId) && !st.cutToBackupsRequested) {
                             await sleep(POLL_MS);
                             continue;
                         }
@@ -2249,7 +2413,21 @@ export async function enqueueToMegaBatch(assetId) {
                     .map((b) => b.backupAccount)
                     .filter((b) => b && b.type === 'backup');
 
+                const eligibleBackupAccountIds = backupAccounts
+                    .filter((b) => b && b.credentials)
+                    .map((b) => Number(b.id))
+                    .filter((n) => Number.isFinite(n) && n > 0);
+
                 if (!backupAccounts.length || !uploadedAssetIds.length) {
+                    // Si no hay backups configurados, opcionalmente borrar el archivo local tras MAIN.
+                    // Esto deja al sistema dependiendo de MEGA para el archivo grande.
+                    if (!backupAccounts.length && uploadedAssetIds.length) {
+                        for (const aid of uploadedAssetIds) {
+                            await deleteLocalArchiveIfEligible(aid, { requiredBackupAccountIds: [], ctx: `mainAccId=${mainAcc.id}` });
+                        }
+                    }
+                    st.cutToBackupsRequested = false;
+                    st.cutRequestedAt = 0;
                     st.phase = null;
                     st.backupQueue = [];
                     st.backupIndex = 0;
@@ -2314,8 +2492,23 @@ export async function enqueueToMegaBatch(assetId) {
                     await megaLogoutBestEffort(`POST ${bctx}`);
                 }
 
+                // Al finalizar el batch de BACKUPs, opcionalmente borrar el archivo local
+                // SOLO si MAIN está ok y todas las réplicas requeridas quedaron COMPLETED.
+                try {
+                    for (const aid of uploadedAssetIds) {
+                        await deleteLocalArchiveIfEligible(aid, {
+                            requiredBackupAccountIds: eligibleBackupAccountIds,
+                            ctx: `mainAccId=${mainAcc.id} backups=${eligibleBackupAccountIds.length}`,
+                        });
+                    }
+                } catch {}
+
                 st.phase = null;
                 st.currentBackupAccountId = null;
+
+                // Reset del flag de corte para futuros batches.
+                st.cutToBackupsRequested = false;
+                st.cutRequestedAt = 0;
             }, `BATCH-MAIN-${mainId}`);
         } catch (e) {
             console.error(`[BATCH] error mainAccId=${mainId} msg=${e.message}`);

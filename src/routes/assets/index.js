@@ -31,6 +31,7 @@ import {
   getUploadsRoot,
   holdUploadsActive,
   holdMegaBatchQuiet,
+  cutMegaBatchToBackups,
   similarAssets,
 } from '../../controllers/asset.controller.js';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
@@ -113,6 +114,8 @@ router.get('/uploads-root', getUploadsRoot);
 router.post('/hold-uploads-active', holdUploadsActive);
 // Nuevo: mantener quiet del batch por cuenta MAIN (evita pasar a backups mientras se sigue encolando por SCP)
 router.post('/hold-mega-batch-quiet', holdMegaBatchQuiet);
+// Nuevo: cortar cola (pasar a BACKUP y descartar MAIN pendientes)
+router.post('/cut-mega-batch-to-backups', cutMegaBatchToBackups);
 router.put('/:id', updateAsset);
 router.delete('/:id', deleteAsset);
 
