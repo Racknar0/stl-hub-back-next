@@ -891,6 +891,12 @@ async function megaFindMatchesExpected(baseB, expectedSet, { timeoutMs = 180000 
   }
 }
 
+function truncateNotificationBody(s, max = 191) {
+  if (s == null) return null;
+  const txt = String(s);
+  return txt.length <= max ? txt : txt.slice(0, max);
+}
+
 // Sincroniza todos los assets publicados de una cuenta main hacia sus backups (solo los faltantes)
 export const syncMainToBackups = async (req, res) => {
   const mainId = Number(req.params.id);
@@ -924,6 +930,32 @@ export const syncMainToBackups = async (req, res) => {
       return log.info(m);
     };
     logSync(`Sincronización iniciada main=${mainId} assets_publicados=${assets.length} backups=${backupAccounts.length}`);
+
+    // Acumular fallos parciales para notificar en CRON aunque el proceso continúe.
+    const syncIssues = {
+      bulkScanFailedBackups: [],
+      downloadErrors: 0,
+      uploadErrors: 0,
+      tempMissing: 0,
+      replicaDbErrors: 0,
+      unexpectedErrors: 0,
+    };
+
+    const notifyAutomationError = async ({ title, body }) => {
+      try {
+        await prisma.notification.create({
+          data: {
+            title: String(title || 'Error sincronización MAIN->BACKUPS').slice(0, 160),
+            body: truncateNotificationBody(body, 191),
+            status: 'UNREAD',
+            type: 'AUTOMATION',
+            typeStatus: 'ERROR',
+          },
+        });
+      } catch (e) {
+        logSync('[NOTIF][SYNC][FAIL] No se pudo crear notificación: ' + String(e.message).slice(0, 200), 'warn');
+      }
+    };
 
     if (!assets.length) {
       return res.json({ ok: true, message: 'La cuenta main no tiene assets publicados', actions: [] });
@@ -987,12 +1019,27 @@ export const syncMainToBackups = async (req, res) => {
         const expectedSet = buildExpectedRemoteFilesSet(baseB, assets);
         let foundSet = null;
         try {
-          foundSet = await megaFindMatchesExpected(baseB, expectedSet, {
-            timeoutMs: Number(process.env.MEGA_BULK_SCAN_TIMEOUT_MS) || 180000,
-          });
-          logSync(`Backup ${b.id}: bulk-scan OK found=${foundSet.size}/${expectedSet.size}`, 'verbose');
+          const attempts = Math.max(1, Number(process.env.MEGA_BULK_SCAN_ATTEMPTS) || 2);
+          let lastErr = null;
+          for (let i = 1; i <= attempts; i++) {
+            try {
+              const timeoutMs = (Number(process.env.MEGA_BULK_SCAN_TIMEOUT_MS) || 180000) + (i - 1) * 60000;
+              foundSet = await megaFindMatchesExpected(baseB, expectedSet, { timeoutMs });
+              lastErr = null;
+              break;
+            } catch (e) {
+              lastErr = e;
+              foundSet = null;
+            }
+          }
+          if (foundSet) {
+            logSync(`Backup ${b.id}: bulk-scan OK found=${foundSet.size}/${expectedSet.size}`, 'verbose');
+          } else {
+            throw lastErr || new Error('bulk-scan failed');
+          }
         } catch (e) {
           foundSet = null;
+          syncIssues.bulkScanFailedBackups.push(b.id);
           logSync(`Backup ${b.id}: bulk-scan FAIL -> fallback mega-ls por archivo. err=${String(e.message).slice(0,200)}`, 'warn');
         }
 
@@ -1038,6 +1085,7 @@ export const syncMainToBackups = async (req, res) => {
                 scanStats.get(b.id).createdReplicaRows++;
                 console.log(`[SYNC][SCAN] replica DB creada asset=${a.id} backup=${b.id} link=SKIPPED`);
               } catch (e) {
+                syncIssues.replicaDbErrors++;
                 console.warn(`[SYNC][SCAN] warn creando replica faltante asset=${a.id} backup=${b.id} : ${e.message}`);
               }
             } else if (!existingReplica.megaLink && ENABLE_PUBLIC_LINK_EXPORT) {
@@ -1125,6 +1173,7 @@ export const syncMainToBackups = async (req, res) => {
           await runCmd('mega-get', [remoteFile, destLocal]);
           logSync(`Asset ${a.id} descargado`,'verbose');
         } catch (e) {
+          syncIssues.downloadErrors++;
           logSync(`Error descargando asset ${a.id}: ${e.message}`,'warn');
         }
       }
@@ -1163,6 +1212,7 @@ export const syncMainToBackups = async (req, res) => {
           const localPath = path.join(SYNC_DIR, a.slug, fileName); // siempre usamos el descargado recién
           if (!fs.existsSync(localPath)) {
             console.warn(`[SYNC][UPLOAD] archivo temporal no encontrado asset=${a.id} esperado=${localPath}`);
+            syncIssues.tempMissing++;
             fail++;
             continue;
           }
@@ -1171,6 +1221,7 @@ export const syncMainToBackups = async (req, res) => {
             await runCmd('mega-put', [localPath, remoteFolder]);
             ok++;
           } catch (e) {
+            syncIssues.uploadErrors++;
             logSync(`Error subiendo asset ${a.id} a backup ${b.id}: ${e.message}`,'warn');
             fail++;
             continue;
@@ -1181,28 +1232,38 @@ export const syncMainToBackups = async (req, res) => {
 
           const existing = replicas.find(r => r.assetId === a.id && r.accountId === b.id);
           if (!existing) {
-            await prisma.assetReplica.create({
-              data: {
-                assetId: a.id,
-                accountId: b.id,
-                status: 'COMPLETED',
-                megaLink: ENABLE_PUBLIC_LINK_EXPORT ? (publicLink || undefined) : undefined,
-                remotePath: path.posix.join(baseB, a.slug),
-                startedAt: new Date(),
-                finishedAt: new Date()
-              }
-            });
+            try {
+              await prisma.assetReplica.create({
+                data: {
+                  assetId: a.id,
+                  accountId: b.id,
+                  status: 'COMPLETED',
+                  megaLink: ENABLE_PUBLIC_LINK_EXPORT ? (publicLink || undefined) : undefined,
+                  remotePath: path.posix.join(baseB, a.slug),
+                  startedAt: new Date(),
+                  finishedAt: new Date()
+                }
+              });
+            } catch (e) {
+              syncIssues.replicaDbErrors++;
+              logSync(`Warn guardando replica DB asset=${a.id} backup=${b.id}: ${e.message}`,'warn');
+            }
           } else {
-            await prisma.assetReplica.update({
-              where: { id: existing.id },
-              data: {
-                status: 'COMPLETED',
-                // Sin generación de link; se conserva el existente si hubiera
-                megaLink: ENABLE_PUBLIC_LINK_EXPORT ? (publicLink || existing.megaLink || undefined) : existing.megaLink || undefined,
-                remotePath: path.posix.join(baseB, a.slug),
-                finishedAt: new Date()
-              }
-            });
+            try {
+              await prisma.assetReplica.update({
+                where: { id: existing.id },
+                data: {
+                  status: 'COMPLETED',
+                  // Sin generación de link; se conserva el existente si hubiera
+                  megaLink: ENABLE_PUBLIC_LINK_EXPORT ? (publicLink || existing.megaLink || undefined) : existing.megaLink || undefined,
+                  remotePath: path.posix.join(baseB, a.slug),
+                  finishedAt: new Date()
+                }
+              });
+            } catch (e) {
+              syncIssues.replicaDbErrors++;
+              logSync(`Warn actualizando replica DB asset=${a.id} backup=${b.id}: ${e.message}`,'warn');
+            }
           }
           actions.push({ backupId: b.id, assetId: a.id, status: 'COMPLETED', newLink: false });
           globalDone++;
@@ -1251,6 +1312,33 @@ export const syncMainToBackups = async (req, res) => {
   logSync('Error en limpieza final: ' + e.message,'warn');
     }
 
+    // Si hubo fallos parciales, crear notificación para que el CRON (cada 4h) alerte.
+    try {
+      const hadIssues =
+        syncIssues.bulkScanFailedBackups.length > 0 ||
+        syncIssues.downloadErrors > 0 ||
+        syncIssues.uploadErrors > 0 ||
+        syncIssues.tempMissing > 0 ||
+        syncIssues.replicaDbErrors > 0 ||
+        syncIssues.unexpectedErrors > 0;
+      if (hadIssues) {
+        const body = [
+          `main=${mainId}`,
+          `bulkScanFailBackups=${syncIssues.bulkScanFailedBackups.join(',') || '0'}`,
+          `downloadErrors=${syncIssues.downloadErrors}`,
+          `uploadErrors=${syncIssues.uploadErrors}`,
+          `tempMissing=${syncIssues.tempMissing}`,
+          `replicaDbErrors=${syncIssues.replicaDbErrors}`,
+        ].join(' | ');
+        await notifyAutomationError({
+          title: 'Fallo parcial sync MAIN->BACKUPS',
+          body,
+        });
+      }
+    } catch (e) {
+      logSync('[NOTIF][SYNC][WARN] No se pudo evaluar/emitir notificación: ' + String(e.message).slice(0, 200), 'warn');
+    }
+
     return res.json({
       ok: true,
       totalUploads,
@@ -1260,9 +1348,24 @@ export const syncMainToBackups = async (req, res) => {
       perBackup: perBackupUploadStats,
       cleanedCacheFiles,
       cleanedCacheDir,
-      remainingCacheFiles
+      remainingCacheFiles,
+      issues: syncIssues
     });
   } catch (e) {
+  // Notificar error general (para cron) y devolver 500.
+  try {
+    await prisma.notification.create({
+      data: {
+        title: 'Error general sync MAIN->BACKUPS',
+        body: truncateNotificationBody(`main=${mainId} err=${String(e.message || e).slice(0, 240)}`, 191),
+        status: 'UNREAD',
+        type: 'AUTOMATION',
+        typeStatus: 'ERROR',
+      },
+    });
+  } catch (ne) {
+    log.warn('[NOTIF][SYNC][FAIL] No se pudo crear notificación de error general: ' + String(ne.message).slice(0, 200));
+  }
   logSync('Error general en sincronización: ' + e.message,'error');
     return res.status(500).json({ message: 'Error sincronizando', error: e.message });
   }
