@@ -780,6 +780,117 @@ export const listAccountAssets = async (req, res) => {
   }
 };
 
+function normalizeRemotePathForCompare(p) {
+  const s = String(p || '').replaceAll('\\', '/').trim();
+  if (!s) return '';
+  const withSlash = s.startsWith('/') ? s : `/${s}`;
+  // Normalizar '..', dobles slashes, etc.
+  return path.posix.normalize(withSlash).toLowerCase();
+}
+
+function buildExpectedRemoteFilesSet(baseB, assets) {
+  const set = new Set();
+  for (const a of assets || []) {
+    if (!a?.archiveName) continue;
+    const fileName = path.basename(a.archiveName);
+    const remoteFolder = path.posix.join(baseB, a.slug);
+    const remoteFile = path.posix.join(remoteFolder, fileName);
+    const norm = normalizeRemotePathForCompare(remoteFile);
+    if (norm) set.add(norm);
+  }
+  return set;
+}
+
+async function megaLsExistsWithRetries(remoteFile, { attempts = 2, waitMs = 600, timeoutMs = MEGA_READONLY_TIMEOUT_MS } = {}) {
+  let lastErr = null;
+  for (let i = 0; i <= attempts; i++) {
+    try {
+      await runCmdWithTimeout('mega-ls', [remoteFile], timeoutMs);
+      return true;
+    } catch (e) {
+      lastErr = e;
+      if (i < attempts) {
+        await new Promise(r => setTimeout(r, waitMs * (i + 1)));
+      }
+    }
+  }
+  // Mantener lastErr para debugging si se necesitara
+  void lastErr;
+  return false;
+}
+
+// Escaneo bulk: ejecuta mega-find una sola vez y sólo guarda matches que están en expectedSet.
+// Esto evita N llamadas a mega-ls por asset y reduce las requests de forma masiva.
+async function megaFindMatchesExpected(baseB, expectedSet, { timeoutMs = 180000 } = {}) {
+  if (!expectedSet || expectedSet.size === 0) return new Set();
+
+  const runOne = (args) => new Promise((resolve, reject) => {
+    const child = spawn('mega-find', args, { shell: true });
+    let buf = '';
+    const found = new Set();
+    let settled = false;
+
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      try { clearTimeout(to); } catch {}
+      if (err) return reject(err);
+      return resolve(found);
+    };
+
+    const to = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch {}
+      try { child.kill(); } catch {}
+      finish(new Error(`mega-find timeout after ${timeoutMs}ms`));
+    }, Math.max(1000, Number(timeoutMs) || 180000));
+
+    const onChunk = (d) => {
+      buf += d.toString();
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).replace(/\r$/, '');
+        buf = buf.slice(idx + 1);
+        const norm = normalizeRemotePathForCompare(line);
+        if (norm && expectedSet.has(norm)) {
+          found.add(norm);
+          // Cortar temprano: si ya encontramos todos los esperados, terminar el proceso.
+          if (found.size >= expectedSet.size) {
+            try { child.kill('SIGKILL'); } catch {}
+            try { child.kill(); } catch {}
+            return;
+          }
+        }
+      }
+    };
+
+    child.stdout.on('data', onChunk);
+    child.stderr.on('data', () => { /* mega-find a veces usa stderr para logs; ignorar */ });
+    child.on('error', (e) => finish(e));
+    child.on('close', (code) => {
+      // procesar remanente
+      try {
+        const rem = buf.trim();
+        if (rem) {
+          const norm = normalizeRemotePathForCompare(rem);
+          if (norm && expectedSet.has(norm)) found.add(norm);
+        }
+      } catch {}
+      if (code === 0) return finish();
+      // Si lo matamos nosotros para cortar temprano, algunos entornos devuelven code!=0.
+      // Aun así, si ya encontramos todos, consideramos OK.
+      if (found.size >= expectedSet.size) return finish();
+      return finish(new Error(`mega-find exited ${code}`));
+    });
+  });
+
+  // Orden preferido y fallback por compatibilidad.
+  try {
+    return await runOne([baseB, '--type=f']);
+  } catch {
+    return await runOne(['--type=f', baseB]);
+  }
+}
+
 // Sincroniza todos los assets publicados de una cuenta main hacia sus backups (solo los faltantes)
 export const syncMainToBackups = async (req, res) => {
   const mainId = Number(req.params.id);
@@ -871,6 +982,20 @@ export const syncMainToBackups = async (req, res) => {
 
         scanStats.set(b.id, { existing: 0, missing: 0, createdReplicaRows: 0 });
 
+        // NUEVO: escaneo bulk por backup (1 mega-find) y comparación local.
+        // Reduce drásticamente las requests vs mega-ls por archivo.
+        const expectedSet = buildExpectedRemoteFilesSet(baseB, assets);
+        let foundSet = null;
+        try {
+          foundSet = await megaFindMatchesExpected(baseB, expectedSet, {
+            timeoutMs: Number(process.env.MEGA_BULK_SCAN_TIMEOUT_MS) || 180000,
+          });
+          logSync(`Backup ${b.id}: bulk-scan OK found=${foundSet.size}/${expectedSet.size}`, 'verbose');
+        } catch (e) {
+          foundSet = null;
+          logSync(`Backup ${b.id}: bulk-scan FAIL -> fallback mega-ls por archivo. err=${String(e.message).slice(0,200)}`, 'warn');
+        }
+
         for (const a of assets) {
           if (!a.archiveName) continue;
             // Comprobación remota directa
@@ -878,12 +1003,15 @@ export const syncMainToBackups = async (req, res) => {
           const remoteFolder = path.posix.join(baseB, a.slug);
           const remoteFile = path.posix.join(remoteFolder, fileName);
           let exists = false;
-          try {
-            const ls = await runCmd('mega-ls', [remoteFile]);
-            const txt = (ls.out || ls.err || '').toString();
-            if (txt.toLowerCase().includes(fileName.toLowerCase())) exists = true;
-            else exists = true; // si mega-ls no falla pero no contiene nombre, asumimos existencia (MEGAcmd a veces lista sin formato)
-          } catch { exists = false; }
+          if (foundSet) {
+            exists = foundSet.has(normalizeRemotePathForCompare(remoteFile));
+          } else {
+            exists = await megaLsExistsWithRetries(remoteFile, {
+              attempts: Number(process.env.MEGA_EXISTS_RETRIES) || 2,
+              waitMs: Number(process.env.MEGA_EXISTS_RETRY_WAIT_MS) || 600,
+              timeoutMs: MEGA_READONLY_TIMEOUT_MS,
+            });
+          }
 
           if (exists) {
             const key = `${a.id}:${b.id}`;
