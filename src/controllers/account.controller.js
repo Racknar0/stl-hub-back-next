@@ -372,21 +372,28 @@ export const testAccount = async (req, res) => {
   // Datos básicos (una sola línea)
   log.verbose(`Cuenta alias=${acc.alias} email=${acc.email} base=${acc.baseFolder}`);
 
+    const _truthy = (v) => ['1', 'true', 'yes', 'y', 'on'].includes(String(v ?? '').trim().toLowerCase());
+    const source = String(req.query?.source ?? req.body?.source ?? '').trim();
+    const force = _truthy(req.query?.force) || _truthy(req.body?.force);
+
     // Minimizar auth requests: si hay subidas activas (batch/SCP/cron), no correr test.
     // MEGAcmd es global y un test aquí mete mega-login/logout extra y puede interferir.
     try {
       const mod = await import('../utils/uploadsActiveFlag.js');
       if (typeof mod?.isUploadsActive === 'function' && mod.isUploadsActive()) {
-        skippedDueToUploadsActive = true;
-        log.warn(`[ACCOUNTS][TEST] uploads activos: skip test accId=${id} alias=${acc.alias || '--'}`);
-        // Importante: NO devolvemos 409 para no marcarlo como "fallo" en el frontend.
-        // El test se omite para no interferir con el batch/MEGAcmd global.
-        return res.status(200).json({ ok: false, busy: true, skipped: true, message: 'Hay subidas activas. Test omitido para no interferir. Reintenta más tarde.' });
+        if (!force) {
+          skippedDueToUploadsActive = true;
+          log.warn(`[ACCOUNTS][TEST] uploads activos: skip test accId=${id} alias=${acc.alias || '--'}`);
+          // Importante: NO devolvemos 409 para no marcarlo como "fallo" en el frontend.
+          // El test se omite para no interferir con el batch/MEGAcmd global.
+          return res.status(200).json({ ok: false, busy: true, skipped: true, message: 'Hay subidas activas. Test omitido para no interferir. Reintenta más tarde.' });
+        }
+        log.warn(`[ACCOUNTS][TEST][FORCE] uploads activos pero se fuerza test accId=${id} alias=${acc.alias || '--'} source=${source || '--'}`);
       }
       if (typeof mod?.startUploadsActive === 'function') {
         // Mientras el usuario está "conectando" (y puede tardar), activamos el flag
         // para que el CRON no intente mega-logout/reset en paralelo.
-        stopUploadsFlag = mod.startUploadsActive(`connect-test:acc:${id}`);
+        stopUploadsFlag = mod.startUploadsActive(`${force ? 'connect-test-force' : 'connect-test'}:acc:${id}${source ? `:src:${source}` : ''}`);
       }
     } catch (e) {
       // No bloqueamos el test si no se pudo consultar/activar el flag
