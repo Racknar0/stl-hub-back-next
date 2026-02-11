@@ -59,6 +59,19 @@ function isNotLoggedInError(err) {
     return msg.includes('not logged in') || msg.includes('exited 57') || msg.includes('no active session');
 }
 
+function isMegaPutStallError(err) {
+    const msg = String(err?.message || err || '').toLowerCase();
+    return msg.includes('mega_put_stall_timeout') || msg.includes('stall timeout') || msg.includes('no progress for');
+}
+
+function rotateArray(arr, offset = 0) {
+    const a = Array.isArray(arr) ? arr : [];
+    if (!a.length) return [];
+    const n = ((Number(offset) || 0) % a.length + a.length) % a.length;
+    if (!n) return a.slice();
+    return a.slice(n).concat(a.slice(0, n));
+}
+
 async function megaLoginWithProxyRotationOrThrow(role, payload, proxies, ctx, { maxTries = 10 } = {}) {
     const list = Array.isArray(proxies) ? proxies : [];
     if (!list.length) throw new Error(`[BATCH] Sin proxies válidos para ${role}. (requisito: nunca IP directa) ${ctx}`);
@@ -1816,6 +1829,143 @@ async function safeMkdir(remotePath) {
     });
 }
 
+function killProcessTreeBestEffort(child, label = 'PROC') {
+    try {
+        if (!child?.pid) return;
+        const pid = Number(child.pid);
+        if (!Number.isFinite(pid) || pid <= 0) return;
+
+        if (process.platform === 'win32') {
+            try {
+                // /T mata el árbol; /F fuerza. No esperamos el exit.
+                spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { shell: true });
+                console.warn(`[${label}] taskkill sent pid=${pid}`);
+                return;
+            } catch {}
+        }
+
+        // Linux/macOS: si el proceso fue lanzado detached, intentamos matar grupo.
+        try { process.kill(-pid, 'SIGKILL'); } catch {}
+        try { child.kill('SIGKILL'); } catch {}
+        try { child.kill(); } catch {}
+    } catch {}
+}
+
+async function megaPutWithProgressAndStall({
+    srcPath,
+    remotePath,
+    progressKey,
+    logPrefix,
+    stallTimeoutMs,
+    onProgress,
+}) {
+    const putCmd = 'mega-put';
+    const timeoutMs = Math.max(0, Number(stallTimeoutMs) || 0);
+    const startedAt = Date.now();
+
+    return await new Promise((resolve, reject) => {
+        const child = spawn(putCmd, [srcPath, remotePath], { shell: true });
+        attachAutoAcceptTerms(child, logPrefix || 'MEGA PUT');
+
+        let settled = false;
+        let lastLogged = -1;
+        let lastPct = -1;
+        let lastProgressAt = Date.now();
+        let lastAnyOutputAt = Date.now();
+        let stallTimer = null;
+
+        const bumpOutput = () => {
+            lastAnyOutputAt = Date.now();
+        };
+
+        const noteProgress = (p) => {
+            const pct = Math.max(0, Math.min(100, Number(p)));
+            if (!Number.isFinite(pct)) return;
+
+            // Consideramos progreso "real" cuando aumenta.
+            if (pct > lastPct) {
+                lastPct = pct;
+                lastProgressAt = Date.now();
+            }
+
+            try {
+                if (progressKey) {
+                    const prev = replicaProgressMap.get(progressKey) || 0;
+                    if (pct === 100 || pct >= prev + 1) replicaProgressMap.set(progressKey, pct);
+                }
+            } catch {}
+
+            try { onProgress && onProgress(pct); } catch {}
+
+            if (pct === 100 || pct >= lastLogged + 5) {
+                lastLogged = pct;
+                if (logPrefix) console.log(`[PROGRESO] ${logPrefix} ${pct}%`);
+            }
+        };
+
+        const parseProgress = (buf) => {
+            bumpOutput();
+            const txt = buf.toString();
+            let last = null;
+            const re = /([0-9]{1,3}(?:\.[0-9]+)?)\s*%/g;
+            let m;
+            while ((m = re.exec(txt)) !== null) last = m[1];
+            if (last !== null) {
+                const p = parseFloat(last);
+                if (Number.isFinite(p)) noteProgress(p);
+            }
+            if (/upload finished/i.test(txt)) {
+                noteProgress(100);
+            }
+        };
+
+        const cleanup = () => {
+            if (stallTimer) clearInterval(stallTimer);
+            stallTimer = null;
+        };
+
+        const fail = (err) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            reject(err);
+        };
+
+        const ok = () => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve();
+        };
+
+        if (timeoutMs > 0) {
+            stallTimer = setInterval(() => {
+                const now = Date.now();
+                const idleMs = now - lastProgressAt;
+                if (idleMs < timeoutMs) return;
+
+                const aliveMs = now - lastAnyOutputAt;
+                console.warn(
+                    `[BATCH][STALL] mega-put sin progreso ${Math.round(idleMs / 1000)}s (aliveOutput=${Math.round(aliveMs / 1000)}s) lastPct=${lastPct} since=${Math.round((now - startedAt) / 1000)}s ${logPrefix || ''}`
+                );
+                try { killProcessTreeBestEffort(child, logPrefix || 'MEGA PUT'); } catch {}
+                fail(new Error(`MEGA_PUT_STALL_TIMEOUT no progress for ${idleMs}ms`));
+            }, 1000);
+        }
+
+        child.stdout.on('data', (d) => parseProgress(d));
+        child.stderr.on('data', (d) => parseProgress(d));
+        child.on('error', (e) => {
+            try { killProcessTreeBestEffort(child, logPrefix || 'MEGA PUT'); } catch {}
+            fail(e);
+        });
+        child.on('close', (code) => {
+            if (settled) return;
+            code === 0 ? ok() : fail(new Error(`${putCmd} exited ${code}`));
+        });
+    });
+}
+
 function pickTwoStickyProxies() {
     const proxies = listMegaProxies({});
     if (!proxies.length) return { proxies: [], mainProxy: null, backupProxy: null };
@@ -2164,36 +2314,19 @@ async function replicateOneAssetToBackupInCurrentSession(assetId, backupAcc) {
 
     console.log(`[BATCH][BACKUP] asset=${asset.id} -> backupAcc=${backupAcc.id} path=${remotePath}`);
 
-    const putCmd = 'mega-put';
     const exportCmd = 'mega-export';
     let publicLink = null;
 
     await safeMkdir(remotePath);
     const fileName = path.basename(archiveAbs);
-    await new Promise((resolve, reject) => {
-        const child = spawn(putCmd, [archiveAbs, remotePath], { shell: true });
-        attachAutoAcceptTerms(child, `REPLICA PUT acc=${backupAcc.id}`);
-        let lastLogged = -1;
-        const parseProgress = (buf) => {
-            const txt = buf.toString();
-            let last = null;
-            const re = /([0-9]{1,3}(?:\.[0-9]+)?)\s*%/g;
-            let m;
-            while ((m = re.exec(txt)) !== null) last = m[1];
-            if (last !== null) {
-                const p = Math.max(0, Math.min(100, parseFloat(last)));
-                const key = `${asset.id}:${backupAcc.id}`;
-                const prev = replicaProgressMap.get(key) || 0;
-                if (p === 100 || p >= prev + 1) replicaProgressMap.set(key, p);
-                if (p === 100 || p >= lastLogged + 5) {
-                    lastLogged = p;
-                    console.log(`[PROGRESO] asset=${asset.id} backup=${backupAcc.id} ${p}%`);
-                }
-            }
-        };
-        child.stdout.on('data', (d) => parseProgress(d));
-        child.stderr.on('data', (d) => parseProgress(d));
-        child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`${putCmd} exited ${code}`))));
+    const stallTimeoutMs = Number(process.env.MEGA_REPLICA_STALL_TIMEOUT_MS) || 5 * 60 * 1000;
+    const progressKey = `${asset.id}:${backupAcc.id}`;
+    await megaPutWithProgressAndStall({
+        srcPath: archiveAbs,
+        remotePath,
+        progressKey,
+        logPrefix: `asset=${asset.id} backup=${backupAcc.id}`,
+        stallTimeoutMs,
     });
 
     try {
@@ -2466,7 +2599,36 @@ export async function enqueueToMegaBatch(assetId) {
                     for (const aid of uploadedAssetIds) {
                         st.currentReplicaAssetId = aid;
                         try {
-                            await replicateOneAssetToBackupInCurrentSession(aid, b);
+                            const maxStallRetries = Math.max(0, Number(process.env.MEGA_REPLICA_STALL_MAX_RETRIES) || 4);
+                            const backoffBaseMs = Math.max(0, Number(process.env.MEGA_REPLICA_STALL_BACKOFF_MS) || 30000);
+
+                            let attempt = 0;
+                            // Intento 0 = normal; reintentos sólo si detectamos stall.
+                            while (true) {
+                                try {
+                                    if (attempt > 0) {
+                                        console.warn(`[BATCH][BACKUP][RETRY] asset=${aid} backupAcc=${b.id} attempt=${attempt + 1}/${maxStallRetries + 1} (stall)`);
+                                    }
+                                    await replicateOneAssetToBackupInCurrentSession(aid, b);
+                                    break;
+                                } catch (e) {
+                                    const msg = String(e?.message || e || '');
+                                    const isStall = isMegaPutStallError(e);
+                                    if (!isStall || attempt >= maxStallRetries) throw e;
+
+                                    const rotated = rotateArray(orderedBackupProxies, attempt + 1);
+                                    console.warn(`[BATCH][BACKUP][STALL] asset=${aid} backupAcc=${b.id} -> relogin + rotate proxy. err=${msg.slice(0, 200)} ${bctx}`);
+
+                                    try { await megaLogoutBestEffort(`STALL-RETRY ${bctx} asset=${aid}`); } catch {}
+                                    await megaLoginWithProxyRotationOrThrow('BACKUP', payload, rotated, `${bctx} stallRetry=${attempt + 1}`, { maxTries: 10 });
+                                    const backoffMs = backoffBaseMs * Math.max(1, attempt + 1);
+                                    if (backoffMs) {
+                                        console.log(`[BATCH][BACKUP][STALL] backoff ${Math.round(backoffMs / 1000)}s asset=${aid} backupAcc=${b.id}`);
+                                        await sleep(backoffMs);
+                                    }
+                                    attempt += 1;
+                                }
+                            }
                         } catch (e) {
                             console.error(`[BATCH][BACKUP] fail asset=${aid} backupAcc=${b.id} msg=${e.message}`);
                             replicaProgressMap.delete(`${aid}:${b.id}`);
@@ -2928,45 +3090,13 @@ async function replicateAssetToBackupsSequential(assetId) {
                 console.log(`[MEGA][LOGIN][OK] ${rctx}`);
                 await safeMkdir(remotePath);
                 const fileName = path.basename(archiveAbs);
-                await new Promise((resolve, reject) => {
-                    const child = spawn(putCmd, [archiveAbs, remotePath], {
-                        shell: true,
-                    });
-                    attachAutoAcceptTerms(child, `REPLICA PUT acc=${b.id}`);
-                    let lastLogged = -1;
-                    const parseProgress = (buf) => {
-                        const txt = buf.toString();
-                        let last = null;
-                        const re = /([0-9]{1,3}(?:\.[0-9]+)?)\s*%/g;
-                        let m;
-                        while ((m = re.exec(txt)) !== null) last = m[1];
-                        if (last !== null) {
-                            const p = Math.max(
-                                0,
-                                Math.min(100, parseFloat(last))
-                            );
-                            if (p !== lastLogged) {
-                                lastLogged = p;
-                                if (p === 100 || p >= lastLogged + 5) {
-                                    lastLogged = p;
-                                    console.log(
-                                        `[PROGRESO] asset=${asset.id} backup=${b.id} ${p}%`
-                                    );
-                                }
-                                replicaProgressMap.set(
-                                    `${asset.id}:${b.id}`,
-                                    p
-                                );
-                            }
-                        }
-                    };
-                    child.stdout.on('data', (d) => parseProgress(d));
-                    child.stderr.on('data', (d) => parseProgress(d));
-                    child.on('close', (code) =>
-                        code === 0
-                            ? resolve()
-                            : reject(new Error(`${putCmd} exited ${code}`))
-                    );
+                const stallTimeoutMs = Number(process.env.MEGA_REPLICA_STALL_TIMEOUT_MS) || 5 * 60 * 1000;
+                await megaPutWithProgressAndStall({
+                    srcPath: archiveAbs,
+                    remotePath,
+                    progressKey: `${asset.id}:${b.id}`,
+                    logPrefix: `asset=${asset.id} backup=${b.id}`,
+                    stallTimeoutMs,
                 });
                 try {
                     const remoteFile = path.posix.join(remotePath, fileName);

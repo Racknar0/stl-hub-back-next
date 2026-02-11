@@ -362,6 +362,7 @@ export const testAccount = async (req, res) => {
   let didLogin = false;
   let stopUploadsFlag = null;
   let didSetProxy = false;
+  let skippedDueToUploadsActive = false;
   try {
     const id = Number(req.params.id);
   log.info(`Prueba cuenta iniciada id=${id}`);
@@ -376,8 +377,11 @@ export const testAccount = async (req, res) => {
     try {
       const mod = await import('../utils/uploadsActiveFlag.js');
       if (typeof mod?.isUploadsActive === 'function' && mod.isUploadsActive()) {
+        skippedDueToUploadsActive = true;
         log.warn(`[ACCOUNTS][TEST] uploads activos: skip test accId=${id} alias=${acc.alias || '--'}`);
-        return res.status(409).json({ ok: false, busy: true, message: 'Hay subidas activas. Reintenta el test más tarde.' });
+        // Importante: NO devolvemos 409 para no marcarlo como "fallo" en el frontend.
+        // El test se omite para no interferir con el batch/MEGAcmd global.
+        return res.status(200).json({ ok: false, busy: true, skipped: true, message: 'Hay subidas activas. Test omitido para no interferir. Reintenta más tarde.' });
       }
       if (typeof mod?.startUploadsActive === 'function') {
         // Mientras el usuario está "conectando" (y puede tardar), activamos el flag
@@ -604,6 +608,11 @@ export const testAccount = async (req, res) => {
   } finally {
     // Liberar el flag ANTES de decidir si hay subidas activas
     try { stopUploadsFlag && stopUploadsFlag() } catch {}
+
+    // Si el test fue omitido por uploads activos, no hacemos nada más.
+    if (skippedDueToUploadsActive) {
+      return;
+    }
 
     // Si hay subidas activas, no tocamos la sesión global.
     try {
