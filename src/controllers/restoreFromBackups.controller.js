@@ -3,6 +3,7 @@ import { decryptToJson } from '../utils/cryptoUtils.js'
 import { withMegaLock } from '../utils/megaQueue.js'
 import { log, isVerbose } from '../utils/logger.js'
 import { applyMegaProxy, listMegaProxies } from '../utils/megaProxy.js'
+import { megaCmdWithProgressAndStall, isMegaStallError } from '../utils/megaTransfer.js'
 import path from 'path'
 import fs from 'fs'
 import { spawn } from 'child_process'
@@ -35,6 +36,71 @@ function runCmd(cmd, args = [], { quiet=false } = {}) {
 function buildCtx(acc){
   if(!acc) return ''
   return `accId=${acc.id||'?'} alias=${acc.alias||'--'} email=${acc.email||'--'}`
+}
+
+const ROTATE_AFTER_DOWNLOAD_BYTES = Number(process.env.MEGA_ROTATE_AFTER_DOWNLOAD_BYTES || (3 * 1024 * 1024 * 1024));
+const MEGA_TRANSFER_STALL_TIMEOUT_MS = Number(process.env.MEGA_TRANSFER_STALL_TIMEOUT_MS || (5 * 60 * 1000));
+const MEGA_TRANSFER_STALL_MAX_RETRIES = Number(process.env.MEGA_TRANSFER_STALL_MAX_RETRIES || 2);
+const MEGA_TRANSFER_STALL_BACKOFF_MS = Number(process.env.MEGA_TRANSFER_STALL_BACKOFF_MS || 30000);
+
+function rotateIndex(i, len){
+  if (!len) return 0;
+  return (Number(i || 0) + 1) % len;
+}
+
+async function applyProxyByIndexOrThrow(proxies, idx, ctx){
+  if (!proxies?.length) throw new Error(`[RESTORE][PROXY] Sin proxies válidos (no se permite IP directa)${ctx ? ` ${ctx}` : ''}`);
+  const p = proxies[idx % proxies.length];
+  const r = await applyMegaProxy(p, { ctx: ctx || 'restore', timeoutMs: 15000, clearOnFail: false });
+  if (!r?.enabled) throw new Error(`[RESTORE][PROXY] apply failed proxy=${p?.proxyUrl || '--'} err=${String(r?.error || '').slice(0,160)}`);
+  log.info(`[RESTORE][PROXY][OK] ${p.proxyUrl}${ctx ? ` ${ctx}` : ''}`);
+  return p;
+}
+
+async function megaGetWithStallRetry({ remoteFile, localTemp, ctx, proxies, getProxyIndex, setProxyIndex, relogin }){
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    try {
+      await megaCmdWithProgressAndStall({
+        cmd: 'mega-get',
+        args: [remoteFile, localTemp],
+        label: 'RESTORE-DL',
+        stallTimeoutMs: MEGA_TRANSFER_STALL_TIMEOUT_MS,
+      });
+      return;
+    } catch (e) {
+      if (!isMegaStallError(e) || attempt > MEGA_TRANSFER_STALL_MAX_RETRIES) throw e;
+      log.warn(`[RESTORE][STALL][DL] sin progreso, rotate proxy + relogin (attempt=${attempt}/${MEGA_TRANSFER_STALL_MAX_RETRIES}) ${ctx}`);
+      setProxyIndex(rotateIndex(getProxyIndex(), proxies.length));
+      await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctx);
+      await relogin();
+      await new Promise(r => setTimeout(r, MEGA_TRANSFER_STALL_BACKOFF_MS));
+    }
+  }
+}
+
+async function megaPutWithStallRetry({ localTemp, remoteFile, ctx, proxies, getProxyIndex, setProxyIndex, relogin }){
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    try {
+      await megaCmdWithProgressAndStall({
+        cmd: 'mega-put',
+        args: [localTemp, remoteFile],
+        label: 'RESTORE-UP',
+        stallTimeoutMs: MEGA_TRANSFER_STALL_TIMEOUT_MS,
+      });
+      return;
+    } catch (e) {
+      if (!isMegaStallError(e) || attempt > MEGA_TRANSFER_STALL_MAX_RETRIES) throw e;
+      log.warn(`[RESTORE][STALL][UP] sin progreso, rotate proxy + relogin (attempt=${attempt}/${MEGA_TRANSFER_STALL_MAX_RETRIES}) ${ctx}`);
+      setProxyIndex(rotateIndex(getProxyIndex(), proxies.length));
+      await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctx);
+      await relogin();
+      await new Promise(r => setTimeout(r, MEGA_TRANSFER_STALL_BACKOFF_MS));
+    }
+  }
 }
 
 async function ensureProxyOrThrow(ctx) {
@@ -124,9 +190,18 @@ export const syncBackupsToMain = async (req, res) => {
     const needDownload = new Map() // assetId -> asset
     const recovered = new Map() // assetId -> { fileName, localTemp, size }
 
+    // Proxies globales para este run (rotación por índice)
+    const proxies = listMegaProxies({});
+    if (!proxies.length) throw new Error('[RESTORE][PROXY] Sin proxies válidos (no se permite IP directa)');
+    let proxyIndex = 0;
+    const getProxyIndex = () => proxyIndex;
+    const setProxyIndex = (v) => { proxyIndex = v };
+
+    let downloadedBytesTotal = 0;
+
     // =============== FASE 1: SCAN MAIN (1 login) ===============
     await withMegaLock(async () => {
-      await ensureProxyOrThrow(buildCtx(main))
+      await applyProxyByIndexOrThrow(proxies, getProxyIndex(), buildCtx(main))
       const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
       await megaLogout(buildCtx(main))
       await megaLogin(payload, buildCtx(main))
@@ -178,9 +253,14 @@ export const syncBackupsToMain = async (req, res) => {
         if (!needDownload.size) break
         const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
         await withMegaLock(async () => {
-          await ensureProxyOrThrow(buildCtx(b))
-          await megaLogout(buildCtx(b))
-          await megaLogin(payloadB, buildCtx(b))
+          const bCtx = buildCtx(b)
+          const reloginB = async () => {
+            await megaLogout(bCtx)
+            await megaLogin(payloadB, bCtx)
+          }
+
+          await applyProxyByIndexOrThrow(proxies, getProxyIndex(), bCtx)
+          await reloginB()
           for (const [assetId, asset] of Array.from(needDownload.entries())){
             const remoteBaseB = (b.baseFolder||'/').replaceAll('\\','/')
             const remoteFolderB = path.posix.join(remoteBaseB, asset.slug)
@@ -191,9 +271,18 @@ export const syncBackupsToMain = async (req, res) => {
             const remoteFile = path.posix.join(remoteFolderB, fileName)
             const localTemp = path.join(TEMP_DIR, `restore-${asset.id}-${Date.now()}-${fileName}`)
             try {
-              await runCmd('mega-get', [remoteFile, localTemp], { quiet:true })
+              await megaGetWithStallRetry({
+                remoteFile,
+                localTemp,
+                ctx: `${bCtx} asset=${asset.id}`,
+                proxies,
+                getProxyIndex,
+                setProxyIndex,
+                relogin: reloginB,
+              })
               if (fs.existsSync(localTemp)) {
                 const size = fs.statSync(localTemp).size
+                downloadedBytesTotal += size
                 recovered.set(asset.id, { fileName, localTemp, size })
                 needDownload.delete(asset.id)
                 log.info(`[RESTORE][DL] asset=${asset.id} desde backup=${b.id} size=${size}`)
@@ -205,14 +294,26 @@ export const syncBackupsToMain = async (req, res) => {
       }
     }
 
+    // Rotar proxy tras 3GB descargados ANTES de subir (requisito)
+    if (downloadedBytesTotal >= ROTATE_AFTER_DOWNLOAD_BYTES) {
+      const prev = getProxyIndex();
+      setProxyIndex(rotateIndex(prev, proxies.length));
+      log.info(`[RESTORE][PROXY] Rotación post-descarga total=${downloadedBytesTotal}B (>=${ROTATE_AFTER_DOWNLOAD_BYTES}B) idx ${prev} -> ${getProxyIndex()}`);
+    }
+
     // =============== FASE 3: SUBIDA MAIN (1 login) ===============
     let restored = 0
     await withMegaLock(async () => {
       if (recovered.size){
-        await ensureProxyOrThrow(buildCtx(main))
+        const mainCtx = buildCtx(main)
         const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
-        await megaLogout(buildCtx(main))
-        await megaLogin(payload, buildCtx(main))
+        const reloginMain = async () => {
+          await megaLogout(mainCtx)
+          await megaLogin(payload, mainCtx)
+        }
+
+        await applyProxyByIndexOrThrow(proxies, getProxyIndex(), mainCtx)
+        await reloginMain()
         for (const [assetId, info] of recovered.entries()){
           const asset = assetMap.get(assetId)
           const remoteBase = (main.baseFolder||'/').replaceAll('\\','/')
@@ -221,7 +322,15 @@ export const syncBackupsToMain = async (req, res) => {
           try { await runCmd('mega-mkdir', ['-p', remoteFolder], { quiet:true }) } catch {}
           const t0 = Date.now()
           try {
-            await runCmd('mega-put', [info.localTemp, remoteFile], { quiet:true })
+            await megaPutWithStallRetry({
+              localTemp: info.localTemp,
+              remoteFile,
+              ctx: `${mainCtx} asset=${assetId}`,
+              proxies,
+              getProxyIndex,
+              setProxyIndex,
+              relogin: reloginMain,
+            })
             try { await runCmd('mega-export', ['-d', remoteFile], { quiet:true }) } catch {}
             const exp = await runCmd('mega-export', ['-a', remoteFile], { quiet:true })
             const m = exp.out.match(/https?:\/\/mega\.nz\/\S+/i)
@@ -236,7 +345,7 @@ export const syncBackupsToMain = async (req, res) => {
             try { if (fs.existsSync(info.localTemp)) fs.unlinkSync(info.localTemp) } catch {}
           }
         }
-        await megaLogout(buildCtx(main))
+        await megaLogout(mainCtx)
       }
     }, 'RESTORE-PHASE3')
 

@@ -4,6 +4,7 @@ import { log, isVerbose } from '../utils/logger.js';
 import { spawn } from 'child_process';
 import { withMegaLock } from '../utils/megaQueue.js';
 import { applyMegaProxy, listMegaProxies, clearMegaProxyIfSafe } from '../utils/megaProxy.js';
+import { megaCmdWithProgressAndStall, isMegaStallError } from '../utils/megaTransfer.js';
 import path from 'path';
 import fs from 'fs';
 
@@ -26,6 +27,72 @@ const MEGA_READONLY_TIMEOUT_MS = Number(process.env.MEGA_READONLY_TIMEOUT_MS) ||
 
 const MEGA_LOGIN_PER_PROXY_TIMEOUT_MS = Number(process.env.MEGA_LOGIN_PER_PROXY_TIMEOUT_MS) || 15000;
 const MEGA_PROXY_ROTATE_MAX_TRIES = Number(process.env.MEGA_PROXY_ROTATE_MAX_TRIES) || 0; // 0 = todas
+
+const ROTATE_AFTER_DOWNLOAD_BYTES = Number(process.env.MEGA_ROTATE_AFTER_DOWNLOAD_BYTES || (3 * 1024 * 1024 * 1024));
+const MEGA_TRANSFER_STALL_TIMEOUT_MS = Number(process.env.MEGA_TRANSFER_STALL_TIMEOUT_MS || (5 * 60 * 1000));
+const MEGA_TRANSFER_STALL_MAX_RETRIES = Number(process.env.MEGA_TRANSFER_STALL_MAX_RETRIES || 2);
+const MEGA_TRANSFER_STALL_BACKOFF_MS = Number(process.env.MEGA_TRANSFER_STALL_BACKOFF_MS || 30000);
+
+function rotateIndex(i, len){
+  if (!len) return 0;
+  return (Number(i || 0) + 1) % len;
+}
+
+async function applyProxyByIndexOrThrow(proxies, idx, ctx){
+  if (!proxies?.length) throw new Error(`[SYNC][PROXY] Sin proxies válidos (no se permite IP directa)${ctx ? ` ${ctx}` : ''}`);
+  const p = proxies[idx % proxies.length];
+  const r = await applyMegaProxy(p, { ctx: ctx || 'sync', timeoutMs: 15000, clearOnFail: false });
+  if (!r?.enabled) throw new Error(`[SYNC][PROXY] apply failed proxy=${p?.proxyUrl || '--'} err=${String(r?.error || '').slice(0,160)}`);
+  log.info(`[SYNC][PROXY][OK] ${p.proxyUrl}${ctx ? ` ${ctx}` : ''}`);
+  return p;
+}
+
+async function megaGetWithStallRetry({ remoteFile, destLocal, ctx, proxies, getProxyIndex, setProxyIndex, relogin }){
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    try {
+      await megaCmdWithProgressAndStall({
+        cmd: 'mega-get',
+        args: [remoteFile, destLocal],
+        label: 'SYNC-DL',
+        stallTimeoutMs: MEGA_TRANSFER_STALL_TIMEOUT_MS,
+      });
+      return;
+    } catch (e) {
+      if (!isMegaStallError(e) || attempt > MEGA_TRANSFER_STALL_MAX_RETRIES) throw e;
+      log.warn(`[SYNC][STALL][DL] sin progreso, rotate proxy + relogin (attempt=${attempt}/${MEGA_TRANSFER_STALL_MAX_RETRIES}) ${ctx}`);
+      setProxyIndex(rotateIndex(getProxyIndex(), proxies.length));
+      await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctx);
+      await relogin();
+      await new Promise(r => setTimeout(r, MEGA_TRANSFER_STALL_BACKOFF_MS));
+    }
+  }
+}
+
+async function megaPutWithStallRetry({ localPath, remoteFolderOrFile, ctx, proxies, getProxyIndex, setProxyIndex, relogin, asFilePath = false }){
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    try {
+      const args = asFilePath ? [localPath, remoteFolderOrFile] : [localPath, remoteFolderOrFile];
+      await megaCmdWithProgressAndStall({
+        cmd: 'mega-put',
+        args,
+        label: 'SYNC-UP',
+        stallTimeoutMs: MEGA_TRANSFER_STALL_TIMEOUT_MS,
+      });
+      return;
+    } catch (e) {
+      if (!isMegaStallError(e) || attempt > MEGA_TRANSFER_STALL_MAX_RETRIES) throw e;
+      log.warn(`[SYNC][STALL][UP] sin progreso, rotate proxy + relogin (attempt=${attempt}/${MEGA_TRANSFER_STALL_MAX_RETRIES}) ${ctx}`);
+      setProxyIndex(rotateIndex(getProxyIndex(), proxies.length));
+      await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctx);
+      await relogin();
+      await new Promise(r => setTimeout(r, MEGA_TRANSFER_STALL_BACKOFF_MS));
+    }
+  }
+}
 
 function attachAutoAcceptTerms(child, label = 'MEGA') {
   const EOL = '\n';
@@ -947,6 +1014,12 @@ export const syncMainToBackups = async (req, res) => {
     };
     logSync(`Sincronización iniciada main=${mainId} assets_publicados=${assets.length} backups=${backupAccounts.length}`);
 
+    const proxies = listMegaProxies({});
+    if (!proxies.length) return res.status(500).json({ message: 'Sin proxies válidos (no se permite IP directa)' });
+    let proxyIndex = 0;
+    const getProxyIndex = () => proxyIndex;
+    const setProxyIndex = (v) => { proxyIndex = v };
+
     // Acumular fallos parciales para notificar en CRON aunque el proceso continúe.
     const syncIssues = {
       bulkScanFailedBackups: [],
@@ -1165,11 +1238,19 @@ export const syncMainToBackups = async (req, res) => {
 
     // 5. Descargar SIEMPRE desde la cuenta main cada asset faltante (no se inspecciona disco previo)
     const payloadMain = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag);
+    let downloadedBytesTotal = 0;
     await withMegaLock(async () => {
+      const ctxMain = `main=${mainId} alias=${main.alias || '--'}`;
+      const reloginMain = async () => {
+        try { await runCmd('mega-logout', []); } catch {}
+        if (payloadMain?.type === 'session' && payloadMain.session) await runCmd('mega-login', [payloadMain.session]);
+        else if (payloadMain?.username && payloadMain?.password) await runCmd('mega-login', [payloadMain.username, payloadMain.password]);
+        else throw new Error('Credenciales main inválidas para descarga');
+      };
+
+      await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctxMain);
       try { await runCmd('mega-logout', []); } catch {}
-      if (payloadMain?.type === 'session' && payloadMain.session) await runCmd('mega-login', [payloadMain.session]);
-      else if (payloadMain?.username && payloadMain?.password) await runCmd('mega-login', [payloadMain.username, payloadMain.password]);
-      else throw new Error('Credenciales main inválidas para descarga');
+      await reloginMain();
 
       const baseMain = (main.baseFolder || '/').replaceAll('\\', '/');
       await safeMkdir(baseMain);
@@ -1186,7 +1267,16 @@ export const syncMainToBackups = async (req, res) => {
         const destLocal = path.join(slugDir, fileName);
   logSync(`Descarga ${idx}/${uniqueMissingAssets.length} asset ${a.id} (${a.slug})`,'verbose');
         try {
-          await runCmd('mega-get', [remoteFile, destLocal]);
+          await megaGetWithStallRetry({
+            remoteFile,
+            destLocal,
+            ctx: `${ctxMain} asset=${a.id}`,
+            proxies,
+            getProxyIndex,
+            setProxyIndex,
+            relogin: reloginMain,
+          });
+          try { if (fs.existsSync(destLocal)) downloadedBytesTotal += fs.statSync(destLocal).size } catch {}
           logSync(`Asset ${a.id} descargado`,'verbose');
         } catch (e) {
           syncIssues.downloadErrors++;
@@ -1195,6 +1285,13 @@ export const syncMainToBackups = async (req, res) => {
       }
       try { await runCmd('mega-logout', []); } catch {}
     }, `SYNC-DOWNLOAD-${mainId}`);
+
+    // Rotar proxy tras 3GB descargados ANTES de subir (requisito)
+    if (downloadedBytesTotal >= ROTATE_AFTER_DOWNLOAD_BYTES) {
+      const prev = getProxyIndex();
+      setProxyIndex(rotateIndex(prev, proxies.length));
+      logSync(`[SYNC][PROXY] Rotación post-descarga total=${downloadedBytesTotal}B (>=${ROTATE_AFTER_DOWNLOAD_BYTES}B) idx ${prev} -> ${getProxyIndex()}`);
+    }
 
     // 6. Subir a cada backup únicamente lo que le falta
     const actions = [];
@@ -1212,10 +1309,17 @@ export const syncMainToBackups = async (req, res) => {
       const baseB = (b.baseFolder || '/').replaceAll('\\', '/');
 
       await withMegaLock(async () => {
+        const ctxB = `backup=${b.id} alias=${b.alias || '--'}`;
+        const reloginB = async () => {
+          try { await runCmd('mega-logout', []); } catch {}
+          if (payloadB?.type === 'session' && payloadB.session) await runCmd('mega-login', [payloadB.session]);
+          else if (payloadB?.username && payloadB?.password) await runCmd('mega-login', [payloadB.username, payloadB.password]);
+          else throw new Error('Credenciales backup inválidas');
+        };
+
+        await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctxB);
         try { await runCmd('mega-logout', []); } catch {}
-        if (payloadB?.type === 'session' && payloadB.session) await runCmd('mega-login', [payloadB.session]);
-        else if (payloadB?.username && payloadB?.password) await runCmd('mega-login', [payloadB.username, payloadB.password]);
-        else throw new Error('Credenciales backup inválidas');
+        await reloginB();
 
         await safeMkdir(baseB);
 
@@ -1234,7 +1338,15 @@ export const syncMainToBackups = async (req, res) => {
           }
           logSync(`Subida ${idx}/${list.length} asset ${a.id} -> backup ${b.id}`,'verbose');
           try {
-            await runCmd('mega-put', [localPath, remoteFolder]);
+            await megaPutWithStallRetry({
+              localPath,
+              remoteFolderOrFile: remoteFolder,
+              ctx: `${ctxB} asset=${a.id}`,
+              proxies,
+              getProxyIndex,
+              setProxyIndex,
+              relogin: reloginB,
+            });
             ok++;
           } catch (e) {
             syncIssues.uploadErrors++;
