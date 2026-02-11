@@ -52,12 +52,21 @@ async function megaGetWithStallRetry({ remoteFile, destLocal, ctx, proxies, getP
   while (true) {
     attempt++;
     try {
+      log.info(`[SYNC][DL][START] attempt=${attempt} proxyIdx=${getProxyIndex()} remote=${remoteFile} -> ${destLocal} ${ctx}`);
       await megaCmdWithProgressAndStall({
         cmd: 'mega-get',
         args: [remoteFile, destLocal],
         label: 'SYNC-DL',
         stallTimeoutMs: MEGA_TRANSFER_STALL_TIMEOUT_MS,
+        heartbeatMs: 30000,
+        onProgress: ({ pct }) => {
+          log.verbose(`[SYNC][DL][PROGRESS] ${pct}% ${ctx}`);
+        },
+        onHeartbeat: ({ idleMs, lastPct }) => {
+          log.verbose(`[SYNC][DL][HB] idle=${Math.round(idleMs / 1000)}s pct=${lastPct ?? '--'} ${ctx}`);
+        },
       });
+      log.info(`[SYNC][DL][DONE] remote=${remoteFile} ${ctx}`);
       return;
     } catch (e) {
       if (!isMegaStallError(e) || attempt > MEGA_TRANSFER_STALL_MAX_RETRIES) throw e;
@@ -76,12 +85,21 @@ async function megaPutWithStallRetry({ localPath, remoteFolderOrFile, ctx, proxi
     attempt++;
     try {
       const args = asFilePath ? [localPath, remoteFolderOrFile] : [localPath, remoteFolderOrFile];
+      log.info(`[SYNC][UP][START] attempt=${attempt} proxyIdx=${getProxyIndex()} local=${localPath} -> remote=${remoteFolderOrFile} ${ctx}`);
       await megaCmdWithProgressAndStall({
         cmd: 'mega-put',
         args,
         label: 'SYNC-UP',
         stallTimeoutMs: MEGA_TRANSFER_STALL_TIMEOUT_MS,
+        heartbeatMs: 30000,
+        onProgress: ({ pct }) => {
+          log.verbose(`[SYNC][UP][PROGRESS] ${pct}% ${ctx}`);
+        },
+        onHeartbeat: ({ idleMs, lastPct }) => {
+          log.verbose(`[SYNC][UP][HB] idle=${Math.round(idleMs / 1000)}s pct=${lastPct ?? '--'} ${ctx}`);
+        },
       });
+      log.info(`[SYNC][UP][DONE] remote=${remoteFolderOrFile} ${ctx}`);
       return;
     } catch (e) {
       if (!isMegaStallError(e) || attempt > MEGA_TRANSFER_STALL_MAX_RETRIES) throw e;

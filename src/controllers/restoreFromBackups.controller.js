@@ -62,12 +62,21 @@ async function megaGetWithStallRetry({ remoteFile, localTemp, ctx, proxies, getP
   while (true) {
     attempt++;
     try {
+      log.info(`[RESTORE][DL][START] attempt=${attempt} proxyIdx=${getProxyIndex()} remote=${remoteFile} -> ${localTemp} ${ctx}`);
       await megaCmdWithProgressAndStall({
         cmd: 'mega-get',
         args: [remoteFile, localTemp],
         label: 'RESTORE-DL',
         stallTimeoutMs: MEGA_TRANSFER_STALL_TIMEOUT_MS,
+        heartbeatMs: 30000,
+        onProgress: ({ pct }) => {
+          log.verbose(`[RESTORE][DL][PROGRESS] ${pct}% ${ctx}`);
+        },
+        onHeartbeat: ({ idleMs, lastPct }) => {
+          log.verbose(`[RESTORE][DL][HB] idle=${Math.round(idleMs / 1000)}s pct=${lastPct ?? '--'} ${ctx}`);
+        },
       });
+      log.info(`[RESTORE][DL][DONE] remote=${remoteFile} ${ctx}`);
       return;
     } catch (e) {
       if (!isMegaStallError(e) || attempt > MEGA_TRANSFER_STALL_MAX_RETRIES) throw e;
@@ -85,12 +94,21 @@ async function megaPutWithStallRetry({ localTemp, remoteFile, ctx, proxies, getP
   while (true) {
     attempt++;
     try {
+      log.info(`[RESTORE][UP][START] attempt=${attempt} proxyIdx=${getProxyIndex()} local=${localTemp} -> remote=${remoteFile} ${ctx}`);
       await megaCmdWithProgressAndStall({
         cmd: 'mega-put',
         args: [localTemp, remoteFile],
         label: 'RESTORE-UP',
         stallTimeoutMs: MEGA_TRANSFER_STALL_TIMEOUT_MS,
+        heartbeatMs: 30000,
+        onProgress: ({ pct }) => {
+          log.verbose(`[RESTORE][UP][PROGRESS] ${pct}% ${ctx}`);
+        },
+        onHeartbeat: ({ idleMs, lastPct }) => {
+          log.verbose(`[RESTORE][UP][HB] idle=${Math.round(idleMs / 1000)}s pct=${lastPct ?? '--'} ${ctx}`);
+        },
       });
+      log.info(`[RESTORE][UP][DONE] remote=${remoteFile} ${ctx}`);
       return;
     } catch (e) {
       if (!isMegaStallError(e) || attempt > MEGA_TRANSFER_STALL_MAX_RETRIES) throw e;

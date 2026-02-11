@@ -51,9 +51,12 @@ export function megaCmdWithProgressAndStall({
   args = [],
   label = 'MEGA',
   stallTimeoutMs = 5 * 60 * 1000,
+  heartbeatMs = 30000,
   shell = true,
   cwd,
   onLine,
+  onProgress,
+  onHeartbeat,
 }) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { shell, cwd, windowsHide: true });
@@ -79,11 +82,16 @@ export function megaCmdWithProgressAndStall({
       return resolve({ out, err, code });
     };
 
-    const bumpProgress = (chunk) => {
+    const bumpProgress = (chunk, stream = 'out') => {
+      // Cualquier salida cuenta como "actividad" para evitar stalls falsos
+      lastProgressAt = Date.now();
+
       const { pct } = extractProgressSignals(chunk);
       if (pct != null && pct !== lastPct) {
         lastPct = pct;
-        lastProgressAt = Date.now();
+        try {
+          if (typeof onProgress === 'function') onProgress({ pct, stream, chunk: String(chunk || '') });
+        } catch {}
       }
     };
 
@@ -95,7 +103,7 @@ export function megaCmdWithProgressAndStall({
       if (out.length > 64 * 1024) out = out.slice(-64 * 1024);
       if (err.length > 64 * 1024) err = err.slice(-64 * 1024);
 
-      bumpProgress(s);
+      bumpProgress(s, isErr ? 'err' : 'out');
 
       if (typeof onLine === 'function') {
         buf += s;
@@ -126,9 +134,13 @@ export function megaCmdWithProgressAndStall({
 
     // Stall watchdog: if no progress updates for stallTimeoutMs, abort.
     const timer = setInterval(() => {
-      // interval just keeps lastProgressAt fresh in long processes
-      // (no-op, but keeps a single place to clear interval)
-    }, 30_000);
+      try {
+        if (typeof onHeartbeat === 'function') {
+          const idleMs = Date.now() - lastProgressAt;
+          onHeartbeat({ idleMs, lastPct });
+        }
+      } catch {}
+    }, Math.max(5000, Number(heartbeatMs) || 30000));
 
     const stallTimer = setInterval(async () => {
       const idle = Date.now() - lastProgressAt;
