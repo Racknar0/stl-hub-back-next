@@ -2367,8 +2367,8 @@ async function uploadOneAssetMainInCurrentSession(assetId, mainAcc, { onChild } 
                 }
             } catch {}
         },
-        onChild: null,
         onChild,
+    });
 
     // Link público
     let publicLink = null;
