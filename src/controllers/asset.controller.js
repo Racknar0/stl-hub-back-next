@@ -1709,6 +1709,149 @@ export const cutMegaBatchToBackups = async (req, res) => {
     }
 };
 
+// POST /api/assets/unstick-mega-batch (admin-only)
+// Fuerza un "desatasco" del batch MEGA de una cuenta MAIN:
+// - Mata el mega-put actual (si existe)
+// - Marca una solicitud para que el loop haga logout + relogin con proxy rotado
+// Body:
+//  - mainAccountId: number (requerido)
+//  - reason?: string
+export const unstickMegaBatch = async (req, res) => {
+    try {
+        const mainAccountId = Number(req.body?.mainAccountId);
+        if (!Number.isFinite(mainAccountId) || mainAccountId <= 0) {
+            return res.status(400).json({ message: 'mainAccountId requerido' });
+        }
+
+        const st = megaBatchByMain.get(mainAccountId);
+        if (!st || !st.running) {
+            return res.status(409).json({ message: 'No hay un batch activo para esta cuenta' });
+        }
+
+        const reason = String(req.body?.reason || 'manual-unstick').slice(0, 160);
+        st.unstickRequested = true;
+        st.unstickToken = Date.now();
+        st.unstickRotateOffset = (Number(st.unstickRotateOffset) || 0) + 1;
+
+        // Matar el proceso activo si está subiendo.
+        try {
+            if (st.activePutChild) {
+                console.warn(`[BATCH][UNSTICK] killing active mega-put (${st.activePutLabel || 'unknown'}) reason=${reason}`);
+                killProcessTreeBestEffort(st.activePutChild, 'MEGA-UNSTICK');
+            }
+        } catch {}
+
+        return res.json({
+            ok: true,
+            mainAccountId,
+            phase: st.phase || null,
+            currentAssetId: st.currentAssetId ?? null,
+            currentReplicaAssetId: st.currentReplicaAssetId ?? null,
+            currentBackupAccountId: st.currentBackupAccountId ?? null,
+            reason,
+        });
+    } catch (e) {
+        console.error('[ASSETS] unstick-mega-batch error:', e);
+        return res.status(500).json({ message: 'Error unstick mega batch', error: String(e.message || e) });
+    }
+};
+
+// POST /api/assets/remove-from-mega-batch (admin-only)
+// Elimina/omite un asset del batch en caliente.
+// - Lo saca de pending y de colas en memoria
+// - Si era el actual, mata el mega-put actual
+// - Marca status FAILED (si aún no estaba PUBLISHED)
+// - Marca réplicas PENDING/PROCESSING como FAILED (best-effort)
+// Body:
+//  - mainAccountId: number (requerido)
+//  - assetId: number (requerido)
+export const removeAssetFromMegaBatch = async (req, res) => {
+    try {
+        const mainAccountId = Number(req.body?.mainAccountId);
+        const assetId = Number(req.body?.assetId);
+        if (!Number.isFinite(mainAccountId) || mainAccountId <= 0) {
+            return res.status(400).json({ message: 'mainAccountId requerido' });
+        }
+        if (!Number.isFinite(assetId) || assetId <= 0) {
+            return res.status(400).json({ message: 'assetId requerido' });
+        }
+
+        const st = megaBatchByMain.get(mainAccountId);
+        if (!st) {
+            return res.status(409).json({ message: 'No hay estado de batch para esta cuenta' });
+        }
+
+        // Marcar como omitido desde este momento.
+        try {
+            if (!st.skipAssetIds) st.skipAssetIds = new Set();
+            st.skipAssetIds.add(assetId);
+        } catch {}
+
+        const beforePending = st.pending ? st.pending.size : 0;
+        try { st.pending && st.pending.delete(assetId); } catch {}
+        const afterPending = st.pending ? st.pending.size : 0;
+
+        const beforeMainQ = Array.isArray(st.mainQueue) ? st.mainQueue.length : 0;
+        const beforeBackupQ = Array.isArray(st.backupQueue) ? st.backupQueue.length : 0;
+        try { if (Array.isArray(st.mainQueue)) st.mainQueue = st.mainQueue.filter((x) => Number(x) !== assetId); } catch {}
+        try { if (Array.isArray(st.backupQueue)) st.backupQueue = st.backupQueue.filter((x) => Number(x) !== assetId); } catch {}
+        const afterMainQ = Array.isArray(st.mainQueue) ? st.mainQueue.length : 0;
+        const afterBackupQ = Array.isArray(st.backupQueue) ? st.backupQueue.length : 0;
+
+        const wasCurrentMain = Number(st.currentAssetId) === assetId;
+        const wasCurrentBackup = Number(st.currentReplicaAssetId) === assetId;
+
+        // Si está en curso, matar el proceso.
+        if (wasCurrentMain || wasCurrentBackup) {
+            try {
+                if (st.activePutChild) {
+                    console.warn(`[BATCH][REMOVE] killing active mega-put (${st.activePutLabel || 'unknown'}) asset=${assetId}`);
+                    killProcessTreeBestEffort(st.activePutChild, 'MEGA-REMOVE');
+                }
+            } catch {}
+        }
+
+        // DB best-effort
+        try {
+            const a = await prisma.asset.findUnique({ where: { id: assetId }, select: { id: true, status: true } });
+            if (a && String(a.status) !== 'PUBLISHED') {
+                await prisma.asset.update({ where: { id: assetId }, data: { status: 'FAILED' } });
+            }
+        } catch {}
+
+        try {
+            // Fallar réplicas aún pendientes/en proceso (si existieran)
+            await prisma.assetReplica.updateMany({
+                where: { assetId, status: { in: ['PENDING', 'PROCESSING'] } },
+                data: { status: 'FAILED', errorMessage: 'Removed from queue by user', finishedAt: new Date() },
+            });
+        } catch {}
+
+        try { progressMap.delete(assetId); } catch {}
+        try {
+            const bid = Number(st.currentBackupAccountId);
+            if (Number.isFinite(bid) && bid > 0) replicaProgressMap.delete(`${assetId}:${bid}`);
+        } catch {}
+
+        return res.json({
+            ok: true,
+            mainAccountId,
+            assetId,
+            removedFrom: {
+                pending: beforePending - afterPending,
+                mainQueue: beforeMainQ - afterMainQ,
+                backupQueue: beforeBackupQ - afterBackupQ,
+            },
+            wasCurrentMain,
+            wasCurrentBackup,
+            phase: st.phase || null,
+        });
+    } catch (e) {
+        console.error('[ASSETS] remove-from-mega-batch error:', e);
+        return res.status(500).json({ message: 'Error removing from mega batch', error: String(e.message || e) });
+    }
+};
+
 // GET /api/assets/uploads-root (admin-only, debug)
 export const getUploadsRoot = async (_req, res) => {
     try {
@@ -1858,6 +2001,7 @@ async function megaPutWithProgressAndStall({
     logPrefix,
     stallTimeoutMs,
     onProgress,
+    onChild,
 }) {
     const putCmd = 'mega-put';
     const timeoutMs = Math.max(0, Number(stallTimeoutMs) || 0);
@@ -1866,6 +2010,8 @@ async function megaPutWithProgressAndStall({
     return await new Promise((resolve, reject) => {
         const child = spawn(putCmd, [srcPath, remotePath], { shell: true });
         attachAutoAcceptTerms(child, logPrefix || 'MEGA PUT');
+
+        try { onChild && onChild(child); } catch {}
 
         let settled = false;
         let lastLogged = -1;
@@ -1922,6 +2068,7 @@ async function megaPutWithProgressAndStall({
         const cleanup = () => {
             if (stallTimer) clearInterval(stallTimer);
             stallTimer = null;
+            try { onChild && onChild(null); } catch {}
         };
 
         const fail = (err) => {
@@ -2169,7 +2316,7 @@ async function megaLoginOrThrow(payload, ctx) {
     console.log(`[MEGA][LOGIN][OK] ${ctx}`);
 }
 
-async function uploadOneAssetMainInCurrentSession(assetId, mainAcc) {
+async function uploadOneAssetMainInCurrentSession(assetId, mainAcc, { onChild } = {}) {
     const asset = await prisma.asset.findUnique({ where: { id: assetId } });
     if (!asset) throw new Error(`Asset not found id=${assetId}`);
     if (asset.accountId !== mainAcc.id) throw new Error(`Asset ${assetId} no pertenece a main=${mainAcc.id}`);
@@ -2191,38 +2338,37 @@ async function uploadOneAssetMainInCurrentSession(assetId, mainAcc) {
     progressMap.set(asset.id, 0);
 
     let lastLoggedMain = -1;
-    const parseProgress = (buf) => {
-        const txt = buf.toString();
-        let last = null;
-        const re = /([0-9]{1,3}(?:\.[0-9]+)?)\s*%/g;
-        let m;
-        while ((m = re.exec(txt)) !== null) last = m[1];
-        if (last !== null) {
-            const p = Math.max(0, Math.min(100, parseFloat(last)));
-            const prev = progressMap.get(asset.id) || 0;
-            if (p === 100 || p >= prev + 1) progressMap.set(asset.id, p);
-            if (p === 100 || p >= lastLoggedMain + 5) {
-                lastLoggedMain = p;
-                console.log(`[PROGRESO] asset=${asset.id} main ${p}%`);
-            }
-        }
-        if (/upload finished/i.test(txt)) {
-            progressMap.set(asset.id, 100);
-            if (lastLoggedMain !== 100) console.log(`[PROGRESO] asset=${asset.id} main 100%`);
-        }
-    };
-
-    const putCmd = 'mega-put';
     const exportCmd = 'mega-export';
 
     await safeMkdir(remotePath);
-    await new Promise((resolve, reject) => {
-        const child = spawn(putCmd, [localArchive, remotePath], { shell: true });
-        attachAutoAcceptTerms(child, 'MEGA PUT');
-        child.stdout.on('data', (d) => parseProgress(d));
-        child.stderr.on('data', (d) => parseProgress(d));
-        child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`${putCmd} exited ${code}`))));
-    });
+
+    // Stall watchdog: si no avanza el % en X ms, matamos mega-put.
+    // Defaults: 3 minutos (se puede sobreescribir por env).
+    const stallTimeoutMs =
+        Number(process.env.MEGA_MAIN_STALL_TIMEOUT_MS) ||
+        Number(process.env.MEGA_STALL_TIMEOUT_MS) ||
+        3 * 60 * 1000;
+
+    // Pasamos por el helper con stall para evitar subidas "pegadas" por horas.
+    await megaPutWithProgressAndStall({
+        srcPath: localArchive,
+        remotePath,
+        progressKey: null,
+        logPrefix: `asset=${asset.id} main`,
+        stallTimeoutMs,
+        onProgress: (pct) => {
+            try {
+                const p = Math.max(0, Math.min(100, Math.round(pct)));
+                const prev = progressMap.get(asset.id) || 0;
+                if (p === 100 || p >= prev + 1) progressMap.set(asset.id, p);
+                if (p === 100 || p >= lastLoggedMain + 5) {
+                    lastLoggedMain = p;
+                    console.log(`[PROGRESO] asset=${asset.id} main ${p}%`);
+                }
+            } catch {}
+        },
+        onChild: null,
+        onChild,
 
     // Link público
     let publicLink = null;
@@ -2277,7 +2423,7 @@ async function ensureReplicaRows(assetId, backupAccounts) {
     }
 }
 
-async function replicateOneAssetToBackupInCurrentSession(assetId, backupAcc) {
+async function replicateOneAssetToBackupInCurrentSession(assetId, backupAcc, { onChild } = {}) {
     const asset = await prisma.asset.findUnique({
         where: { id: assetId },
         include: { account: true },
@@ -2319,7 +2465,8 @@ async function replicateOneAssetToBackupInCurrentSession(assetId, backupAcc) {
 
     await safeMkdir(remotePath);
     const fileName = path.basename(archiveAbs);
-    const stallTimeoutMs = Number(process.env.MEGA_REPLICA_STALL_TIMEOUT_MS) || 5 * 60 * 1000;
+    // Default 3 minutos si no se configura env (petición: relogin+proxy si no progresa >3 min)
+    const stallTimeoutMs = Number(process.env.MEGA_REPLICA_STALL_TIMEOUT_MS) || Number(process.env.MEGA_STALL_TIMEOUT_MS) || 3 * 60 * 1000;
     const progressKey = `${asset.id}:${backupAcc.id}`;
     await megaPutWithProgressAndStall({
         srcPath: archiveAbs,
@@ -2327,6 +2474,7 @@ async function replicateOneAssetToBackupInCurrentSession(assetId, backupAcc) {
         progressKey,
         logPrefix: `asset=${asset.id} backup=${backupAcc.id}`,
         stallTimeoutMs,
+        onChild,
     });
 
     try {
@@ -2376,6 +2524,13 @@ export async function enqueueToMegaBatch(assetId) {
             currentReplicaAssetId: null,
             currentBackupAccountId: null,
             lastEnqueueAt: Date.now(),
+            // Control runtime
+            skipAssetIds: new Set(),
+            unstickRequested: false,
+            unstickToken: 0,
+            unstickRotateOffset: 0,
+            activePutChild: null,
+            activePutLabel: null,
         };
         megaBatchByMain.set(mainId, st);
     }
@@ -2464,6 +2619,15 @@ export async function enqueueToMegaBatch(assetId) {
                         st.mainIndex = 0;
                         for (let i = 0; i < batch.length; i++) {
                             const aid = batch[i];
+                            // Permitir eliminar/omitir assets en caliente.
+                            if (st.skipAssetIds && st.skipAssetIds.has(aid)) {
+                                try { await prisma.asset.update({ where: { id: aid }, data: { status: 'FAILED' } }); } catch {}
+                                try { progressMap.delete(aid); } catch {}
+                                st.mainIndex = (Number(st.mainIndex) || 0) + 1;
+                                st.currentAssetId = null;
+                                continue;
+                            }
+
                             if (st.cutToBackupsRequested) {
                                 // Corte solicitado: no iniciar más MAIN en este batch.
                                 break;
@@ -2471,25 +2635,76 @@ export async function enqueueToMegaBatch(assetId) {
 
                             st.currentAssetId = aid;
                             try {
-                                // Si MEGAcmd pierde la sesión (proxy inestable / timeout / error previo),
-                                // los siguientes comandos fallan con "Not logged in" (exit 57). Reintentamos 1 vez con re-login.
-                                let okId = null;
-                                try {
-                                    okId = await uploadOneAssetMainInCurrentSession(aid, mainAcc);
-                                } catch (e) {
-                                    if (isNotLoggedInError(e)) {
-                                        console.warn(`[BATCH][MAIN] session lost before/while asset=${aid} -> relogin & retry`);
-                                        await megaLoginWithProxyRotationOrThrow('MAIN', mainPayload, proxies, ctxMain, { maxTries: 3 });
-                                        okId = await uploadOneAssetMainInCurrentSession(aid, mainAcc);
-                                    } else {
-                                        throw e;
+                                // MAIN: reintentos por stall (sin progreso) + posibilidad de desatascar manual.
+                                const maxStallRetries = Math.max(0, Number(process.env.MEGA_MAIN_STALL_MAX_RETRIES) || 4);
+                                const backoffBaseMs = Math.max(0, Number(process.env.MEGA_MAIN_STALL_BACKOFF_MS) || 30000);
+                                let attempt = 0;
+
+                                while (true) {
+                                    // Si alguien pidió desatascar entre assets, forzar relogin+proxy rotado.
+                                    if (st.unstickRequested) {
+                                        st.unstickRequested = false;
+                                        try { await megaLogoutBestEffort(`UNSTICK ${ctxMain} asset=${aid}`); } catch {}
+                                        const rotated = rotateArray(proxies, (Number(st.unstickRotateOffset) || 0) + 1);
+                                        await megaLoginWithProxyRotationOrThrow('MAIN', mainPayload, rotated, `${ctxMain} unstick`, { maxTries: 10 });
+                                    }
+
+                                    // Si MEGAcmd pierde la sesión (exit 57), relogin y retry.
+                                    const tokenBefore = Number(st.unstickToken) || 0;
+                                    try {
+                                        const okId = await uploadOneAssetMainInCurrentSession(aid, mainAcc, {
+                                            onChild: (ch) => {
+                                                try {
+                                                    st.activePutChild = ch;
+                                                    st.activePutLabel = ch ? `MAIN asset=${aid}` : null;
+                                                } catch {}
+                                            },
+                                        });
+                                        uploadedAssetIds.push(okId);
+                                        break;
+                                    } catch (e) {
+                                        const wasUnstick = (Number(st.unstickToken) || 0) !== tokenBefore;
+                                        const isStall = isMegaPutStallError(e) || wasUnstick;
+
+                                        // Si el usuario eliminó este asset mientras estaba subiendo, saltar.
+                                        if (st.skipAssetIds && st.skipAssetIds.has(aid)) {
+                                            throw new Error('MEGA_BATCH_REMOVED_BY_USER');
+                                        }
+
+                                        if (isNotLoggedInError(e)) {
+                                            console.warn(`[BATCH][MAIN] session lost asset=${aid} -> relogin & retry`);
+                                            await megaLoginWithProxyRotationOrThrow('MAIN', mainPayload, proxies, ctxMain, { maxTries: 3 });
+                                            continue;
+                                        }
+
+                                        if (!isStall || attempt >= maxStallRetries) throw e;
+
+                                        const msg = String(e?.message || e || '');
+                                        console.warn(`[BATCH][MAIN][STALL] asset=${aid} -> logout+rotate proxy+retry. attempt=${attempt + 1}/${maxStallRetries + 1} err=${msg.slice(0, 200)} ${ctxMain}`);
+
+                                        try { await megaLogoutBestEffort(`STALL-RETRY ${ctxMain} asset=${aid}`); } catch {}
+                                        const rotated = rotateArray(proxies, (Number(st.unstickRotateOffset) || 0) + attempt + 1);
+                                        await megaLoginWithProxyRotationOrThrow('MAIN', mainPayload, rotated, `${ctxMain} stallRetry=${attempt + 1}`, { maxTries: 10 });
+
+                                        const backoffMs = backoffBaseMs * Math.max(1, attempt + 1);
+                                        if (backoffMs) {
+                                            console.log(`[BATCH][MAIN][STALL] backoff ${Math.round(backoffMs / 1000)}s asset=${aid}`);
+                                            await sleep(backoffMs);
+                                        }
+                                        attempt += 1;
                                     }
                                 }
-                                uploadedAssetIds.push(okId);
                             } catch (e) {
-                                console.error(`[BATCH][MAIN] fail asset=${aid} msg=${e.message}`);
-                                progressMap.delete(aid);
-                                try { await prisma.asset.update({ where: { id: aid }, data: { status: 'FAILED' } }); } catch {}
+                                // Caso especial: eliminado por el usuario (desatascar).
+                                if (String(e?.message || '').includes('MEGA_BATCH_REMOVED_BY_USER')) {
+                                    console.warn(`[BATCH][MAIN] removed-by-user asset=${aid}`);
+                                    try { progressMap.delete(aid); } catch {}
+                                    try { await prisma.asset.update({ where: { id: aid }, data: { status: 'FAILED' } }); } catch {}
+                                } else {
+                                    console.error(`[BATCH][MAIN] fail asset=${aid} msg=${e.message}`);
+                                    progressMap.delete(aid);
+                                    try { await prisma.asset.update({ where: { id: aid }, data: { status: 'FAILED' } }); } catch {}
+                                }
 
                                 // Evitar fallos en cascada: si un comando deja a MEGAcmd sin sesión,
                                 // re-loguear para que el resto de la cola pueda continuar.
@@ -2505,6 +2720,8 @@ export async function enqueueToMegaBatch(assetId) {
                                 try { progressMap.delete(aid); } catch {}
                                 st.mainIndex = (Number(st.mainIndex) || 0) + 1;
                                 st.currentAssetId = null;
+                                st.activePutChild = null;
+                                st.activePutLabel = null;
                             }
 
                             // Si alguien pidió corte mientras subíamos este asset, salimos del batch y pasamos a BACKUP.
@@ -2605,15 +2822,52 @@ export async function enqueueToMegaBatch(assetId) {
                             let attempt = 0;
                             // Intento 0 = normal; reintentos sólo si detectamos stall.
                             while (true) {
+                                const tokenBefore = Number(st.unstickToken) || 0;
                                 try {
+                                    if (st.skipAssetIds && st.skipAssetIds.has(aid)) {
+                                        // Eliminado por usuario: fallar la réplica y seguir.
+                                        throw new Error('MEGA_BATCH_REMOVED_BY_USER');
+                                    }
+
+                                    // Desatascar manual: relogin + rotar proxy entre intentos
+                                    if (st.unstickRequested) {
+                                        st.unstickRequested = false;
+                                        try { await megaLogoutBestEffort(`UNSTICK ${bctx} asset=${aid}`); } catch {}
+                                        const rotated = rotateArray(orderedBackupProxies, (Number(st.unstickRotateOffset) || 0) + 1);
+                                        await megaLoginWithProxyRotationOrThrow('BACKUP', payload, rotated, `${bctx} unstick`, { maxTries: 10 });
+                                    }
+
                                     if (attempt > 0) {
                                         console.warn(`[BATCH][BACKUP][RETRY] asset=${aid} backupAcc=${b.id} attempt=${attempt + 1}/${maxStallRetries + 1} (stall)`);
                                     }
-                                    await replicateOneAssetToBackupInCurrentSession(aid, b);
+                                    await replicateOneAssetToBackupInCurrentSession(aid, b, {
+                                        onChild: (ch) => {
+                                            try {
+                                                st.activePutChild = ch;
+                                                st.activePutLabel = ch ? `BACKUP asset=${aid} backup=${b.id}` : null;
+                                            } catch {}
+                                        },
+                                    });
                                     break;
                                 } catch (e) {
                                     const msg = String(e?.message || e || '');
-                                    const isStall = isMegaPutStallError(e);
+                                    const wasUnstick = (Number(st.unstickToken) || 0) !== tokenBefore;
+                                    const isStall = isMegaPutStallError(e) || wasUnstick;
+
+                                    if (String(e?.message || '').includes('MEGA_BATCH_REMOVED_BY_USER')) {
+                                        // Marcar réplica como failed y seguir.
+                                        try {
+                                            const rep = await prisma.assetReplica.findUnique({ where: { assetId_accountId: { assetId: aid, accountId: b.id } } });
+                                            if (rep?.id) {
+                                                await prisma.assetReplica.update({
+                                                    where: { id: rep.id },
+                                                    data: { status: 'FAILED', errorMessage: 'Removed from queue by user', finishedAt: new Date() },
+                                                });
+                                            }
+                                        } catch {}
+                                        break;
+                                    }
+
                                     if (!isStall || attempt >= maxStallRetries) throw e;
 
                                     const rotated = rotateArray(orderedBackupProxies, attempt + 1);
@@ -2644,6 +2898,8 @@ export async function enqueueToMegaBatch(assetId) {
                         }
                         st.backupIndex = (Number(st.backupIndex) || 0) + 1;
                         st.currentReplicaAssetId = null;
+                        st.activePutChild = null;
+                        st.activePutLabel = null;
                     }
 
                     // Actualizar métricas de espacio del BACKUP tras replicar batch.

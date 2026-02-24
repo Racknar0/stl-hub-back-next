@@ -32,6 +32,8 @@ import {
   holdUploadsActive,
   holdMegaBatchQuiet,
   cutMegaBatchToBackups,
+  unstickMegaBatch,
+  removeAssetFromMegaBatch,
   similarAssets,
 } from '../../controllers/asset.controller.js';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
@@ -116,6 +118,10 @@ router.post('/hold-uploads-active', holdUploadsActive);
 router.post('/hold-mega-batch-quiet', holdMegaBatchQuiet);
 // Nuevo: cortar cola (pasar a BACKUP y descartar MAIN pendientes)
 router.post('/cut-mega-batch-to-backups', cutMegaBatchToBackups);
+// Nuevo: desatascar (logout + rotar proxy) sin perder el orden
+router.post('/unstick-mega-batch', unstickMegaBatch);
+// Nuevo: eliminar un asset de la cola/batch en caliente
+router.post('/remove-from-mega-batch', removeAssetFromMegaBatch);
 router.put('/:id', updateAsset);
 router.delete('/:id', deleteAsset);
 
