@@ -1,4 +1,3 @@
-
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
@@ -25,7 +24,7 @@ model user {
   resetTokenExpiration DateTime? // campo para la expiración del token de reseteo
   jwtVersion           Int       @default(1) // campo para la versión del token
   lastPasswordChange   DateTime?
-  activationToken String? 
+  activationToken      String?
   isActive             Boolean   @default(false) // estado de la cuenta
 
   roleId Int
@@ -40,9 +39,13 @@ model user {
   // Perfiles del uploader (persistidos en DB por usuario)
   uploaderProfiles uploaderProfiles?
 
+  // Métricas de búsquedas
+  searchEvents SearchEvent[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-    @@map("user")
+
+  @@map("user")
 }
 
 // Perfiles del uploader persistidos por usuario.
@@ -66,7 +69,8 @@ model role {
   users     user[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-    @@map("role")
+
+  @@map("role")
 }
 
 // Suscripción simple: estado, fecha de compra y fecha de finalización del periodo actual
@@ -76,13 +80,13 @@ model subscription {
   user             user               @relation(fields: [userId], references: [id])
   status           SubscriptionStatus @default(ACTIVE)
   startedAt        DateTime           @default(now()) // fecha de compra
-  currentPeriodEnd DateTime                          // fecha de finalización
+  currentPeriodEnd DateTime // fecha de finalización
 
-  createdAt        DateTime           @default(now())
-  updatedAt        DateTime           @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([userId])
-    @@map("subscription")
+  @@map("subscription")
 }
 
 enum SubscriptionStatus {
@@ -99,39 +103,40 @@ enum AccountStatus {
 }
 
 model megaAccount {
-  id                Int           @id @default(autoincrement())
-  alias             String        @unique
-  email             String
-  baseFolder        String
-  type              AccountType   @default(main)
-  status            AccountStatus @default(ERROR)
-  statusMessage     String?
-  suspended         Boolean       @default(false)
+  id            Int           @id @default(autoincrement())
+  alias         String        @unique
+  email         String
+  baseFolder    String
+  type          AccountType   @default(main)
+  status        AccountStatus @default(ERROR)
+  statusMessage String?
+  suspended     Boolean       @default(false)
 
   // Métricas
-  storageUsedMB     Int           @default(0)
-  storageTotalMB    Int           @default(0)
-  bandwidthUsedMB   Int           @default(0)
-  bandwidthTotalMB  Int           @default(0)
+  storageUsedMB     Int       @default(0)
+  storageTotalMB    Int       @default(0)
+  bandwidthUsedMB   Int       @default(0)
+  bandwidthTotalMB  Int       @default(0)
   bandwidthPeriodAt DateTime?
-  errors24h         Int           @default(0)
+  errors24h         Int       @default(0)
 
   // Conteos
-  fileCount         Int           @default(0)
-  folderCount       Int           @default(0)
+  fileCount   Int @default(0)
+  folderCount Int @default(0)
 
-  lastCheckAt       DateTime?
-  createdAt         DateTime      @default(now())
-  updatedAt         DateTime      @updatedAt
+  lastCheckAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
-  credentials       accountCredential?
-  assets            asset[]
+  credentials      accountCredential?
+  assets           asset[]
   // Relaciones de backups (self-relation many-to-many a través de megaAccountBackup)
-  backups           megaAccountBackup[]    @relation("MainAccountBackups")      // Este account (main) -> backups
-  assignedAsBackup  megaAccountBackup[]    @relation("BackupOfMainAccounts")    // Este account (backup) -> mains
+  backups          megaAccountBackup[] @relation("MainAccountBackups") // Este account (main) -> backups
+  assignedAsBackup megaAccountBackup[] @relation("BackupOfMainAccounts") // Este account (backup) -> mains
   // Réplicas alojadas en esta cuenta cuando actúa como backup
-  assetReplicas     AssetReplica[]
-    @@map("megaaccount")
+  assetReplicas    AssetReplica[]
+
+  @@map("megaaccount")
 }
 
 model megaAccountBackup {
@@ -144,7 +149,7 @@ model megaAccountBackup {
 
   @@unique([mainAccountId, backupAccountId])
   @@index([backupAccountId])
-    @@map("megaaccountbackup")
+  @@map("megaaccountbackup")
 }
 
 enum AccountType {
@@ -153,16 +158,17 @@ enum AccountType {
 }
 
 model accountCredential {
-  id        Int          @id @default(autoincrement())
-  accountId Int          @unique
-  encData   Bytes        // blob cifrado (AES-GCM)
+  id        Int      @id @default(autoincrement())
+  accountId Int      @unique
+  encData   Bytes // blob cifrado (AES-GCM)
   encIv     Bytes
   encTag    Bytes
-  createdAt DateTime     @default(now())
-  updatedAt DateTime     @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  account   megaAccount  @relation(fields: [accountId], references: [id])
-    @@map("accountcredential")
+  account megaAccount @relation(fields: [accountId], references: [id])
+
+  @@map("accountcredential")
 }
 
 enum AssetStatus {
@@ -173,15 +179,15 @@ enum AssetStatus {
 }
 
 model asset {
-  id           Int          @id @default(autoincrement())
-  title        String
-  titleEn      String?      // nombre en inglés
-  slug         String       @unique
-  description  String?
-  isPremium    Boolean      @default(false)
+  id          Int     @id @default(autoincrement())
+  title       String
+  titleEn     String? // nombre en inglés
+  slug        String  @unique
+  description String?
+  isPremium   Boolean @default(false)
 
   // Enlace de MEGA (placeholder, se modificará más adelante)
-  megaLink     String?
+  megaLink String?
 
   // Archivo del asset (opcional)
   archiveName  String?
@@ -189,34 +195,34 @@ model asset {
   fileSizeB    BigInt? @db.UnsignedBigInt // tamaño persistente del archivo original para mostrar info
 
   // Imágenes asociadas (array de URLs o nombres)
-  images       Json?
+  images Json?
 
-  status       AssetStatus  @default(DRAFT)
+  status AssetStatus @default(DRAFT)
 
   // Contador de descargas
-  downloads    Int          @default(0)
+  downloads Int @default(0)
 
   // Relación con la cuenta de MEGA
-  accountId    Int
-  account      megaAccount  @relation(fields: [accountId], references: [id])
+  accountId Int
+  account   megaAccount @relation(fields: [accountId], references: [id])
 
   // Relación muchas-a-muchas con categorías
-  categories   category[]
+  categories category[]
 
   // Nueva relación muchas-a-muchas con tags
-  tags         tag[]
+  tags tag[]
 
   // NUEVO: estado básico del link
-  megaLinkAlive     Boolean?   // null = nunca se chequeó, true/false = último resultado
-  megaLinkCheckedAt DateTime?  // fecha del último chequeo
+  megaLinkAlive     Boolean? // null = nunca se chequeó, true/false = último resultado
+  megaLinkCheckedAt DateTime? // fecha del último chequeo
 
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
   // Réplicas en cuentas backup
-  replicas     AssetReplica[]
+  replicas  AssetReplica[]
 
   @@index([accountId])
-    @@map("asset")
+  @@map("asset")
 }
 
 // Estado de una réplica del asset en cuentas backup
@@ -229,53 +235,55 @@ enum ReplicaStatus {
 
 // Réplica de un asset en una cuenta backup (soporta múltiples backups futuras)
 model AssetReplica {
-  id          Int            @id @default(autoincrement())
-  assetId     Int
-  asset       asset          @relation(fields: [assetId], references: [id], onDelete: Cascade)
-  accountId   Int
-  account     megaAccount    @relation(fields: [accountId], references: [id])
-  status      ReplicaStatus  @default(PENDING)
-  megaLink    String?
-  remotePath  String?
+  id           Int           @id @default(autoincrement())
+  assetId      Int
+  asset        asset         @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  accountId    Int
+  account      megaAccount   @relation(fields: [accountId], references: [id])
+  status       ReplicaStatus @default(PENDING)
+  megaLink     String?
+  remotePath   String?
   errorMessage String?
-  startedAt   DateTime?
-  finishedAt  DateTime?
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
+  startedAt    DateTime?
+  finishedAt   DateTime?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
 
   @@unique([assetId, accountId])
   @@index([accountId])
   @@index([status])
   @@index([createdAt(sort: Desc)])
-    @@map("assetreplica")
+  @@map("assetreplica")
 }
 
 model category {
   id          Int      @id @default(autoincrement())
   name        String   @unique
-  nameEn      String?  // sinónimo en inglés
+  nameEn      String? // sinónimo en inglés
   slug        String   @unique
   slugEn      String?  @unique
   description String?
   assets      asset[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
-    @@map("category")
+
+  @@map("category")
 }
 
 model tag {
-  id        Int      @id @default(autoincrement())
-  name      String   @unique
-  nameEn    String?  // adjetivo en inglés
-  slug      String   @unique
-  slugEn    String?  @unique
+  id     Int     @id @default(autoincrement())
+  name   String  @unique
+  nameEn String? // adjetivo en inglés
+  slug   String  @unique
+  slugEn String? @unique
 
   // Relación inversa M:N con assets
-  assets    asset[]
+  assets asset[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-    @@map("tag")
+
+  @@map("tag")
 }
 
 // Reportes de links rotos
@@ -287,30 +295,30 @@ enum BrokenReportStatus {
 }
 
 model BrokenReport {
-  id        Int                 @id @default(autoincrement())
+  id        Int                @id @default(autoincrement())
   assetId   Int
   note      String?
-  status    BrokenReportStatus  @default(NEW)
-  createdAt DateTime            @default(now())
+  status    BrokenReportStatus @default(NEW)
+  createdAt DateTime           @default(now())
   ip        String?
   ua        String?
 
   @@index([createdAt(sort: Desc)])
   @@index([assetId])
-    @@map("brokenreport")
+  @@map("brokenreport")
 }
 
 // Historial de descargas por usuario (máx 20 por usuario)
 model DownloadHistory {
   id           Int      @id @default(autoincrement())
-  userId       Int      // No FK, solo referencia
-  assetId      Int      // No FK, solo referencia
-  assetTitle   String?  // Copia el título del asset al momento de la descarga
+  userId       Int // No FK, solo referencia
+  assetId      Int // No FK, solo referencia
+  assetTitle   String? // Copia el título del asset al momento de la descarga
   downloadedAt DateTime @default(now())
 
   @@index([userId])
   @@index([downloadedAt(sort: Desc)])
-    @@map("downloadhistory")
+  @@map("downloadhistory")
 }
 
 // Notificaciones internas (solo admin por ahora)
@@ -334,37 +342,76 @@ enum NotificationTypeStatus {
 }
 
 model Notification {
-  id          Int                @id @default(autoincrement())
-  title       String
-  body        String?
-  status      NotificationStatus @default(UNREAD)
-  type        NotificationType   @default(AUTOMATION)
-  typeStatus  NotificationTypeStatus @default(PENDING)
-  createdAt   DateTime           @default(now())
-  updatedAt   DateTime           @updatedAt
+  id         Int                    @id @default(autoincrement())
+  title      String
+  body       String?
+  status     NotificationStatus     @default(UNREAD)
+  type       NotificationType       @default(AUTOMATION)
+  typeStatus NotificationTypeStatus @default(PENDING)
+  createdAt  DateTime               @default(now())
+  updatedAt  DateTime               @updatedAt
 
   @@index([status])
-    @@map("notification")
+  @@map("notification")
 }
-
 
 // Modelo de pagos multi-pasarela (PayPal, Stripe, MercadoPago, etc)
 model Payment {
   id                Int      @id @default(autoincrement())
   user              user     @relation(fields: [userId], references: [id])
   userId            Int
-  planType          String   // Ej: "30d", "90d", etc.
-  provider          String   // Ej: "paypal", "stripe", "mercadopago"
-  externalOrderId   String   // ID de la orden en la pasarela
-  externalCaptureId String?  // ID de la captura en la pasarela (si aplica)
-  status            String   // 'pending', 'completed', 'failed', etc.
+  planType          String // Ej: "30d", "90d", etc.
+  provider          String // Ej: "paypal", "stripe", "mercadopago"
+  externalOrderId   String // ID de la orden en la pasarela
+  externalCaptureId String? // ID de la captura en la pasarela (si aplica)
+  status            String // 'pending', 'completed', 'failed', etc.
   amount            Float
   currency          String   @default("USD")
-  rawResponse       Json?    // Respuesta completa de la pasarela
+  rawResponse       Json? // Respuesta completa de la pasarela
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
   @@index([provider])
   @@index([externalOrderId])
-    @@map("payment")
+  @@map("payment")
+}
+
+// Métricas: búsquedas realizadas en el buscador público
+model SearchEvent {
+  id     Int   @id @default(autoincrement())
+  userId Int?
+  user   user? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  queryOriginal      String @db.VarChar(512)
+  queryNorm          String @db.VarChar(191)
+  queryNormNoAccents String @db.VarChar(191)
+  resultCount        Int
+
+  clickCount    Int       @default(0)
+  lastClickedAt DateTime?
+
+  clicks SearchClick[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([createdAt(sort: Desc)])
+  @@index([userId])
+  @@index([queryNormNoAccents])
+  @@map("searchevent")
+}
+
+// Clicks sobre resultados de una búsqueda (dedupe por búsqueda+asset)
+model SearchClick {
+  id            Int      @id @default(autoincrement())
+  searchEventId Int
+  assetId       Int
+  createdAt     DateTime @default(now())
+
+  event SearchEvent @relation(fields: [searchEventId], references: [id], onDelete: Cascade)
+
+  @@unique([searchEventId, assetId])
+  @@index([assetId])
+  @@index([createdAt(sort: Desc)])
+  @@map("searchclick")
 }
