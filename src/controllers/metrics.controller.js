@@ -214,3 +214,43 @@ export async function getTopDownloads(req, res) {
     return res.status(500).json({ error: 'internal' })
   }
 }
+
+export async function getTaxonomyCounts(req, res) {
+  try {
+    const [categoriesRaw, tagsRaw] = await Promise.all([
+      prisma.category.findMany({
+        orderBy: { name: 'asc' },
+        select: {
+          id: true,
+          name: true,
+          _count: { select: { assets: true } },
+        },
+      }),
+      prisma.tag.findMany({
+        orderBy: { name: 'asc' },
+        select: {
+          id: true,
+          name: true,
+          _count: { select: { assets: true } },
+        },
+      }),
+    ])
+
+    const categories = (categoriesRaw || []).map((c) => ({
+      id: c.id,
+      name: c.name,
+      count: c?._count?.assets ?? 0,
+    }))
+
+    const tags = (tagsRaw || []).map((t) => ({
+      id: t.id,
+      name: t.name,
+      count: t?._count?.assets ?? 0,
+    }))
+
+    return res.json({ categories, tags })
+  } catch (e) {
+    console.error('getTaxonomyCounts error', e)
+    return res.status(500).json({ error: 'internal' })
+  }
+}
