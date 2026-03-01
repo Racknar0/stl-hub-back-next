@@ -11,6 +11,7 @@ import meRoutes from './me/index.js';
 import notificationsRoutes from './notifications/index.js';
 import paymentsRoutes from './payments/index.js';
 import metricsRoutes from './metrics/index.js';
+import adminOpsRoutes from './adminOps/index.js';
 
 const router = express.Router();
 
@@ -25,6 +26,7 @@ router.use('/payments', paymentsRoutes);
 
 router.use('/admin/reports', reportsRoutes);
 router.use('/admin/notifications', notificationsRoutes);
+router.use('/admin/ops', adminOpsRoutes);
 
 router.use('/downloads', downloadsRoutes);
 router.use('/me', meRoutes);
