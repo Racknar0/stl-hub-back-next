@@ -1,6 +1,66 @@
 import { PrismaClient } from '@prisma/client';
+import jwt from 'jsonwebtoken';
 
 const prisma = new PrismaClient();
+
+const SEARCH_EVENTS_MAX = Math.max(1000, Number(process.env.SEARCH_EVENTS_MAX || 200000) || 200000)
+const SEARCH_EVENTS_RETENTION_DAYS = Math.max(7, Number(process.env.SEARCH_EVENTS_RETENTION_DAYS || 90) || 90)
+
+const searchCleanupState = globalThis.__searchCleanupState || { lastRunMs: 0, calls: 0 }
+globalThis.__searchCleanupState = searchCleanupState
+
+function normalizeSearchQuery(input) {
+  const original = String(input || '')
+  const q = original.trim().toLowerCase().replace(/\s+/g, ' ')
+  // opcional quitar acentos: lo guardamos para unificar métricas
+  const noAccents = q
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+  return { original: original.trim(), norm: q, normNoAccents: noAccents }
+}
+
+function getUserIdFromAuthHeader(req) {
+  try {
+    const auth = req.headers.authorization || ''
+    const bearer = String(auth).startsWith('Bearer ') ? String(auth).slice(7) : null
+    if (!bearer) return null
+    const secret = process.env.JWT_SECRET || 'dev-secret'
+    const payload = jwt.verify(bearer, secret)
+    const id = Number(payload?.id)
+    return Number.isFinite(id) && id > 0 ? id : null
+  } catch {
+    // Analytics: si el token es inválido, tratamos como anónimo
+    return null
+  }
+}
+
+async function maybeCleanupSearchEvents() {
+  try {
+    // Evitar limpiar en cada request
+    searchCleanupState.calls += 1
+    const now = Date.now()
+    if (searchCleanupState.calls % 50 !== 0 && now - searchCleanupState.lastRunMs < 60 * 60 * 1000) return
+    searchCleanupState.lastRunMs = now
+
+    const cutoff = new Date(now - SEARCH_EVENTS_RETENTION_DAYS * 24 * 60 * 60 * 1000)
+    await prisma.searchEvent.deleteMany({ where: { createdAt: { lt: cutoff } } })
+
+    const total = await prisma.searchEvent.count()
+    if (total <= SEARCH_EVENTS_MAX) return
+
+    // Borrar los más antiguos por batches
+    const toDelete = await prisma.searchEvent.findMany({
+      select: { id: true },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      skip: SEARCH_EVENTS_MAX,
+      take: Math.min(5000, Math.max(1000, total - SEARCH_EVENTS_MAX)),
+    })
+    const ids = toDelete.map((r) => r.id)
+    if (ids.length) await prisma.searchEvent.deleteMany({ where: { id: { in: ids } } })
+  } catch (e) {
+    console.warn('maybeCleanupSearchEvents warn', e?.message || e)
+  }
+}
 
 function startOfDay(d) {
   const t = new Date(d)
@@ -211,6 +271,168 @@ export async function getTopDownloads(req, res) {
     return res.json({ '1d': mapGroup(d1), '1w': mapGroup(d7), '1m': mapGroup(d30), '1y': mapGroup(d365), all: mapGroup(all) })
   } catch (e) {
     console.error('getTopDownloads error', e)
+    return res.status(500).json({ error: 'internal' })
+  }
+}
+
+export async function recordSearchEvent(req, res) {
+  try {
+    const { query, resultCount } = req.body || {}
+    const { original, norm, normNoAccents } = normalizeSearchQuery(query)
+    if (!norm) return res.status(200).json({ ok: true, ignored: true })
+
+    const userId = getUserIdFromAuthHeader(req)
+    const rc = Number(resultCount)
+    const safeResultCount = Number.isFinite(rc) && rc >= 0 ? rc : 0
+
+    const created = await prisma.searchEvent.create({
+      data: {
+        userId: userId || null,
+        queryOriginal: original.slice(0, 512),
+        queryNorm: norm.slice(0, 191),
+        queryNormNoAccents: normNoAccents.slice(0, 191),
+        resultCount: safeResultCount,
+      },
+      select: { id: true },
+    })
+
+    void maybeCleanupSearchEvents()
+    return res.status(201).json({ ok: true, id: created.id })
+  } catch (e) {
+    console.error('recordSearchEvent error', e)
+    // no romper UX del buscador
+    return res.status(200).json({ ok: false })
+  }
+}
+
+export async function recordSearchClick(req, res) {
+  try {
+    const searchEventId = Number(req.params.id)
+    const assetId = Number(req.body?.assetId)
+    if (!Number.isFinite(searchEventId) || searchEventId <= 0) return res.status(400).json({ ok: false })
+    if (!Number.isFinite(assetId) || assetId <= 0) return res.status(400).json({ ok: false })
+
+    let created = false
+    try {
+      await prisma.searchClick.create({
+        data: { searchEventId, assetId },
+        select: { id: true },
+      })
+      created = true
+    } catch (e) {
+      // Dedupe por (searchEventId, assetId)
+      created = false
+    }
+
+    if (created) {
+      await prisma.searchEvent.update({
+        where: { id: searchEventId },
+        data: { clickCount: { increment: 1 }, lastClickedAt: new Date() },
+      })
+    }
+
+    return res.json({ ok: true, created })
+  } catch (e) {
+    console.error('recordSearchClick error', e)
+    return res.status(200).json({ ok: false })
+  }
+}
+
+export async function getSearchInsights(req, res) {
+  try {
+    const now = Date.now()
+    const mk = (ms) => new Date(now - ms)
+    const ranges = {
+      '1d': mk(1 * 24 * 60 * 60 * 1000),
+      '1w': mk(7 * 24 * 60 * 60 * 1000),
+      '1m': mk(30 * 24 * 60 * 60 * 1000),
+      '1y': mk(365 * 24 * 60 * 60 * 1000),
+      all: null,
+    }
+
+    const buildFor = async (gte) => {
+      const whereEvents = gte ? { createdAt: { gte } } : undefined
+      const whereClicks = gte ? { createdAt: { gte } } : undefined
+
+      const [
+        topQueries,
+        zeroQueries,
+        totalSearches,
+        totalClicks,
+        topClicked,
+      ] = await Promise.all([
+        prisma.searchEvent.groupBy({
+          by: ['queryNormNoAccents'],
+          where: whereEvents,
+          _count: { id: true },
+          _avg: { resultCount: true },
+          _sum: { clickCount: true },
+          orderBy: { _count: { id: 'desc' } },
+          take: 30,
+        }),
+        prisma.searchEvent.groupBy({
+          by: ['queryNormNoAccents'],
+          where: { ...(whereEvents || {}), resultCount: 0 },
+          _count: { id: true },
+          orderBy: { _count: { id: 'desc' } },
+          take: 30,
+        }),
+        prisma.searchEvent.count({ where: whereEvents }),
+        prisma.searchClick.count({ where: whereClicks }),
+        prisma.searchClick.groupBy({
+          by: ['assetId'],
+          where: whereClicks,
+          _count: { id: true },
+          orderBy: { _count: { id: 'desc' } },
+          take: 30,
+        }),
+      ])
+
+      const zeroMap = new Map((zeroQueries || []).map((z) => [z.queryNormNoAccents, z._count?.id || 0]))
+
+      const topQueriesOut = (topQueries || []).map((r) => ({
+        query: r.queryNormNoAccents,
+        count: r._count?.id || 0,
+        zeroCount: zeroMap.get(r.queryNormNoAccents) || 0,
+        avgResults: r._avg?.resultCount != null ? Math.round(Number(r._avg.resultCount) * 10) / 10 : 0,
+        clicks: r._sum?.clickCount || 0,
+      }))
+
+      const zeroQueriesOut = (zeroQueries || []).map((r) => ({
+        query: r.queryNormNoAccents,
+        count: r._count?.id || 0,
+      }))
+
+      const assetIds = (topClicked || []).map((r) => r.assetId)
+      const assets = assetIds.length
+        ? await prisma.asset.findMany({ where: { id: { in: assetIds } }, select: { id: true, title: true, slug: true } })
+        : []
+      const assetMap = new Map(assets.map((a) => [a.id, a]))
+
+      const topClickedAssets = (topClicked || []).map((r) => ({
+        assetId: r.assetId,
+        title: assetMap.get(r.assetId)?.title || `#${r.assetId}`,
+        slug: assetMap.get(r.assetId)?.slug || null,
+        count: r._count?.id || 0,
+      }))
+
+      return {
+        totals: { searches: totalSearches, clicks: totalClicks },
+        topQueries: topQueriesOut,
+        zeroQueries: zeroQueriesOut,
+        topClickedAssets,
+      }
+    }
+
+    const out = {}
+    for (const [k, gte] of Object.entries(ranges)) {
+      // eslint-disable-next-line no-await-in-loop
+      out[k] = await buildFor(gte)
+    }
+
+    return res.json(out)
+  } catch (e) {
+    console.error('getSearchInsights error', e)
     return res.status(500).json({ error: 'internal' })
   }
 }
