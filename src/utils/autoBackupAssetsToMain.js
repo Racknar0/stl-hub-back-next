@@ -404,8 +404,38 @@ export async function runAutoRestoreMain(){
         where:{ type:'main', suspended:false, backups:{ some:{} }, assets:{ some:{} } },
         include:{ credentials:true, backups:{ include:{ backupAccount:{ include:{ credentials:true } } } } }
       })
-      mains.sort((a,b)=> (a.lastCheckAt?.getTime()||0) - (b.lastCheckAt?.getTime()||0))
-      main = mains[0]
+
+      // Tratamos MAIN + BACKUPs como un solo ente:
+      // priorizamos el grupo cuya última revisión MÁS ANTIGUA sea la más vieja.
+      // Esto evita que un backup quede desatendido aunque su main se haya revisado recientemente.
+      const getTs = (d) => (d instanceof Date ? d.getTime() : (d ? new Date(d).getTime() : 0));
+
+      const scored = mains.map(m => {
+        const mainTs = getTs(m.lastCheckAt);
+        const backups = (m.backups || [])
+          .map(r => r?.backupAccount)
+          .filter(b => b && b.suspended === false);
+
+        let oldestTs = mainTs;
+        let driver = { type: 'main', id: m.id, ts: mainTs };
+
+        for (const b of backups) {
+          const bTs = getTs(b.lastCheckAt);
+          if (bTs < oldestTs) {
+            oldestTs = bTs;
+            driver = { type: 'backup', id: b.id, ts: bTs };
+          }
+        }
+
+        return { m, oldestTs, driver };
+      });
+
+      scored.sort((a, b) => a.oldestTs - b.oldestTs);
+      main = scored[0]?.m;
+      if (main) {
+        const s0 = scored[0];
+        log.info(`[CRON][PICK] grupo elegido por lastCheckAt más viejo: mainId=${main.id} driver=${s0.driver.type}:${s0.driver.id} oldestTs=${new Date(s0.oldestTs).toISOString()}`);
+      }
     }
     if (!main) { log.info('[CRON] No hay main candidate'); return { ok:true, skipped:true, reason:'NO_MAIN' } }
     if (!main.credentials) throw new Error('Main sin credenciales')
