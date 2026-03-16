@@ -443,9 +443,19 @@ function stripExtension(filename) {
 }
 
 function normalizeForCompare(s) {
+    return normalizeSpacedText(s).replace(/\s+/g, '').trim();
+}
+
+function normalizeSpacedText(s) {
     return String(s || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/([a-z])([0-9])/gi, '$1 $2')
+        .replace(/([0-9])([a-z])/gi, '$1 $2')
         .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '')
+        .replace(/[_\-\.]+/g, ' ')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .replace(/\s+/g, ' ')
         .trim();
 }
 
@@ -467,50 +477,135 @@ function stripDigitsKeepLetters(s) {
     return String(s || '').replace(/\d+/g, '').trim();
 }
 
+const SIMILAR_STOPWORDS = new Set([
+    'the', 'and', 'for', 'with', 'sin', 'con', 'para', 'stl', 'model', 'modelo',
+    'file', 'archivo', 'version', 'ver', 'final', 'new', 'nuevo', 'pack', 'set',
+]);
+
+function canonicalToken(t) {
+    let x = normalizeSpacedText(t);
+    if (!x) return '';
+    // singularizar simple para reducir ruido (models -> model, piezas -> pieza)
+    if (x.length > 4 && x.endsWith('es')) x = x.slice(0, -2);
+    else if (x.length > 3 && x.endsWith('s')) x = x.slice(0, -1);
+    return x;
+}
+
+function toMeaningfulTokens(input, { minLen = 3, includePrefixes = true } = {}) {
+    const raw = normalizeSpacedText(input)
+        .split(/\s+/g)
+        .map((t) => t.trim())
+        .filter(Boolean);
+
+    const out = [];
+    for (const tok of raw) {
+        const base = canonicalToken(tok);
+        const noDigits = canonicalToken(stripDigitsKeepLetters(base));
+        const cand = uniqueStrings([tok, base, noDigits]);
+        for (const c of cand) {
+            if (!c || c.length < minLen) continue;
+            if (SIMILAR_STOPWORDS.has(c)) continue;
+            out.push(c);
+            if (includePrefixes && c.length >= 6) out.push(c.slice(0, 5));
+        }
+    }
+    return uniqueStrings(out);
+}
+
+function extractLastSegment(value) {
+    const txt = String(value || '').trim();
+    const parts = txt.split(/[\\/]+/g).filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : txt;
+}
+
+function buildTrigramSet(compact) {
+    const s = String(compact || '').trim();
+    if (!s) return new Set();
+    if (s.length <= 3) return new Set([s]);
+    const out = new Set();
+    for (let i = 0; i <= s.length - 3; i += 1) {
+        out.add(s.slice(i, i + 3));
+    }
+    return out;
+}
+
+function jaccardSimilarity(setA, setB) {
+    if (!setA?.size || !setB?.size) return 0;
+    let inter = 0;
+    for (const it of setA) if (setB.has(it)) inter += 1;
+    const union = setA.size + setB.size - inter;
+    return union > 0 ? inter / union : 0;
+}
+
+function levenshteinRatio(a, b) {
+    const s = String(a || '');
+    const t = String(b || '');
+    if (!s || !t) return 0;
+    if (s === t) return 1;
+
+    const maxLen = Math.max(s.length, t.length);
+    if (!maxLen) return 0;
+    if (Math.abs(s.length - t.length) > Math.ceil(maxLen * 0.6)) return 0;
+
+    const prev = new Array(t.length + 1);
+    const curr = new Array(t.length + 1);
+
+    for (let j = 0; j <= t.length; j += 1) prev[j] = j;
+
+    for (let i = 1; i <= s.length; i += 1) {
+        curr[0] = i;
+        for (let j = 1; j <= t.length; j += 1) {
+            const cost = s[i - 1] === t[j - 1] ? 0 : 1;
+            curr[j] = Math.min(
+                prev[j] + 1,
+                curr[j - 1] + 1,
+                prev[j - 1] + cost
+            );
+        }
+        for (let j = 0; j <= t.length; j += 1) prev[j] = curr[j];
+    }
+
+    const dist = prev[t.length];
+    return Math.max(0, 1 - dist / maxLen);
+}
+
 function tokenizeSimilarQuery(input) {
-    const base = stripExtension(String(input || '').trim());
+    const base = stripExtension(extractLastSegment(String(input || '').trim()));
     const baseNoDigits = String(base).replace(/\d+/g, ' ').trim();
     const baseNorm = normalizeForCompare(base);
     const baseNoDigitsNorm = normalizeForCompare(baseNoDigits);
 
-    const rawParts = String(base)
-        .split(/[^a-zA-Z0-9]+/g)
+    const strongTokens = toMeaningfulTokens(`${base} ${baseNoDigits}`, {
+        minLen: 3,
+        includePrefixes: true,
+    }).slice(0, 18);
+
+    const safeBase = safeName(base);
+    const searchTerms = uniqueStrings([base, baseNoDigits, safeBase, ...strongTokens])
         .map((t) => String(t || '').trim())
-        .filter(Boolean);
+        .filter((t) => t.length >= 2)
+        .slice(0, 24);
 
-    const tokens = [];
-    for (const p of rawParts) {
-        const low = String(p).toLowerCase().trim();
-        if (low.length >= 3) tokens.push(low);
+    const queryTokenSet = new Set(strongTokens.map((t) => normalizeForCompare(t)).filter(Boolean));
+    const queryTrigrams = buildTrigramSet(baseNorm);
 
-        const noDigits = stripDigitsKeepLetters(low);
-        if (noDigits && noDigits.length >= 3) tokens.push(noDigits);
-
-        // Prefijo para casos como pikachu1 -> pika (y evitar excluir por sufijos/números)
-        const prefixSource = noDigits && noDigits.length >= 4 ? noDigits : low;
-        if (prefixSource && prefixSource.length >= 4) tokens.push(prefixSource.slice(0, 4));
-    }
-
-    const strongTokens = uniqueStrings(tokens)
-        .map((t) => String(t).trim())
-        .filter((t) => t.length >= 3)
-        .slice(0, 12);
-
-    const searchTerms = uniqueStrings([base, baseNoDigits, ...strongTokens])
-        .map((t) => String(t || '').trim())
-        .filter((t) => t.length >= 3)
-        .slice(0, 14);
-
-    return { base, baseNorm, baseNoDigits, baseNoDigitsNorm, strongTokens, searchTerms };
+    return {
+        base,
+        baseNorm,
+        baseNoDigits,
+        baseNoDigitsNorm,
+        strongTokens,
+        searchTerms,
+        queryTokenSet,
+        queryTrigrams,
+        queryPhrase: normalizeSpacedText(base),
+        queryCompact: normalizeForCompare(base),
+    };
 }
 
 function tokenizeCandidateForScore(s) {
-    const parts = String(s || '')
-        .toLowerCase()
-        .split(/[^a-z0-9]+/g)
-        .map((t) => stripDigitsKeepLetters(t))
-        .filter((t) => t && t.length >= 3);
-    return new Set(parts.map((t) => normalizeForCompare(t)).filter(Boolean));
+    const tokens = toMeaningfulTokens(s, { minLen: 3, includePrefixes: true });
+    return new Set(tokens.map((t) => normalizeForCompare(t)).filter(Boolean));
 }
 
 // Listar y obtener
@@ -635,29 +730,27 @@ export const similarAssets = async (req, res) => {
         const querySizeB = Number(req.query?.sizeB || req.query?.sizeBytes || 0);
         const hasQuerySize = Number.isFinite(querySizeB) && querySizeB > 0;
 
-        const { base, baseNorm, baseNoDigits, baseNoDigitsNorm, strongTokens, searchTerms } = tokenizeSimilarQuery(raw);
+        const {
+            base,
+            baseNorm,
+            baseNoDigitsNorm,
+            strongTokens,
+            searchTerms,
+            queryTokenSet,
+            queryTrigrams,
+            queryPhrase,
+            queryCompact,
+        } = tokenizeSimilarQuery(raw);
 
-        const extractLastSegment = (s) => {
-            const t = String(s || '');
-            const parts = t.split(/[\\/]+/g).filter(Boolean);
-            return parts.length ? parts[parts.length - 1] : t;
-        };
-
-        const stripExt = (s) => {
-            const t = String(s || '');
-            return t.replace(/\.[a-z0-9]{1,6}$/i, '');
-        };
-
-        const getCandidateKey = (it) => {
-            const last = extractLastSegment(it?.archiveName || it?.slug || it?.title || '');
-            return normalizeForCompare(stripExt(last));
-        };
+        const stripExt = (s) => String(s || '').replace(/\.[a-z0-9]{1,6}$/i, '');
 
         const where = {};
         if (searchTerms.length) {
-            where.OR = searchTerms.flatMap((term) => [
+            const terms = searchTerms.slice(0, 18);
+            where.OR = terms.flatMap((term) => [
                 { archiveName: { contains: term } },
                 { title: { contains: term } },
+                { titleEn: { contains: term } },
                 { slug: { contains: safeName(term) } },
             ]);
         }
@@ -683,70 +776,106 @@ export const similarAssets = async (req, res) => {
             orderBy: { id: 'desc' },
         });
 
-        const queryTokenSet = new Set(
-            (strongTokens || [])
-                .map((t) => normalizeForCompare(stripDigitsKeepLetters(t)))
-                .filter((t) => t && t.length >= 3)
-        );
-
-        const scored = (items || [])
+        const ranked = (items || [])
             .map((it) => {
-                const candidateText = `${it.archiveName || ''} ${it.title || ''} ${it.titleEn || ''} ${it.slug || ''}`;
+                const candidateLast = stripExt(extractLastSegment(it?.archiveName || it?.slug || it?.title || ''));
+                const candidateText = `${candidateLast} ${it.archiveName || ''} ${it.title || ''} ${it.titleEn || ''} ${it.slug || ''}`;
                 const nameNorm = normalizeForCompare(candidateText);
-                const keyNorm = getCandidateKey(it);
+                const keyNorm = normalizeForCompare(candidateLast);
+                const keyNoDigitsNorm = normalizeForCompare(stripDigitsKeepLetters(candidateLast));
+                const namePhraseNorm = normalizeSpacedText(candidateText);
+                const candTrigrams = buildTrigramSet(keyNorm || nameNorm);
+                const candTokenSet = tokenizeCandidateForScore(candidateText);
+
                 let score = 0;
+                let nameSignal = 0;
 
                 // 1) Prioridad máxima: match exacto de nombre (base) contra el archivo/slug (sin extensión)
-                if (baseNorm && keyNorm && keyNorm === baseNorm) score += 260;
-                if (baseNoDigitsNorm && keyNorm && keyNorm === baseNoDigitsNorm) score += 240;
+                if (baseNorm && keyNorm && keyNorm === baseNorm) nameSignal += 360;
+                if (baseNoDigitsNorm && keyNoDigitsNorm && keyNoDigitsNorm === baseNoDigitsNorm) nameSignal += 320;
 
-                if (baseNoDigitsNorm && nameNorm === baseNoDigitsNorm) score += 120;
-                if (baseNorm && nameNorm === baseNorm) score += 110;
-                if (baseNoDigitsNorm && nameNorm.includes(baseNoDigitsNorm)) score += 70;
-                if (baseNorm && nameNorm.includes(baseNorm)) score += 45;
+                if (baseNorm && nameNorm === baseNorm) nameSignal += 140;
+                if (baseNoDigitsNorm && nameNorm === baseNoDigitsNorm) nameSignal += 130;
+                if (baseNorm && nameNorm.includes(baseNorm)) nameSignal += 80;
+                if (baseNoDigitsNorm && nameNorm.includes(baseNoDigitsNorm)) nameSignal += 75;
+
+                if (queryCompact && keyNorm && queryCompact.includes(keyNorm) && keyNorm.length >= 6) nameSignal += 40;
+                if (queryCompact && keyNorm && keyNorm.includes(queryCompact) && queryCompact.length >= 6) nameSignal += 40;
 
                 for (const t of strongTokens || []) {
-                    const tNorm = normalizeForCompare(stripDigitsKeepLetters(t));
-                    if (tNorm && nameNorm.includes(tNorm)) score += 14;
+                    const tNorm = normalizeForCompare(t);
+                    if (tNorm && nameNorm.includes(tNorm)) nameSignal += 18;
                 }
 
-                // Bonus por overlap de tokens (evita que un único sufijo/número deje fuera coincidencias claras)
+                // 2) Cobertura de tokens (query vs candidato)
                 if (queryTokenSet.size) {
-                    const candTokenSet = tokenizeCandidateForScore(candidateText);
                     let hits = 0;
                     for (const qt of queryTokenSet) {
                         if (candTokenSet.has(qt)) hits += 1;
                     }
-                    const ratio = hits / queryTokenSet.size;
-                    score += Math.round(30 * ratio);
+                    const queryCoverage = hits / queryTokenSet.size;
+                    const candCoverage = candTokenSet.size ? (hits / candTokenSet.size) : 0;
+                    nameSignal += Math.round(95 * queryCoverage + 45 * candCoverage);
+                    if (hits >= 2) nameSignal += 24;
+                    if (hits === queryTokenSet.size && hits > 0) nameSignal += 28;
                 }
+
+                // 3) Similitud de cadena: trigramas + Levenshtein (tolerante a guiones/espacios/variantes)
+                if (queryTrigrams?.size && candTrigrams?.size) {
+                    const tri = jaccardSimilarity(queryTrigrams, candTrigrams);
+                    nameSignal += Math.round(120 * tri);
+                }
+                if (baseNorm && (keyNorm || nameNorm)) {
+                    const lev = levenshteinRatio(baseNorm, keyNorm || nameNorm);
+                    if (lev >= 0.58) nameSignal += Math.round((lev - 0.55) * 140);
+                }
+
+                // 4) Frase normalizada con espacios (detecta matches por palabras aunque cambien guiones/orden parcial)
+                if (queryPhrase && namePhraseNorm) {
+                    if (namePhraseNorm.includes(queryPhrase)) nameSignal += 45;
+                    const queryWords = queryPhrase.split(/\s+/g).filter(Boolean);
+                    if (queryWords.length >= 2) {
+                        let phraseHits = 0;
+                        for (const qw of queryWords) {
+                            if (qw.length >= 3 && namePhraseNorm.includes(qw)) phraseHits += 1;
+                        }
+                        const phraseRatio = phraseHits / queryWords.length;
+                        nameSignal += Math.round(36 * phraseRatio);
+                    }
+                }
+
+                score += nameSignal;
 
                 const imgCount = Array.isArray(it.images) ? it.images.length : 0;
                 score += Math.min(20, imgCount * 2);
                 if (it.archiveName) score += 5;
+                if (String(it.status || '').toLowerCase() === 'published') score += 4;
 
                 // 2) Peso similar (solo suma si ya hay similitud de nombre, para evitar falsos positivos por tamaño)
-                if (hasQuerySize && score >= 20) {
+                if (hasQuerySize && nameSignal >= 22) {
                     const candSize = Number(it?.fileSizeB ?? it?.archiveSizeB ?? 0);
                     if (Number.isFinite(candSize) && candSize > 0) {
                         const denom = Math.max(querySizeB, candSize);
                         const diffRatio = denom ? Math.abs(candSize - querySizeB) / denom : 1;
                         // Bonus escalonado (más fuerte cuanto más cercano)
-                        if (diffRatio <= 0.01) score += 70;
-                        else if (diffRatio <= 0.03) score += 55;
-                        else if (diffRatio <= 0.07) score += 38;
-                        else if (diffRatio <= 0.15) score += 20;
-                        else if (diffRatio <= 0.25) score += 10;
+                        if (diffRatio <= 0.005) score += 85;
+                        else if (diffRatio <= 0.015) score += 68;
+                        else if (diffRatio <= 0.03) score += 52;
+                        else if (diffRatio <= 0.06) score += 36;
+                        else if (diffRatio <= 0.12) score += 24;
+                        else if (diffRatio <= 0.2) score += 12;
                     }
                 }
 
-                return { ...it, _score: score };
+                return { ...it, _score: score, _nameSignal: nameSignal };
             })
             .sort((a, b) => {
                 if (b._score !== a._score) return b._score - a._score;
                 return Number(new Date(b.updatedAt)) - Number(new Date(a.updatedAt));
-            })
-            .slice(0, limit);
+            });
+
+        const filtered = ranked.filter((it) => it._score >= 20 || it._nameSignal >= 16);
+        const scored = (filtered.length ? filtered : ranked).slice(0, limit);
 
         const safe = toJsonSafe(scored).map(({ _score, ...rest }) => rest);
         return res.json({ query: raw, base, tokens: strongTokens, items: safe });
