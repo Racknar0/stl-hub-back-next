@@ -35,6 +35,17 @@ import {
   unstickMegaBatch,
   removeAssetFromMegaBatch,
   similarAssets,
+  getAssetImageHashStats,
+  getAssetImageHashBackfillStatus,
+  startAssetImageHashBackfill,
+  listIgnoredSimilarSignatures,
+  upsertIgnoredSimilarSignature,
+  clearIgnoredSimilarSignatures,
+  deleteIgnoredSimilarSignature,
+  listIgnoredSimilarPairs,
+  upsertIgnoredSimilarPairs,
+  clearIgnoredSimilarPairs,
+  deleteIgnoredSimilarPair,
 } from '../../controllers/asset.controller.js';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
 import { createBrokenReport } from '../../controllers/brokenReport.controller.js'
@@ -104,6 +115,18 @@ router.post('/randomize-free', randomizeFree)
 
 // Similaridad por nombre (para uploader)
 router.get('/similar', similarAssets);
+router.post('/similar', similarAssets);
+router.get('/similar/hash/stats', getAssetImageHashStats);
+router.get('/similar/hash/backfill-status', getAssetImageHashBackfillStatus);
+router.post('/similar/hash/backfill', startAssetImageHashBackfill);
+router.get('/similar/ignored-signatures', listIgnoredSimilarSignatures);
+router.post('/similar/ignored-signatures', upsertIgnoredSimilarSignature);
+router.delete('/similar/ignored-signatures', clearIgnoredSimilarSignatures);
+router.delete('/similar/ignored-signatures/:signature', deleteIgnoredSimilarSignature);
+router.get('/similar/ignored-pairs', listIgnoredSimilarPairs);
+router.post('/similar/ignored-pairs', upsertIgnoredSimilarPairs);
+router.delete('/similar/ignored-pairs', clearIgnoredSimilarPairs);
+router.delete('/similar/ignored-pairs/:assetAId/:assetBId', deleteIgnoredSimilarPair);
 
 // GET /assets?q=texto&pageIndex=0&pageSize=25 para paginación del lado del servidor
 router.get('/', listAssets);

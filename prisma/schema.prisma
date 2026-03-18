@@ -220,9 +220,62 @@ model asset {
   updatedAt DateTime       @updatedAt
   // Réplicas en cuentas backup
   replicas  AssetReplica[]
+  // Hashes por imagen para comparación de similitud
+  imageHashes AssetImageHash[]
 
   @@index([accountId])
   @@map("asset")
+}
+
+// Hash perceptual por imagen de asset para búsqueda de similitud escalable
+model AssetImageHash {
+  id          Int      @id @default(autoincrement())
+  assetId     Int
+  asset       asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  imagePath   String
+  imageIndex  Int?
+  hashBits    String   // aHash binario (64 bits)
+  hashHex     String   // aHash hexadecimal (16 chars)
+  hashPrefix  String?  // prefijo para bucket/index rápido
+  hashAlgo    String   @default("ahash-v1")
+  hashVersion Int      @default(1)
+  imageWidth  Int?
+  imageHeight Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([assetId, imagePath])
+  @@index([assetId])
+  @@index([hashPrefix])
+  @@index([updatedAt(sort: Desc)])
+  @@map("assetimagehash")
+}
+
+// Firmas/grupos descartados manualmente como falsos positivos
+model AssetSimilarIgnoreSignature {
+  id        Int      @id @default(autoincrement())
+  signature String   @unique
+  reason    String?
+  assetIds  Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([updatedAt(sort: Desc)])
+  @@map("assetsimilarignoresignature")
+}
+
+// Descarte de falsos positivos por par de assets (permite detectar nuevos assets en el futuro)
+model AssetSimilarIgnorePair {
+  id        Int      @id @default(autoincrement())
+  assetAId  Int
+  assetBId  Int
+  reason    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([assetAId, assetBId])
+  @@index([updatedAt(sort: Desc)])
+  @@map("assetsimilarignorepair")
 }
 
 // Estado de una réplica del asset en cuentas backup

@@ -32,6 +32,22 @@ const megaBatchByMain = new Map();
 const megaBatchQuietHolds = globalThis.__megaBatchQuietHolds || new Map();
 globalThis.__megaBatchQuietHolds = megaBatchQuietHolds;
 
+const assetHashBackfillState =
+    globalThis.__assetHashBackfillState || {
+        running: false,
+        startedAt: null,
+        finishedAt: null,
+        lastError: null,
+        totalAssets: 0,
+        processedAssets: 0,
+        totalImages: 0,
+        processedImages: 0,
+        hashedRows: 0,
+        failedImages: 0,
+        currentAssetId: null,
+    };
+globalThis.__assetHashBackfillState = assetHashBackfillState;
+
 function isMegaBatchQuietHoldActive(mainAccountId) {
     try {
         const id = Number(mainAccountId);
@@ -213,6 +229,213 @@ function safeName(s) {
         .replace(/[^a-z0-9-_]+/g, '-')
         .replace(/^-+|-+$/g, '')
         .slice(0, 120);
+}
+
+function normalizeSignatureForStore(signature) {
+    return String(signature || '')
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, '-')
+        .replace(/[^a-z0-9-_]+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 240);
+}
+
+function normalizePairForStore(assetAId, assetBId) {
+    const a = Number(assetAId);
+    const b = Number(assetBId);
+    if (!Number.isFinite(a) || !Number.isFinite(b) || a <= 0 || b <= 0)
+        return null;
+    if (a === b) return null;
+    return a < b ? { assetAId: a, assetBId: b } : { assetAId: b, assetBId: a };
+}
+
+function toStringArray(value) {
+    if (!Array.isArray(value)) return [];
+    return value.map((v) => String(v || '').trim()).filter(Boolean);
+}
+
+function getSafeUploadAbsolutePath(relPath) {
+    const rel = String(relPath || '').replace(/^[/\\]+/, '');
+    if (!rel) return null;
+    const abs = path.resolve(path.join(UPLOADS_DIR, rel));
+    const root = path.resolve(UPLOADS_DIR) + path.sep;
+    if (!abs.startsWith(root)) return null;
+    return abs;
+}
+
+async function computeAHashFromImagePath(absPath) {
+    const { data, info } = await sharp(absPath)
+        .rotate()
+        .flatten({ background: '#ffffff' })
+        .grayscale()
+        .resize(8, 8, { fit: 'fill' })
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+
+    if (!data || !data.length) throw new Error('Imagen vacía para hash');
+
+    let sum = 0;
+    for (const b of data) sum += Number(b || 0);
+    const avg = sum / data.length;
+
+    let bits = '';
+    for (const b of data) bits += Number(b || 0) >= avg ? '1' : '0';
+
+    const safeBits = bits.slice(0, 64).padEnd(64, '0');
+    const hex = BigInt(`0b${safeBits}`).toString(16).padStart(16, '0');
+    return {
+        hashBits: safeBits,
+        hashHex: hex,
+        hashPrefix: hex.slice(0, 8),
+        imageWidth: Number(info?.width || 0) || null,
+        imageHeight: Number(info?.height || 0) || null,
+    };
+}
+
+function isPrismaMissingTableError(err) {
+    const code = String(err?.code || '');
+    const msg = String(err?.message || '').toLowerCase();
+    return (
+        code === 'P2021' ||
+        msg.includes('does not exist') ||
+        msg.includes('unknown table')
+    );
+}
+
+async function syncAssetImageHashes(assetId, imagePaths = [], { clearMissing = true } = {}) {
+    const id = Number(assetId);
+    if (!Number.isFinite(id) || id <= 0) return { hashed: 0, failed: 0 };
+
+    const paths = toStringArray(imagePaths);
+    if (clearMissing) {
+        if (paths.length) {
+            await prisma.assetImageHash.deleteMany({
+                where: {
+                    assetId: id,
+                    imagePath: { notIn: paths },
+                },
+            });
+        } else {
+            await prisma.assetImageHash.deleteMany({ where: { assetId: id } });
+        }
+    }
+
+    let hashed = 0;
+    let failed = 0;
+    for (let i = 0; i < paths.length; i += 1) {
+        const imagePath = paths[i];
+        try {
+            const absPath = getSafeUploadAbsolutePath(imagePath);
+            if (!absPath || !fs.existsSync(absPath)) {
+                failed += 1;
+                continue;
+            }
+
+            const h = await computeAHashFromImagePath(absPath);
+            await prisma.assetImageHash.upsert({
+                where: { assetId_imagePath: { assetId: id, imagePath } },
+                create: {
+                    assetId: id,
+                    imagePath,
+                    imageIndex: i,
+                    hashBits: h.hashBits,
+                    hashHex: h.hashHex,
+                    hashPrefix: h.hashPrefix,
+                    hashAlgo: 'ahash-v1',
+                    hashVersion: 1,
+                    imageWidth: h.imageWidth,
+                    imageHeight: h.imageHeight,
+                },
+                update: {
+                    imageIndex: i,
+                    hashBits: h.hashBits,
+                    hashHex: h.hashHex,
+                    hashPrefix: h.hashPrefix,
+                    hashAlgo: 'ahash-v1',
+                    hashVersion: 1,
+                    imageWidth: h.imageWidth,
+                    imageHeight: h.imageHeight,
+                },
+            });
+            hashed += 1;
+        } catch (e) {
+            failed += 1;
+            console.warn(
+                `[ASSETS][HASH] warn asset=${id} image=${imagePath}:`,
+                e?.message || String(e)
+            );
+        }
+    }
+    return { hashed, failed };
+}
+
+async function runAssetImageHashBackfill({ batchSize = 100 } = {}) {
+    if (assetHashBackfillState.running) return;
+
+    assetHashBackfillState.running = true;
+    assetHashBackfillState.startedAt = new Date().toISOString();
+    assetHashBackfillState.finishedAt = null;
+    assetHashBackfillState.lastError = null;
+    assetHashBackfillState.totalAssets = 0;
+    assetHashBackfillState.processedAssets = 0;
+    assetHashBackfillState.totalImages = 0;
+    assetHashBackfillState.processedImages = 0;
+    assetHashBackfillState.hashedRows = 0;
+    assetHashBackfillState.failedImages = 0;
+    assetHashBackfillState.currentAssetId = null;
+
+    try {
+        const take = Math.max(10, Math.min(500, Number(batchSize) || 100));
+        const totalAssets = await prisma.asset.count();
+        assetHashBackfillState.totalAssets = Number(totalAssets || 0);
+
+        let cursorId = 0;
+        while (true) {
+            const page = await prisma.asset.findMany({
+                where: cursorId > 0 ? { id: { gt: cursorId } } : undefined,
+                select: { id: true, images: true },
+                orderBy: { id: 'asc' },
+                take,
+            });
+            if (!page.length) break;
+
+            for (const item of page) {
+                assetHashBackfillState.currentAssetId = item.id;
+                const images = toStringArray(item?.images || []);
+                assetHashBackfillState.totalImages += images.length;
+
+                try {
+                    const r = await syncAssetImageHashes(item.id, images, {
+                        clearMissing: true,
+                    });
+                    assetHashBackfillState.hashedRows += Number(r?.hashed || 0);
+                    assetHashBackfillState.failedImages += Number(
+                        r?.failed || 0
+                    );
+                } catch (e) {
+                    assetHashBackfillState.failedImages += images.length;
+                    console.warn(
+                        `[ASSETS][HASH][BACKFILL] warn asset=${item.id}:`,
+                        e?.message || String(e)
+                    );
+                }
+
+                assetHashBackfillState.processedAssets += 1;
+                assetHashBackfillState.processedImages += images.length;
+            }
+
+            cursorId = page[page.length - 1].id;
+        }
+    } catch (e) {
+        assetHashBackfillState.lastError = e?.message || String(e);
+        console.error('[ASSETS][HASH][BACKFILL] error:', e);
+    } finally {
+        assetHashBackfillState.currentAssetId = null;
+        assetHashBackfillState.running = false;
+        assetHashBackfillState.finishedAt = new Date().toISOString();
+    }
 }
 
 
@@ -608,6 +831,130 @@ function tokenizeCandidateForScore(s) {
     return new Set(tokens.map((t) => normalizeForCompare(t)).filter(Boolean));
 }
 
+function normalizeAHashHex(input) {
+    const cleaned = String(input || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^0-9a-f]/g, '');
+    if (!cleaned) return '';
+    if (cleaned.length >= 16) return cleaned.slice(0, 16);
+    return cleaned.padStart(16, '0');
+}
+
+function uniqueAHashHexes(input, { max = 12 } = {}) {
+    const arr = Array.isArray(input) ? input : [input];
+    const out = [];
+    const seen = new Set();
+    for (const item of arr) {
+        if (out.length >= max) break;
+        const hex = normalizeAHashHex(item);
+        if (!hex || hex.length !== 16) continue;
+        if (seen.has(hex)) continue;
+        seen.add(hex);
+        out.push(hex);
+    }
+    return out;
+}
+
+function popcountBigInt(v) {
+    let n = BigInt(v || 0);
+    let c = 0;
+    while (n > 0n) {
+        n &= n - 1n;
+        c += 1;
+    }
+    return c;
+}
+
+function hammingDistanceFromHex(aHex, bHex) {
+    try {
+        const a = BigInt(`0x${normalizeAHashHex(aHex)}`);
+        const b = BigInt(`0x${normalizeAHashHex(bHex)}`);
+        return popcountBigInt(a ^ b);
+    } catch {
+        return 64;
+    }
+}
+
+function scoreImageHashSimilarity(queryHashes, candidateHashes) {
+    const q = uniqueAHashHexes(queryHashes, { max: 12 });
+    const c = uniqueAHashHexes(candidateHashes, { max: 48 });
+    if (!q.length || !c.length) {
+        return {
+            score: 0,
+            matchCount: 0,
+            strongCount: 0,
+            bestDistance: null,
+            averageBestDistance: null,
+        };
+    }
+
+    const bestDistances = q.map((qh) => {
+        let best = 64;
+        for (const ch of c) {
+            const dist = hammingDistanceFromHex(qh, ch);
+            if (dist < best) best = dist;
+            if (best === 0) break;
+        }
+        return best;
+    });
+
+    const bestDistance = bestDistances.length ? Math.min(...bestDistances) : 64;
+    const averageBestDistance =
+        bestDistances.length > 0
+            ? bestDistances.reduce((sum, d) => sum + d, 0) / bestDistances.length
+            : 64;
+
+    const matchCount = bestDistances.filter((d) => d <= 10).length;
+    const strongCount = bestDistances.filter((d) => d <= 6).length;
+    const coverage = matchCount / q.length;
+    const strongCoverage = strongCount / q.length;
+
+    let score = 0;
+    score += Math.round(coverage * 120);
+    score += Math.round(strongCoverage * 85);
+    score += Math.max(0, Math.round((14 - averageBestDistance) * 5));
+    if (bestDistance <= 4) score += 48;
+    else if (bestDistance <= 6) score += 30;
+    else if (bestDistance <= 8) score += 18;
+
+    return {
+        score,
+        matchCount,
+        strongCount,
+        bestDistance,
+        averageBestDistance: Number(averageBestDistance.toFixed(2)),
+    };
+}
+
+function parseStringListInput(value, { max = 32 } = {}) {
+    let arr = [];
+    if (Array.isArray(value)) arr = value;
+    else if (value !== undefined && value !== null) arr = String(value).split(',');
+
+    return uniqueStrings(
+        arr
+            .map((v) => String(v || '').trim())
+            .filter(Boolean)
+    ).slice(0, max);
+}
+
+function parseNumberListInput(value, { max = 32 } = {}) {
+    const raw = parseStringListInput(value, { max: max * 2 });
+    const out = [];
+    const seen = new Set();
+    for (const it of raw) {
+        if (out.length >= max) break;
+        const n = Number(it);
+        if (!Number.isFinite(n) || n <= 0) continue;
+        const key = Math.trunc(n);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(key);
+    }
+    return out;
+}
+
 // Listar y obtener
 export const listAssets = async (req, res) => {
     try {
@@ -719,18 +1066,80 @@ export const listAssets = async (req, res) => {
     }
 };
 
-// Buscar assets similares (para uploader): por nombre de archivo/slug aproximado
-// GET /assets/similar?filename=naruto.rar&limit=8&sizeB=123456
+// Buscar assets similares (para uploader): señal combinada por nombre + imagen + metadatos
+// GET/POST /assets/similar?filename=naruto.rar&limit=8&sizeB=123456
 export const similarAssets = async (req, res) => {
     try {
-        const raw = String(req.query?.filename || req.query?.q || '').trim();
-        if (!raw) return res.status(400).json({ message: 'filename required' });
+        const rawFilename = String(
+            req.body?.filename || req.query?.filename || req.body?.q || req.query?.q || ''
+        ).trim();
+        if (!rawFilename)
+            return res.status(400).json({ message: 'filename required' });
 
-        const limit = Math.max(1, Math.min(25, Number(req.query?.limit) || 8));
-        const querySizeB = Number(req.query?.sizeB || req.query?.sizeBytes || 0);
+        const queryTitle = String(req.body?.title || req.query?.title || '').trim();
+        const queryTitleEn = String(req.body?.titleEn || req.query?.titleEn || '').trim();
+
+        const limit = Math.max(
+            1,
+            Math.min(25, Number(req.body?.limit ?? req.query?.limit) || 8)
+        );
+        const querySizeB = Number(
+            req.body?.sizeB ??
+                req.body?.sizeBytes ??
+                req.query?.sizeB ??
+                req.query?.sizeBytes ??
+                0
+        );
         const hasQuerySize = Number.isFinite(querySizeB) && querySizeB > 0;
 
-        const {
+        const bodyHashes = Array.isArray(req.body?.imageHashes)
+            ? req.body.imageHashes
+            : [];
+        const queryHashesRaw =
+            bodyHashes.length > 0
+                ? bodyHashes
+                : Array.isArray(req.query?.imageHashes)
+                  ? req.query.imageHashes
+                  : String(req.query?.imageHashes || '')
+                        .split(',')
+                        .map((v) => v.trim())
+                        .filter(Boolean);
+        const queryImageHashes = uniqueAHashHexes(queryHashesRaw, { max: 12 });
+
+        const queryCategoryIds = parseNumberListInput(
+            req.body?.categoryIds ?? req.query?.categoryIds,
+            { max: 20 }
+        );
+        const queryCategorySlugsRaw = parseStringListInput(
+            req.body?.categorySlugs ?? req.query?.categorySlugs,
+            { max: 20 }
+        );
+        const queryCategorySlugs = uniqueStrings(
+            queryCategorySlugsRaw
+                .flatMap((s) => [String(s || '').toLowerCase(), safeName(s)])
+                .filter(Boolean)
+        ).slice(0, 24);
+
+        const queryTagsRaw = parseStringListInput(req.body?.tags ?? req.query?.tags, {
+            max: 40,
+        });
+        const queryTagSlugs = uniqueStrings(
+            queryTagsRaw.map((t) => safeName(t)).filter(Boolean)
+        ).slice(0, 36);
+        const queryTagComparableSet = new Set(
+            queryTagsRaw
+                .flatMap((t) => [
+                    normalizeForCompare(t),
+                    normalizeForCompare(safeName(t)),
+                ])
+                .filter(Boolean)
+        );
+
+        const queryCategoryIdSet = new Set(queryCategoryIds);
+        const queryCategorySlugSet = new Set(queryCategorySlugs);
+
+        const queryCtx = tokenizeSimilarQuery(rawFilename);
+        let {
             base,
             baseNorm,
             baseNoDigitsNorm,
@@ -740,14 +1149,43 @@ export const similarAssets = async (req, res) => {
             queryTrigrams,
             queryPhrase,
             queryCompact,
-        } = tokenizeSimilarQuery(raw);
+        } = queryCtx;
+
+        if (queryTitle || queryTitleEn) {
+            const extraTokens = toMeaningfulTokens(
+                `${queryTitle} ${queryTitleEn}`,
+                {
+                    minLen: 3,
+                    includePrefixes: true,
+                }
+            ).slice(0, 14);
+
+            strongTokens = uniqueStrings([...(strongTokens || []), ...extraTokens]).slice(
+                0,
+                24
+            );
+            searchTerms = uniqueStrings([
+                ...(searchTerms || []),
+                queryTitle,
+                queryTitleEn,
+                ...extraTokens,
+            ])
+                .filter((t) => String(t || '').trim().length >= 2)
+                .slice(0, 28);
+            queryTokenSet = new Set([
+                ...(queryTokenSet || []),
+                ...extraTokens
+                    .map((t) => normalizeForCompare(t))
+                    .filter(Boolean),
+            ]);
+        }
 
         const stripExt = (s) => String(s || '').replace(/\.[a-z0-9]{1,6}$/i, '');
 
-        const where = {};
+        const nameWhere = {};
         if (searchTerms.length) {
             const terms = searchTerms.slice(0, 18);
-            where.OR = terms.flatMap((term) => [
+            nameWhere.OR = terms.flatMap((term) => [
                 { archiveName: { contains: term } },
                 { title: { contains: term } },
                 { titleEn: { contains: term } },
@@ -755,8 +1193,123 @@ export const similarAssets = async (req, res) => {
             ]);
         }
 
+        const pushCandidateId = (arr, set, id) => {
+            const n = Number(id);
+            if (!Number.isFinite(n) || n <= 0) return;
+            if (set.has(n)) return;
+            set.add(n);
+            arr.push(n);
+        };
+
+        const candidateIdsOrdered = [];
+        const candidateIdSet = new Set();
+        const nameCandidateIdSet = new Set();
+        const hashCandidateIdSet = new Set();
+        const metaCandidateIdSet = new Set();
+
+        const nameCandidates = await prisma.asset.findMany({
+            where: nameWhere,
+            select: { id: true },
+            orderBy: { updatedAt: 'desc' },
+            take: 1200,
+        });
+        for (const row of nameCandidates) {
+            const id = Number(row?.id || 0);
+            pushCandidateId(candidateIdsOrdered, candidateIdSet, id);
+            if (id > 0) nameCandidateIdSet.add(id);
+            if (candidateIdsOrdered.length >= 2200) break;
+        }
+
+        if (queryImageHashes.length > 0 && candidateIdsOrdered.length < 2200) {
+            try {
+                const hashPrefixes8 = uniqueStrings(
+                    queryImageHashes
+                        .map((h) => String(h || '').slice(0, 8))
+                        .filter((h) => h.length === 8)
+                ).slice(0, 12);
+                const hashPrefixes6 = uniqueStrings(
+                    queryImageHashes
+                        .map((h) => String(h || '').slice(0, 6))
+                        .filter((h) => h.length === 6)
+                ).slice(0, 10);
+
+                const hashOr = [];
+                if (hashPrefixes8.length) hashOr.push({ hashPrefix: { in: hashPrefixes8 } });
+                for (const p of hashPrefixes6) hashOr.push({ hashPrefix: { startsWith: p } });
+
+                if (hashOr.length) {
+                    const hashSeedRows = await prisma.assetImageHash.findMany({
+                        where: { OR: hashOr },
+                        select: { assetId: true },
+                        orderBy: { updatedAt: 'desc' },
+                        take: 12000,
+                    });
+                    for (const row of hashSeedRows) {
+                        const id = Number(row?.assetId || 0);
+                        pushCandidateId(candidateIdsOrdered, candidateIdSet, id);
+                        if (id > 0) hashCandidateIdSet.add(id);
+                        if (candidateIdsOrdered.length >= 2200) break;
+                    }
+                }
+            } catch (e) {
+                if (!isPrismaMissingTableError(e)) {
+                    console.warn('[ASSETS][SIMILAR] hash seed warn:', e?.message || String(e));
+                }
+            }
+        }
+
+        const metaOr = [];
+        if (queryCategoryIds.length > 0) {
+            metaOr.push({ categories: { some: { id: { in: queryCategoryIds } } } });
+        }
+        if (queryCategorySlugs.length > 0) {
+            metaOr.push({
+                categories: {
+                    some: {
+                        OR: [
+                            { slug: { in: queryCategorySlugs } },
+                            { slugEn: { in: queryCategorySlugs } },
+                        ],
+                    },
+                },
+            });
+        }
+        if (queryTagSlugs.length > 0) {
+            metaOr.push({ tags: { some: { slug: { in: queryTagSlugs } } } });
+        }
+
+        if (metaOr.length && candidateIdsOrdered.length < 2200) {
+            try {
+                const metaRows = await prisma.asset.findMany({
+                    where: { OR: metaOr },
+                    select: { id: true },
+                    orderBy: { updatedAt: 'desc' },
+                    take: 900,
+                });
+                for (const row of metaRows) {
+                    const id = Number(row?.id || 0);
+                    pushCandidateId(candidateIdsOrdered, candidateIdSet, id);
+                    if (id > 0) metaCandidateIdSet.add(id);
+                    if (candidateIdsOrdered.length >= 2200) break;
+                }
+            } catch (e) {
+                console.warn('[ASSETS][SIMILAR] meta seed warn:', e?.message || String(e));
+            }
+        }
+
+        const finalCandidateIds = candidateIdsOrdered.slice(0, 2200);
+        if (!finalCandidateIds.length) {
+            return res.json({
+                query: rawFilename,
+                base,
+                tokens: strongTokens,
+                imageHashCount: queryImageHashes.length,
+                items: [],
+            });
+        }
+
         const items = await prisma.asset.findMany({
-            where,
+            where: { id: { in: finalCandidateIds } },
             select: {
                 id: true,
                 slug: true,
@@ -770,11 +1323,55 @@ export const similarAssets = async (req, res) => {
                 status: true,
                 updatedAt: true,
                 createdAt: true,
+                categories: {
+                    select: {
+                        id: true,
+                        slug: true,
+                        slugEn: true,
+                        name: true,
+                        nameEn: true,
+                    },
+                },
+                tags: {
+                    select: {
+                        id: true,
+                        slug: true,
+                        name: true,
+                        nameEn: true,
+                    },
+                },
             },
-            // subir el pool para evitar perder coincidencias válidas si hay muchos matches (p.ej. "pikachu")
-            take: 900,
-            orderBy: { id: 'desc' },
+            orderBy: { updatedAt: 'desc' },
         });
+
+        let assetHashesById = new Map();
+        if (queryImageHashes.length > 0 && (items || []).length > 0) {
+            try {
+                const ids = uniqueStrings((items || []).map((it) => String(it?.id || '')).filter(Boolean))
+                    .map((v) => Number(v))
+                    .filter((n) => Number.isFinite(n) && n > 0);
+                if (ids.length) {
+                    const rows = await prisma.assetImageHash.findMany({
+                        where: { assetId: { in: ids } },
+                        select: { assetId: true, hashHex: true },
+                    });
+                    assetHashesById = rows.reduce((acc, row) => {
+                        const id = Number(row?.assetId || 0);
+                        const hx = normalizeAHashHex(row?.hashHex);
+                        if (!id || !hx) return acc;
+                        const prev = acc.get(id) || [];
+                        prev.push(hx);
+                        acc.set(id, prev);
+                        return acc;
+                    }, new Map());
+                }
+            } catch (e) {
+                if (!isPrismaMissingTableError(e)) {
+                    console.warn('[ASSETS][SIMILAR] hash read warn:', e?.message || String(e));
+                }
+                assetHashesById = new Map();
+            }
+        }
 
         const ranked = (items || [])
             .map((it) => {
@@ -786,9 +1383,12 @@ export const similarAssets = async (req, res) => {
                 const namePhraseNorm = normalizeSpacedText(candidateText);
                 const candTrigrams = buildTrigramSet(keyNorm || nameNorm);
                 const candTokenSet = tokenizeCandidateForScore(candidateText);
+                const idNum = Number(it?.id || 0);
 
                 let score = 0;
                 let nameSignal = 0;
+                let categorySignal = 0;
+                let tagSignal = 0;
 
                 // 1) Prioridad máxima: match exacto de nombre (base) contra el archivo/slug (sin extensión)
                 if (baseNorm && keyNorm && keyNorm === baseNorm) nameSignal += 360;
@@ -846,6 +1446,10 @@ export const similarAssets = async (req, res) => {
 
                 score += nameSignal;
 
+                if (hashCandidateIdSet.has(idNum)) score += 24;
+                if (metaCandidateIdSet.has(idNum)) score += 10;
+                if (nameCandidateIdSet.has(idNum)) score += 6;
+
                 const imgCount = Array.isArray(it.images) ? it.images.length : 0;
                 score += Math.min(20, imgCount * 2);
                 if (it.archiveName) score += 5;
@@ -867,21 +1471,462 @@ export const similarAssets = async (req, res) => {
                     }
                 }
 
-                return { ...it, _score: score, _nameSignal: nameSignal };
+                let imageSignal = 0;
+                let imageMatchCount = 0;
+                let imageBestDistance = null;
+                if (queryImageHashes.length > 0) {
+                    const candidateHashes = assetHashesById.get(Number(it?.id || 0)) || [];
+                    const imageScore = scoreImageHashSimilarity(
+                        queryImageHashes,
+                        candidateHashes
+                    );
+                    imageSignal = Number(imageScore?.score || 0);
+                    imageMatchCount = Number(imageScore?.matchCount || 0);
+                    imageBestDistance =
+                        Number.isFinite(imageScore?.bestDistance)
+                            ? Number(imageScore.bestDistance)
+                            : null;
+                    score += imageSignal;
+                    if (imageMatchCount >= 2 && nameSignal >= 32) score += 24;
+                }
+
+                if (queryCategoryIdSet.size || queryCategorySlugSet.size) {
+                    const candCategoryIdSet = new Set(
+                        (it?.categories || [])
+                            .map((c) => Number(c?.id || 0))
+                            .filter((n) => Number.isFinite(n) && n > 0)
+                    );
+                    const candCategorySlugSet = new Set(
+                        (it?.categories || [])
+                            .flatMap((c) => [
+                                String(c?.slug || '').toLowerCase(),
+                                String(c?.slugEn || '').toLowerCase(),
+                                safeName(c?.name || ''),
+                                safeName(c?.nameEn || ''),
+                            ])
+                            .filter(Boolean)
+                    );
+
+                    let categoryHits = 0;
+                    for (const qid of queryCategoryIdSet)
+                        if (candCategoryIdSet.has(qid)) categoryHits += 1;
+                    for (const qslug of queryCategorySlugSet)
+                        if (candCategorySlugSet.has(qslug)) categoryHits += 1;
+
+                    const totalCategorySignals =
+                        queryCategoryIdSet.size + queryCategorySlugSet.size;
+                    if (categoryHits > 0 && totalCategorySignals > 0) {
+                        const categoryCoverage = categoryHits / totalCategorySignals;
+                        categorySignal += Math.round(72 * categoryCoverage);
+                        categorySignal += Math.min(36, categoryHits * 14);
+                        score += categorySignal;
+                    }
+                }
+
+                if (queryTagComparableSet.size) {
+                    const candTagComparableSet = new Set(
+                        (it?.tags || [])
+                            .flatMap((t) => [
+                                normalizeForCompare(t?.slug || ''),
+                                normalizeForCompare(t?.name || ''),
+                                normalizeForCompare(t?.nameEn || ''),
+                            ])
+                            .filter(Boolean)
+                    );
+                    let tagHits = 0;
+                    for (const qt of queryTagComparableSet) {
+                        if (candTagComparableSet.has(qt)) tagHits += 1;
+                    }
+
+                    if (tagHits > 0) {
+                        const tagCoverage = tagHits / queryTagComparableSet.size;
+                        tagSignal += Math.round(62 * tagCoverage);
+                        tagSignal += Math.min(30, tagHits * 10);
+                        score += tagSignal;
+                    }
+                }
+
+                if (categorySignal > 0 && tagSignal > 0) score += 14;
+                if (imageSignal >= 80 && (categorySignal > 0 || tagSignal > 0)) score += 16;
+                if (imageSignal >= 70 && nameSignal >= 35) score += 14;
+
+                return {
+                    ...it,
+                    _score: score,
+                    _nameSignal: nameSignal,
+                    _imageSignal: imageSignal,
+                    _categorySignal: categorySignal,
+                    _tagSignal: tagSignal,
+                    _imageMatchCount: imageMatchCount,
+                    _imageBestDistance: imageBestDistance,
+                    _sourceByName: nameCandidateIdSet.has(idNum),
+                    _sourceByImage: hashCandidateIdSet.has(idNum),
+                    _sourceByMeta: metaCandidateIdSet.has(idNum),
+                };
             })
             .sort((a, b) => {
                 if (b._score !== a._score) return b._score - a._score;
                 return Number(new Date(b.updatedAt)) - Number(new Date(a.updatedAt));
             });
 
-        const filtered = ranked.filter((it) => it._score >= 20 || it._nameSignal >= 16);
+        const filtered = ranked.filter(
+            (it) =>
+                it._score >= 26 ||
+                it._nameSignal >= 16 ||
+                it._imageSignal >= 34 ||
+                it._categorySignal >= 24 ||
+                it._tagSignal >= 20
+        );
         const scored = (filtered.length ? filtered : ranked).slice(0, limit);
 
-        const safe = toJsonSafe(scored).map(({ _score, ...rest }) => rest);
-        return res.json({ query: raw, base, tokens: strongTokens, items: safe });
+        const safe = toJsonSafe(scored).map(
+            ({
+                _score,
+                _nameSignal,
+                _imageSignal,
+                _categorySignal,
+                _tagSignal,
+                _imageMatchCount,
+                _imageBestDistance,
+                _sourceByName,
+                _sourceByImage,
+                _sourceByMeta,
+                ...rest
+            }) => ({
+                ...rest,
+                _similarity: {
+                    score: Number(_score || 0),
+                    name: Number(_nameSignal || 0),
+                    image: Number(_imageSignal || 0),
+                    category: Number(_categorySignal || 0),
+                    tags: Number(_tagSignal || 0),
+                    imageMatchCount: Number(_imageMatchCount || 0),
+                    imageBestDistance: Number.isFinite(_imageBestDistance)
+                        ? Number(_imageBestDistance)
+                        : null,
+                    source: {
+                        byName: !!_sourceByName,
+                        byImage: !!_sourceByImage,
+                        byMeta: !!_sourceByMeta,
+                    },
+                },
+            })
+        );
+        return res.json({
+            query: rawFilename,
+            base,
+            tokens: strongTokens,
+            imageHashCount: queryImageHashes.length,
+            inputSignals: {
+                title: queryTitle,
+                titleEn: queryTitleEn,
+                categoryIds: queryCategoryIds,
+                categorySlugs: queryCategorySlugs,
+                tags: queryTagsRaw,
+            },
+            items: safe,
+        });
     } catch (e) {
         console.error('[ASSETS] similarAssets error:', e);
         return res.status(500).json({ message: 'Error searching similar assets' });
+    }
+};
+
+// GET /assets/similar/hash/stats
+export const getAssetImageHashStats = async (_req, res) => {
+    try {
+        const [assetsTotal, hashRows] = await Promise.all([
+            prisma.asset.count(),
+            prisma.assetImageHash.count(),
+        ]);
+        return res.json({
+            assetsTotal,
+            hashRows,
+            backfill: { ...assetHashBackfillState },
+        });
+    } catch (e) {
+        if (isPrismaMissingTableError(e)) {
+            return res.status(503).json({
+                message:
+                    'Tablas de hash aún no existen. Ejecuta tu migración de Prisma y reintenta.',
+            });
+        }
+        console.error('[ASSETS][HASH] stats error:', e);
+        return res.status(500).json({ message: 'Error getting hash stats' });
+    }
+};
+
+// GET /assets/similar/hash/backfill-status
+export const getAssetImageHashBackfillStatus = async (_req, res) => {
+    try {
+        return res.json({ ...assetHashBackfillState });
+    } catch (e) {
+        console.error('[ASSETS][HASH] backfill status error:', e);
+        return res.status(500).json({ message: 'Error getting backfill status' });
+    }
+};
+
+// POST /assets/similar/hash/backfill
+export const startAssetImageHashBackfill = async (req, res) => {
+    try {
+        if (assetHashBackfillState.running) {
+            return res.status(202).json({
+                started: false,
+                message: 'Backfill ya está en ejecución',
+                state: { ...assetHashBackfillState },
+            });
+        }
+
+        const batchSize = Number(req.body?.batchSize || 100);
+        setImmediate(() => {
+            runAssetImageHashBackfill({ batchSize }).catch((e) => {
+                assetHashBackfillState.lastError = e?.message || String(e);
+            });
+        });
+
+        return res.status(202).json({
+            started: true,
+            state: { ...assetHashBackfillState, running: true },
+        });
+    } catch (e) {
+        if (isPrismaMissingTableError(e)) {
+            return res.status(503).json({
+                message:
+                    'Tablas de hash aún no existen. Ejecuta tu migración de Prisma y reintenta.',
+            });
+        }
+        console.error('[ASSETS][HASH] start backfill error:', e);
+        return res.status(500).json({ message: 'Error starting hash backfill' });
+    }
+};
+
+// GET /assets/similar/ignored-signatures
+export const listIgnoredSimilarSignatures = async (_req, res) => {
+    try {
+        const items = await prisma.assetSimilarIgnoreSignature.findMany({
+            orderBy: { updatedAt: 'desc' },
+            take: 10000,
+        });
+        return res.json({ items });
+    } catch (e) {
+        if (isPrismaMissingTableError(e)) {
+            return res.status(503).json({
+                message:
+                    'Tabla de descartes de similitud no existe aún. Ejecuta tu migración de Prisma y reintenta.',
+            });
+        }
+        console.error('[ASSETS][SIMILAR] list ignored signatures error:', e);
+        return res.status(500).json({ message: 'Error listing ignored signatures' });
+    }
+};
+
+// POST /assets/similar/ignored-signatures
+export const upsertIgnoredSimilarSignature = async (req, res) => {
+    try {
+        const signature = normalizeSignatureForStore(req.body?.signature);
+        if (!signature) {
+            return res.status(400).json({ message: 'signature required' });
+        }
+
+        const reason = String(req.body?.reason || '').trim() || null;
+        const assetIds = Array.isArray(req.body?.assetIds)
+            ? req.body.assetIds
+                  .map((n) => Number(n))
+                  .filter((n) => Number.isFinite(n) && n > 0)
+            : [];
+
+        const saved = await prisma.assetSimilarIgnoreSignature.upsert({
+            where: { signature },
+            create: {
+                signature,
+                reason,
+                assetIds: assetIds.length ? assetIds : null,
+            },
+            update: {
+                reason,
+                assetIds: assetIds.length ? assetIds : null,
+            },
+        });
+
+        return res.json({ ok: true, item: saved });
+    } catch (e) {
+        if (isPrismaMissingTableError(e)) {
+            return res.status(503).json({
+                message:
+                    'Tabla de descartes de similitud no existe aún. Ejecuta tu migración de Prisma y reintenta.',
+            });
+        }
+        console.error('[ASSETS][SIMILAR] upsert ignored signature error:', e);
+        return res.status(500).json({ message: 'Error saving ignored signature' });
+    }
+};
+
+// DELETE /assets/similar/ignored-signatures
+export const clearIgnoredSimilarSignatures = async (_req, res) => {
+    try {
+        const r = await prisma.assetSimilarIgnoreSignature.deleteMany({});
+        return res.json({ ok: true, deleted: r.count || 0 });
+    } catch (e) {
+        if (isPrismaMissingTableError(e)) {
+            return res.status(503).json({
+                message:
+                    'Tabla de descartes de similitud no existe aún. Ejecuta tu migración de Prisma y reintenta.',
+            });
+        }
+        console.error('[ASSETS][SIMILAR] clear ignored signatures error:', e);
+        return res.status(500).json({ message: 'Error clearing ignored signatures' });
+    }
+};
+
+// DELETE /assets/similar/ignored-signatures/:signature
+export const deleteIgnoredSimilarSignature = async (req, res) => {
+    try {
+        const signature = normalizeSignatureForStore(
+            decodeURIComponent(String(req.params.signature || ''))
+        );
+        if (!signature)
+            return res.status(400).json({ message: 'signature required' });
+
+        await prisma.assetSimilarIgnoreSignature.deleteMany({
+            where: { signature },
+        });
+        return res.json({ ok: true });
+    } catch (e) {
+        if (isPrismaMissingTableError(e)) {
+            return res.status(503).json({
+                message:
+                    'Tabla de descartes de similitud no existe aún. Ejecuta tu migración de Prisma y reintenta.',
+            });
+        }
+        console.error('[ASSETS][SIMILAR] delete ignored signature error:', e);
+        return res.status(500).json({ message: 'Error deleting ignored signature' });
+    }
+};
+
+// GET /assets/similar/ignored-pairs
+export const listIgnoredSimilarPairs = async (_req, res) => {
+    try {
+        const items = await prisma.assetSimilarIgnorePair.findMany({
+            orderBy: { updatedAt: 'desc' },
+            take: 50000,
+        });
+        return res.json({ items });
+    } catch (e) {
+        if (isPrismaMissingTableError(e)) {
+            return res.status(503).json({
+                message:
+                    'Tabla de descartes por par no existe aún. Ejecuta tu migración de Prisma y reintenta.',
+            });
+        }
+        console.error('[ASSETS][SIMILAR] list ignored pairs error:', e);
+        return res.status(500).json({ message: 'Error listing ignored pairs' });
+    }
+};
+
+// POST /assets/similar/ignored-pairs
+export const upsertIgnoredSimilarPairs = async (req, res) => {
+    try {
+        const rawPairs = Array.isArray(req.body?.pairs)
+            ? req.body.pairs
+            : [
+                  {
+                      assetAId: req.body?.assetAId,
+                      assetBId: req.body?.assetBId,
+                  },
+              ];
+
+        const uniq = new Map();
+        for (const p of rawPairs) {
+            const norm = normalizePairForStore(p?.assetAId, p?.assetBId);
+            if (!norm) continue;
+            uniq.set(`${norm.assetAId}:${norm.assetBId}`, norm);
+        }
+        const pairs = Array.from(uniq.values());
+        if (!pairs.length) {
+            return res.status(400).json({
+                message: 'pairs required (assetAId/assetBId válidos y distintos)',
+            });
+        }
+
+        const reason = String(req.body?.reason || '').trim() || null;
+        const saved = [];
+        for (const pair of pairs) {
+            const row = await prisma.assetSimilarIgnorePair.upsert({
+                where: {
+                    assetAId_assetBId: {
+                        assetAId: pair.assetAId,
+                        assetBId: pair.assetBId,
+                    },
+                },
+                create: {
+                    assetAId: pair.assetAId,
+                    assetBId: pair.assetBId,
+                    reason,
+                },
+                update: { reason },
+            });
+            saved.push(row);
+        }
+
+        return res.json({ ok: true, count: saved.length, items: saved });
+    } catch (e) {
+        if (isPrismaMissingTableError(e)) {
+            return res.status(503).json({
+                message:
+                    'Tabla de descartes por par no existe aún. Ejecuta tu migración de Prisma y reintenta.',
+            });
+        }
+        console.error('[ASSETS][SIMILAR] upsert ignored pairs error:', e);
+        return res.status(500).json({ message: 'Error saving ignored pairs' });
+    }
+};
+
+// DELETE /assets/similar/ignored-pairs
+export const clearIgnoredSimilarPairs = async (_req, res) => {
+    try {
+        const r = await prisma.assetSimilarIgnorePair.deleteMany({});
+        return res.json({ ok: true, deleted: r.count || 0 });
+    } catch (e) {
+        if (isPrismaMissingTableError(e)) {
+            return res.status(503).json({
+                message:
+                    'Tabla de descartes por par no existe aún. Ejecuta tu migración de Prisma y reintenta.',
+            });
+        }
+        console.error('[ASSETS][SIMILAR] clear ignored pairs error:', e);
+        return res.status(500).json({ message: 'Error clearing ignored pairs' });
+    }
+};
+
+// DELETE /assets/similar/ignored-pairs/:assetAId/:assetBId
+export const deleteIgnoredSimilarPair = async (req, res) => {
+    try {
+        const pair = normalizePairForStore(
+            req.params?.assetAId,
+            req.params?.assetBId
+        );
+        if (!pair) {
+            return res.status(400).json({
+                message: 'assetAId/assetBId inválidos o iguales',
+            });
+        }
+
+        await prisma.assetSimilarIgnorePair.deleteMany({
+            where: {
+                assetAId: pair.assetAId,
+                assetBId: pair.assetBId,
+            },
+        });
+        return res.json({ ok: true });
+    } catch (e) {
+        if (isPrismaMissingTableError(e)) {
+            return res.status(503).json({
+                message:
+                    'Tabla de descartes por par no existe aún. Ejecuta tu migración de Prisma y reintenta.',
+            });
+        }
+        console.error('[ASSETS][SIMILAR] delete ignored pair error:', e);
+        return res.status(500).json({ message: 'Error deleting ignored pair' });
     }
 };
 
@@ -1211,6 +2256,17 @@ export const uploadImages = async (req, res) => {
             data: { images: newImages },
         });
 
+        try {
+            await syncAssetImageHashes(assetId, newImages, {
+                clearMissing: true,
+            });
+        } catch (e) {
+            console.warn(
+                `[ASSETS][HASH] sync warn asset=${assetId}:`,
+                e?.message || String(e)
+            );
+        }
+
         // Limpieza best-effort de temporales
         setTimeout(() => cleanTempDir(), 0);
 
@@ -1423,6 +2479,17 @@ export const createAssetFull = async (req, res) => {
                     });
             }
             throw e;
+        }
+
+        try {
+            await syncAssetImageHashes(created.id, imagesRel, {
+                clearMissing: true,
+            });
+        } catch (e) {
+            console.warn(
+                `[ASSETS][HASH] sync warn asset=${created?.id}:`,
+                e?.message || String(e)
+            );
         }
 
         enqueueToMegaBatch(created.id).catch((err) =>
@@ -2034,12 +3101,30 @@ async function runCmd(cmd, args = [], options = {}) {
                 reject(new Error(`${cmd} timeout after ${timeoutMs}ms`));
             }, timeoutMs);
         }
-        child.stdout.on('data', (d) =>
-            console.log(`[MEGA] ${d.toString().trim()}`)
-        );
-        child.stderr.on('data', (d) =>
-            console.error(`[MEGA] ${d.toString().trim()}`)
-        );
+        const normalizeChunk = (d) => String(d || '').replace(/\r/g, '\n').split('\n').map((s) => s.trim()).filter(Boolean);
+        const isMegaNoticeLine = (line) => {
+            const m = String(line || '').toLowerCase();
+            return (
+                m.includes('revised terms') ||
+                m.includes('terms of service') ||
+                m.includes('privacy policy') ||
+                m.includes('psa --discard') ||
+                m.includes('[progreso transferencia]') ||
+                /\|#+/.test(m)
+            );
+        };
+
+        child.stdout.on('data', (d) => {
+            const lines = normalizeChunk(d);
+            for (const line of lines) console.log(`[MEGA] ${line}`);
+        });
+        child.stderr.on('data', (d) => {
+            const lines = normalizeChunk(d);
+            for (const line of lines) {
+                if (isMegaNoticeLine(line)) console.warn(`[MEGA][NOTICE] ${line}`);
+                else console.error(`[MEGA] ${line}`);
+            }
+        });
         child.on('error', (e) => {
             if (to) clearTimeout(to);
             if (settled) return;
@@ -3783,14 +4868,20 @@ export const deleteAsset = async (req, res) => {
             }
         }
 
-        const loginCmd = 'mega-login';
         const rmCmd = 'mega-rm';
-        const logoutCmd = 'mega-logout';
+        const proxies = listMegaProxies({});
+        if (!proxies.length) {
+            return res.status(503).json({
+                message:
+                    'No hay proxies MEGA disponibles. La eliminación remota requiere proxy (no se permite IP directa).',
+            });
+        }
 
         const results = [];
         for (const entry of accountsToDelete) {
             const { acc } = entry;
             let deleted = false;
+            let proxyUsed = null;
             try {
                 const payload = decryptToJson(
                     acc.credentials.encData,
@@ -3803,29 +4894,28 @@ export const deleteAsset = async (req, res) => {
                 );
                 const remotePath = path.posix.join(remoteBase, asset.slug);
                 await withMegaLock(async () => {
+                    const ctx = `[DEL][asset=${id}][acc=${acc.id}:${acc.alias || '--'}]`;
+                    const picked = await applyAnyWorkingProxyOrThrow(
+                        'delete',
+                        proxies,
+                        ctx,
+                        10
+                    );
+                    proxyUsed = picked?.proxyUrl || null;
+                    await megaLogoutBestEffort(`PREV ${ctx}`);
+                    await megaLoginOrThrow(payload, ctx);
                     try {
-                        await runCmd(logoutCmd, []);
-                    } catch {}
-                    if (payload?.type === 'session' && payload.session)
-                        await runCmd(loginCmd, [payload.session]);
-                    else if (payload?.username && payload?.password)
-                        await runCmd(loginCmd, [
-                            payload.username,
-                            payload.password,
-                        ]);
-                    else throw new Error('Invalid credentials payload');
-                    try {
+                        console.log(`[ASSETS][DEL][MEGA-RM][START] acc=${acc.id} path=${remotePath} proxy=${proxyUsed || '--'} ${ctx}`);
                         await runCmd(rmCmd, ['-rf', remotePath]);
                         deleted = true;
+                        console.log(`[ASSETS][DEL][MEGA-RM][OK] acc=${acc.id} path=${remotePath} ${ctx}`);
                     } catch (e) {
                         console.warn(
-                            `[ASSETS] rm warn acc=${acc.id}:`,
+                            `[ASSETS][DEL][MEGA-RM][WARN] acc=${acc.id} path=${remotePath}:`,
                             e.message
                         );
                     }
-                    try {
-                        await runCmd(logoutCmd, []);
-                    } catch {}
+                    await megaLogoutBestEffort(`POST ${ctx}`);
                 }, `DEL-${acc.id}`);
             } catch (e) {
                 console.warn(
@@ -3833,7 +4923,12 @@ export const deleteAsset = async (req, res) => {
                     e.message
                 );
             }
-            results.push({ accountId: acc.id, kind: entry.kind, deleted });
+            results.push({
+                accountId: acc.id,
+                kind: entry.kind,
+                deleted,
+                proxyUsed,
+            });
         }
 
         // Eliminar de DB (asset + replicas cascada si FK ON DELETE CASCADE)
