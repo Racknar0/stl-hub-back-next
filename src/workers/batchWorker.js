@@ -59,16 +59,18 @@ const SEVEN_ZIP = (() => {
     'C:\\Program Files (x86)\\7-Zip\\7z.exe',
     path.join(process.env.LOCALAPPDATA || '', '7-Zip', '7z.exe'),
   ]
-  for (const p of candidates) { if (fs.existsSync(p)) return `"${p}"` }
+  for (const p of candidates) { if (fs.existsSync(p)) return p }
   return '7z' // fallback: asume que está en el PATH
 })()
 
 function run7z(args) {
   return new Promise((resolve, reject) => {
-    const child = spawn(SEVEN_ZIP, args, { shell: true })
+    // shell: false evita problemas de escape de rutas con espacios en Windows
+    const child = spawn(SEVEN_ZIP, args, { shell: false })
     let out = '', err = ''
     child.stdout.on('data', d => (out += d.toString()))
     child.stderr.on('data', d => (err += d.toString()))
+    child.on('error', (e) => reject(new Error(`Spawn error: ${e.message}`)))
     child.on('close', code =>
       code === 0 ? resolve(out) : reject(new Error(`7z exited ${code}: ${(err || out).slice(0, 300)}`))
     )
@@ -215,6 +217,7 @@ async function extractInnerArchives(folderPath) {
   const archives = getAllFiles(folderPath).filter(f => ARCHIVE_EXTS.includes(path.extname(f).toLowerCase()))
   for (const arc of archives) {
     try {
+      // Sin comillas manuales, Node se encarga
       await run7z(['x', arc, `-o${path.dirname(arc)}`, '-y', '-aoa'])
       fs.unlinkSync(arc)
       console.log(`[BATCH][EXTRACT] OK ${path.basename(arc)}`)
@@ -226,6 +229,8 @@ async function recompressFolder(folderPath, outputName) {
   fs.mkdirSync(STAGING_DIR, { recursive: true })
   const outputPath = path.join(STAGING_DIR, `${outputName}.rar`)
   if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath)
+
+  // Sin comillas manuales, Node se encarga
   await run7z(['a', '-trar', outputPath, path.join(folderPath, '*'), '-r', '-mx5'])
   const sizeMB = fs.existsSync(outputPath) ? (fs.statSync(outputPath).size / (1024 * 1024)).toFixed(1) : 0
   console.log(`[BATCH][RECOMPRESS] OK → ${outputName}.rar (${sizeMB} MB)`)
@@ -487,7 +492,7 @@ export async function startBatchWorker() {
   while (true) {
     try {
       const item = await prisma.batchImportItem.findFirst({
-        where: { status: 'PENDING' },
+        where: { status: 'QUEUED' },
         orderBy: { createdAt: 'asc' },
         include: { batch: true }
       })

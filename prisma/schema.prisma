@@ -518,6 +518,8 @@ model BatchImportItem {
 }
 
 enum BatchImportStatus {
+  DRAFT
+  QUEUED
   PENDING
   PROCESSING
   COMPLETED

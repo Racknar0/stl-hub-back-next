@@ -16,16 +16,18 @@ const SEVEN_ZIP = (() => {
     'C:\\Program Files (x86)\\7-Zip\\7z.exe',
     path.join(process.env.LOCALAPPDATA || '', '7-Zip', '7z.exe'),
   ];
-  for (const p of candidates) { if (fs.existsSync(p)) return `"${p}"`; }
+  for (const p of candidates) { if (fs.existsSync(p)) return p; }
   return '7z';
 })();
 
 function run7z(args) {
   return new Promise((resolve, reject) => {
-    const child = spawn(SEVEN_ZIP, args, { shell: true });
+    // shell: false evita problemas de escape de rutas con espacios en Windows
+    const child = spawn(SEVEN_ZIP, args, { shell: false });
     let out = '', err = '';
     child.stdout.on('data', d => (out += d.toString()));
     child.stderr.on('data', d => (err += d.toString()));
+    child.on('error', (e) => reject(new Error(`Spawn error: ${e.message}`)));
     child.on('close', code => {
       if (code === 0) resolve(out);
       else reject(new Error(`7z exited ${code}: ${(err || out).slice(0, 300)}`));
@@ -51,6 +53,7 @@ export const scanLocalDirectory = async (req, res) => {
       console.log(`[BATCH SCAN] Descomprimiendo ${arc.name} → ${extractDir}`);
       try {
         fs.mkdirSync(extractDir, { recursive: true });
+        // Sin comillas manuales, Node se encarga
         await run7z(['x', arcPath, `-o${extractDir}`, '-y', '-aoa']);
         // Borrar el archivo comprimido original
         fs.unlinkSync(arcPath);
@@ -91,7 +94,10 @@ export const scanLocalDirectory = async (req, res) => {
       const assetFolders = subEntries.filter(e => e.isDirectory()).map(e => e.name);
 
       let itemsCount = 0;
-      for (const assetFolder of assetFolders) {
+      // Si no hay subcarpetas, usamos '' para indicar que la ruta base (el batchPath) es el asset en sí mismo.
+      const foldersToProcess = assetFolders.length > 0 ? assetFolders : [''];
+
+      for (const assetFolder of foldersToProcess) {
         // Create an item if it doesn't exist
         const existingItem = await prisma.batchImportItem.findFirst({
           where: { batchId: batch.id, folderName: assetFolder }
@@ -134,11 +140,17 @@ export const scanLocalDirectory = async (req, res) => {
           await prisma.batchImportItem.create({
             data: {
               batchId: batch.id,
-              folderName: assetFolder,
-              title: assetFolder.replace(/_/g, ' '),
+              folderName: assetFolder, // Si es '', el worker apuntará directo al batchFolder
+              title: assetFolder ? assetFolder.replace(/_/g, ' ') : folder.replace(/_/g, ' '),
               pesoMB,
               images: images.length > 0 ? images : [],
-              status: 'PENDING',
+              // MOCK FASE 2: Sugerencias "IA" quemadas
+              categories: [{ slug: 'anime', name: 'Anime' }],
+              tags: [
+                { slug: 'anime', name: 'Anime' },
+                { slug: 'japon', name: 'Japón' }
+              ],
+              status: 'DRAFT',
               mainStatus: 'PENDING',
               backupStatus: 'PENDING',
               mainProgress: 0
@@ -224,7 +236,7 @@ export const confirmBatchItems = async (req, res) => {
       if (!item.targetAccount) continue;
       await prisma.batchImportItem.update({
         where: { id: item.id },
-        data: { status: 'PENDING', error: null, mainStatus: 'PENDING', backupStatus: 'PENDING', mainProgress: 0 }
+        data: { status: 'QUEUED', error: null, mainStatus: 'PENDING', backupStatus: 'PENDING', mainProgress: 0 }
       });
       confirmed++;
     }
@@ -268,6 +280,33 @@ export const deleteBatchItem = async (req, res) => {
     });
 
     return res.json({ success: true, message: 'Item eliminado y carpeta borrada' });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+// DELETE /api/batch-imports/purge-all
+export const purgeAll = async (req, res) => {
+  try {
+    // 1. Borrar todos los items y batches de la BD
+    const deletedItems = await prisma.batchImportItem.deleteMany({});
+    const deletedBatches = await prisma.batchImport.deleteMany({});
+
+    // 2. Vaciar la carpeta batch_imports del disco
+    if (fs.existsSync(BATCH_DIR)) {
+      const entries = fs.readdirSync(BATCH_DIR, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(BATCH_DIR, entry.name);
+        try {
+          fs.rmSync(fullPath, { recursive: true, force: true });
+        } catch (e) {
+          console.warn(`[BATCH PURGE] No se pudo borrar ${fullPath}: ${e.message}`);
+        }
+      }
+    }
+
+    console.log(`[BATCH PURGE] Eliminados ${deletedItems.count} items, ${deletedBatches.count} batches, carpeta limpiada.`);
+    return res.json({ success: true, message: `Eliminados ${deletedItems.count} items y ${deletedBatches.count} batches.` });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
