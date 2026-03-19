@@ -1,0 +1,4 @@
+-- AlterTable
+ALTER TABLE `batchimportitem` ADD COLUMN `backupStatus` VARCHAR(191) NULL DEFAULT 'PENDING',
+    ADD COLUMN `mainProgress` DOUBLE NULL DEFAULT 0,
+    ADD COLUMN `mainStatus` VARCHAR(191) NULL DEFAULT 'PENDING';

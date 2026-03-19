@@ -468,3 +468,58 @@ model SearchClick {
   @@index([createdAt(sort: Desc)])
   @@map("searchclick")
 }
+
+// --- BATCH UPLOAD ENGINES (Queue) ---
+model BatchImport {
+  id         Int               @id @default(autoincrement())
+  folderName String            @unique
+  status     BatchImportStatus @default(PENDING)
+  totalItems Int               @default(0)
+
+  items BatchImportItem[]
+
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  @@map("batchimport")
+}
+
+model BatchImportItem {
+  id            Int                  @id @default(autoincrement())
+  batchId       Int
+  batch         BatchImport          @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  
+  folderName    String               
+  targetAccount Int?                 
+  status        BatchImportStatus    @default(PENDING)
+  error         String?              @db.Text
+  
+  pesoMB        Float                @default(0)
+  title         String?
+  images        Json?                
+  archiveFile   String?              
+  
+  tags          Json?                
+  categories    Json?                
+  profiles      String?              
+  similarityApproved Boolean         @default(false)
+  createdAssetId Int?                
+
+  mainStatus    String?              @default("PENDING")
+  backupStatus  String?              @default("PENDING")
+  mainProgress  Float?               @default(0)
+  
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+
+  @@index([batchId])
+  @@index([status])
+  @@map("batchimportitem")
+}
+
+enum BatchImportStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}

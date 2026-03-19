@@ -12,6 +12,7 @@ import notificationsRoutes from './notifications/index.js';
 import paymentsRoutes from './payments/index.js';
 import metricsRoutes from './metrics/index.js';
 import adminOpsRoutes from './adminOps/index.js';
+import batchImportsRoutes from './batchImports/index.js';
 
 const router = express.Router();
 
@@ -31,5 +32,6 @@ router.use('/admin/ops', adminOpsRoutes);
 router.use('/downloads', downloadsRoutes);
 router.use('/me', meRoutes);
 router.use('/metrics', metricsRoutes);
+router.use('/batch-imports', batchImportsRoutes);
 
 export default router;

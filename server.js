@@ -1,6 +1,7 @@
 // server.js
 import http from 'http';
 import app from './app.js';
+import { startBatchWorker } from './src/workers/batchWorker.js';
 
 const PORT = process.env.PORT || 3001; // usa 3001 si NGINX proxy_pass -> 3001
 
@@ -13,4 +14,8 @@ server.keepAliveTimeout = 75_000; // 75s para keep-alive
 
 server.listen(PORT, () => {
   console.log(`API escuchando en http://localhost:${PORT}`);
+  // Iniciar worker de batches en segundo plano sin bloquear
+  setTimeout(() => {
+    startBatchWorker().catch(e => console.error('Worker fail:', e));
+  }, 3000);
 });
