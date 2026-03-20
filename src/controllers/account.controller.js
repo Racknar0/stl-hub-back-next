@@ -1037,7 +1037,9 @@ export const syncMainToBackups = async (req, res) => {
     const logSync = (m, level='info') => {
       if(level==='error') return log.error(m);
       if(level==='warn') return log.warn(m);
-      if(level==='verbose') return log.verbose(m);
+      // En este flujo necesitamos visibilidad siempre en ConsoleBar.
+      // Mapeamos verbose -> info para no depender de VERBOSE_MODE.
+      if(level==='verbose') return log.info(m);
       return log.info(m);
     };
     logSync(`Sincronización iniciada main=${mainId} assets_publicados=${assets.length} backups=${backupAccounts.length}`);
