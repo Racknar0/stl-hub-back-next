@@ -156,8 +156,26 @@ async function extractArchiveWithFallback(archivePath, extractDir) {
   }
 }
 
+async function withTimeout(promise, timeoutMs, timeoutCode = 'OP_TIMEOUT') {
+  const ms = Number(timeoutMs);
+  if (!Number.isFinite(ms) || ms <= 0) return promise;
+
+  let timer = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error(timeoutCode), { code: timeoutCode })), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 // POST /api/batch-imports/scan
 export const scanLocalDirectory = async (req, res) => {
+  const extractedArchivesThisRun = [];
   try {
     if (!fs.existsSync(BATCH_DIR)) {
       fs.mkdirSync(BATCH_DIR, { recursive: true });
@@ -171,17 +189,24 @@ export const scanLocalDirectory = async (req, res) => {
     for (const arc of topArchives) {
       const arcPath = path.join(BATCH_DIR, arc.name);
       const extractDir = path.join(BATCH_DIR, path.parse(arc.name).name);
+      const extractDirExistedBefore = fs.existsSync(extractDir);
       console.log(`[BATCH SCAN] Descomprimiendo ${arc.name} → ${extractDir}`);
       try {
         fs.mkdirSync(extractDir, { recursive: true });
         const extraction = await extractArchiveWithFallback(arcPath, extractDir);
-        // Borrar el archivo comprimido original
-        fs.unlinkSync(arcPath);
+        extractedArchivesThisRun.push({
+          archiveName: arc.name,
+          arcPath,
+          extractDir,
+          extractDirExistedBefore,
+        });
         console.log(`[BATCH SCAN] OK ${arc.name} (tool=${extraction.tool})`);
       } catch (e) {
         console.error(`[BATCH SCAN] Error descomprimiendo ${arc.name}: ${e.message}`);
         try {
-          if (fs.existsSync(extractDir)) fs.rmSync(extractDir, { recursive: true, force: true });
+          if (!extractDirExistedBefore && fs.existsSync(extractDir)) {
+            fs.rmSync(extractDir, { recursive: true, force: true });
+          }
         } catch {}
       }
     }
@@ -362,6 +387,7 @@ export const scanLocalDirectory = async (req, res) => {
       });
     }
 
+    let aiTimedOut = false;
     try {
       const [categoriesCatalog, tagsCatalog] = await Promise.all([
         prisma.category.findMany({
@@ -382,7 +408,23 @@ export const scanLocalDirectory = async (req, res) => {
         categories: categoriesCatalog,
         tags: tagsCatalog,
       });
-      const aiResult = await callGoogleBatchScan(aiPayload);
+      const aiTimeoutMs = Math.max(10_000, Number(process.env.BATCH_SCAN_AI_TIMEOUT_MS) || 45_000);
+      let aiResult = [];
+      try {
+        aiResult = await withTimeout(
+          callGoogleBatchScan(aiPayload),
+          aiTimeoutMs,
+          'BATCH_AI_SCAN_TIMEOUT'
+        );
+      } catch (aiErr) {
+        aiTimedOut = String(aiErr?.code || aiErr?.message || '').includes('BATCH_AI_SCAN_TIMEOUT');
+        if (aiTimedOut) {
+          console.warn(`[BATCH][AI][SCAN][TIMEOUT] timeoutMs=${aiTimeoutMs} items=${aiScannedItems.length}`);
+        } else {
+          console.error('[BATCH][AI][SCAN][WARN]', aiErr?.message || aiErr);
+        }
+        aiResult = [];
+      }
 
       const aiSuggestions = Array.isArray(aiResult) ? aiResult : [];
       if (aiSuggestions.length > 0) {
@@ -432,13 +474,40 @@ export const scanLocalDirectory = async (req, res) => {
       console.error('[BATCH][AI][SCAN][WARN]', e?.message || e);
     }
 
+    // Solo borramos comprimidos originales cuando TODO el scan terminó correctamente.
+    let deletedArchivesCount = 0;
+    for (const extracted of extractedArchivesThisRun) {
+      try {
+        if (fs.existsSync(extracted.arcPath)) {
+          fs.unlinkSync(extracted.arcPath);
+          deletedArchivesCount += 1;
+        }
+      } catch (e) {
+        console.warn(`[BATCH SCAN] Warn borrando comprimido ${extracted.archiveName}: ${e.message}`);
+      }
+    }
+
     return res.json({
       success: true,
       message: `Scanned and queued ${newlyQueuedCount} new items across batches.`,
-      newlyQueuedCount
+      newlyQueuedCount,
+      deletedArchivesCount,
+      processedArchivesCount: extractedArchivesThisRun.length,
+      aiTimedOut
     });
 
   } catch (error) {
+    // Fallo global: limpiar solo lo extraído en esta corrida y conservar comprimidos para reintento.
+    for (const extracted of extractedArchivesThisRun) {
+      try {
+        if (!extracted.extractDirExistedBefore && fs.existsSync(extracted.extractDir)) {
+          fs.rmSync(extracted.extractDir, { recursive: true, force: true });
+        }
+      } catch (cleanupErr) {
+        console.warn(`[BATCH SCAN] Rollback warn ${extracted.extractDir}: ${cleanupErr.message}`);
+      }
+    }
+
     console.error('[BATCH IMPORT SCAN ERROR]', error);
     return res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
   }

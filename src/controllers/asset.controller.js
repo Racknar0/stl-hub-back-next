@@ -2059,6 +2059,8 @@ export const uploadArchiveTemp = async (req, res) => {
 
 // 2) Crear asset en DB, mover archivo temporal a definitivo y generar estructura
 export const createAsset = async (req, res) => {
+    let movedArchiveAbs = null;
+    let createdInDb = false;
     try {
         const {
             title: rawTitle,
@@ -2105,6 +2107,7 @@ export const createAsset = async (req, res) => {
                 : path.basename(absTemp);
             const target = path.join(finalDir, fname);
             fs.renameSync(absTemp, target);
+            movedArchiveAbs = target;
             archiveName = path.relative(UPLOADS_DIR, target);
             const szStat = fs.statSync(path.resolve(target), { bigint: true });
             archiveSizeB = szStat.size; // BigInt
@@ -2140,6 +2143,7 @@ export const createAsset = async (req, res) => {
                         : {}),
                 },
             });
+            createdInDb = true;
             // Convertir BigInt a Number para JSON
             const createdSafe = {
                 ...created,
@@ -2161,6 +2165,12 @@ export const createAsset = async (req, res) => {
         }
     } catch (e) {
         console.error('[ASSETS] create error:', e);
+        try {
+            if (!createdInDb && movedArchiveAbs && fs.existsSync(movedArchiveAbs)) {
+                fs.unlinkSync(movedArchiveAbs);
+                removeEmptyDirsUp(path.dirname(movedArchiveAbs), ARCHIVES_DIR);
+            }
+        } catch {}
         if (e?.code === 'SLUG_CONFLICT')
             return res
                 .status(409)
@@ -2337,6 +2347,7 @@ export const createAssetFull = async (req, res) => {
     let cleanupPaths = [];
     let receivedBytes = 0;
     let lastLogTime = startTime;
+    let createdInDb = false;
     
     try {
         const { title: rawTitle, titleEn, categories, tags, isPremium, accountId } =
@@ -2402,6 +2413,7 @@ export const createAssetFull = async (req, res) => {
         );
         const archiveTarget = path.join(archDir, targetName);
         fs.renameSync(archiveFile.path, archiveTarget);
+        cleanupPaths.push(archiveTarget);
         console.log('📁 [SERVER METRICS] Archivo movido en:', Date.now() - fsStart, 'ms');
 
         const imagesRel = [];
@@ -2422,6 +2434,7 @@ export const createAssetFull = async (req, res) => {
                 } catch {}
             }
             imagesRel.push(path.relative(UPLOADS_DIR, out));
+            cleanupPaths.push(out);
         }
         console.log('🖼️ [SERVER METRICS] Imágenes procesadas en:', Date.now() - imageStart, 'ms');
 
@@ -2435,6 +2448,7 @@ export const createAssetFull = async (req, res) => {
                 .webp({ quality: 65, effort: 6 })
                 .toFile(out);
             thumbs.push(path.relative(UPLOADS_DIR, out));
+            cleanupPaths.push(out);
         }
         console.log('🖼️ [SERVER METRICS] Thumbnails generados en:', Date.now() - thumbsStart, 'ms');
 
@@ -2468,6 +2482,7 @@ export const createAssetFull = async (req, res) => {
                         : {}),
                 },
             });
+            createdInDb = true;
             console.log('💾 [SERVER METRICS] Asset creado en DB en:', Date.now() - dbStart, 'ms');
         } catch (e) {
             if (e?.code === 'P2002') {
@@ -2496,6 +2511,9 @@ export const createAssetFull = async (req, res) => {
         enqueueToMegaBatch(created.id).catch((err) =>
             console.error('[MEGA-UP][BATCH] async error:', err)
         );
+
+        // Evita cleanup accidental post-éxito ante errores posteriores no críticos.
+        cleanupPaths = [];
 
         setTimeout(() => cleanTempDir(), 0);
         
@@ -2531,9 +2549,21 @@ export const createAssetFull = async (req, res) => {
         });
         console.error('[ASSETS] createFull error:', e);
         try {
-            cleanupPaths.forEach((p) => {
-                if (p && fs.existsSync(p)) fs.unlinkSync(p);
-            });
+            if (!createdInDb) {
+                cleanupPaths.forEach((p) => {
+                    if (p && fs.existsSync(p)) {
+                        fs.unlinkSync(p);
+                        try {
+                            const abs = path.resolve(p);
+                            if (abs.startsWith(path.resolve(ARCHIVES_DIR) + path.sep)) {
+                                removeEmptyDirsUp(path.dirname(abs), ARCHIVES_DIR);
+                            } else if (abs.startsWith(path.resolve(IMAGES_DIR) + path.sep)) {
+                                removeEmptyDirsUp(path.dirname(abs), IMAGES_DIR);
+                            }
+                        } catch {}
+                    }
+                });
+            }
         } catch {}
         if (e?.code === 'SLUG_CONFLICT')
             return res

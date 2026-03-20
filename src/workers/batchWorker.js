@@ -52,6 +52,57 @@ const MAX_ACCOUNT_UPLOAD_MB = Number(process.env.BATCH_ACCOUNT_MAX_MB) || (19 * 
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
 
+function envFlag(name, defaultValue = false) {
+  const raw = process.env[name]
+  if (raw == null) return !!defaultValue
+  const v = String(raw).trim().toLowerCase()
+  if (['1', 'true', 'yes', 'y', 'on'].includes(v)) return true
+  if (['0', 'false', 'no', 'n', 'off'].includes(v)) return false
+  return !!defaultValue
+}
+
+function removeEmptyDirsUp(startDir, stopDir) {
+  try {
+    let dir = path.resolve(startDir)
+    const stop = path.resolve(stopDir)
+    while (dir.startsWith(stop)) {
+      if (!fs.existsSync(dir)) {
+        dir = path.dirname(dir)
+        continue
+      }
+      const items = fs.readdirSync(dir)
+      if (items.length === 0) {
+        fs.rmdirSync(dir)
+        if (dir === stop) break
+        dir = path.dirname(dir)
+      } else {
+        break
+      }
+    }
+  } catch (e) {
+    console.warn('[BATCH][CLEANUP] removeEmptyDirsUp warn:', e.message)
+  }
+}
+
+function deleteLocalArchiveBestEffort(archiveAbsPath, ctx = '') {
+  try {
+    if (!envFlag('MEGA_DELETE_LOCAL_ARCHIVE_AFTER_UPLOAD', true)) return
+    if (!archiveAbsPath) return
+    const abs = path.resolve(archiveAbsPath)
+    const root = path.resolve(ARCHIVES_DIR) + path.sep
+    if (!abs.startsWith(root)) {
+      console.warn(`[BATCH][CLEANUP] skip delete (outside archives) abs=${abs} ${ctx}`)
+      return
+    }
+    if (!fs.existsSync(abs)) return
+    fs.unlinkSync(abs)
+    removeEmptyDirsUp(path.dirname(abs), ARCHIVES_DIR)
+    console.log(`[BATCH][CLEANUP] deleted local archive ${path.basename(abs)} ${ctx}`)
+  } catch (e) {
+    console.warn(`[BATCH][CLEANUP] delete warn ${ctx}: ${e.message}`)
+  }
+}
+
 function toSafeNumber(value, fallback = 0) {
   const n = Number(value)
   return Number.isFinite(n) ? n : fallback
@@ -936,6 +987,11 @@ async function processMainQueueItem(item) {
       mainProgress: 100,
     })
 
+    // Si no hay backups, el archivo local ya no es necesario tras MAIN.
+    if (!hasBackups) {
+      deleteLocalArchiveBestEffort(ctx.finalArchivePath, `item=${item.id} phase=main noBackups`)
+    }
+
     try { if (fs.existsSync(ctx.stagingArchivePath)) fs.unlinkSync(ctx.stagingArchivePath) } catch {}
     try { if (fs.existsSync(ctx.folderPath)) fs.rmSync(ctx.folderPath, { recursive: true, force: true }) } catch {}
     console.log(`[BATCH][MAIN][OK] item=${item.id} asset=${asset.id}`)
@@ -953,6 +1009,11 @@ async function processMainQueueItem(item) {
       body: `folder=${item.folderName || '-'} acc=${item.targetAccount || '-'} err=${msg}`,
       typeStatus: 'ERROR',
     })
+
+    // Evita acumulación de archivos huérfanos si el MAIN falla tras copiar a /archives.
+    if (ctx?.finalArchivePath) {
+      deleteLocalArchiveBestEffort(ctx.finalArchivePath, `item=${item.id} phase=main failed`)
+    }
   }
 }
 
@@ -1038,6 +1099,10 @@ async function processBackupsForCompletedItem(item) {
     }
 
     await updateItem({ backupStatus: 'OK', status: 'COMPLETED', error: null })
+
+    // Tras completar BACKUPs, el archivo local puede eliminarse.
+    deleteLocalArchiveBestEffort(archivePath, `item=${item.id} phase=backup completed`)
+
     console.log(`[BATCH][BACKUP][OK] item=${item.id} asset=${asset.id}`)
   } catch (err) {
     const msg = String(err?.message || err).slice(0, 500)
