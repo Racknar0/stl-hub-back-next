@@ -977,7 +977,7 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
 
 // ──────────────────── CREAR ASSET EN BD (idéntico al uploader) ────────────────────
 
-async function createAssetRecord({ slug, title, titleEn, archiveName, images, account, megaLink, sizeBytes, tags, categories }) {
+async function createAssetRecord({ slug, title, titleEn, description, descriptionEn, archiveName, images, account, megaLink, sizeBytes, tags, categories }) {
   const fullTitle = await ensureUniqueAssetTitle(title)
   const fullTitleEn = ensurePrefixedTitle(titleEn || title)
   const archiveSizeB = BigInt(sizeBytes || 0)
@@ -985,6 +985,7 @@ async function createAssetRecord({ slug, title, titleEn, archiveName, images, ac
   const data = {
     title: fullTitle,
     titleEn: fullTitleEn,
+    description: String(description || descriptionEn || '').trim() || null,
     slug,
     archiveName,
     archiveSizeB,
@@ -1116,6 +1117,8 @@ async function processMainQueueItem(item) {
       slug: ctx.slug,
       title: item.title || ctx.friendlyName,
       titleEn: item.titleEn || item.title || ctx.friendlyName,
+      description: item.description,
+      descriptionEn: item.descriptionEn,
       archiveName: ctx.archiveName,
       images: ctx.imagePaths,
       account: ctx.mainAccount,

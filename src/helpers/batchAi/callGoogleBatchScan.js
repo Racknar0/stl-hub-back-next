@@ -24,7 +24,7 @@ const IMAGE_MEDIA_RESOLUTION_LEVEL = resolveMediaResolutionLevel(IMAGE_RESOLUTIO
 const SINGLE_RESULT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['nombre', 'categoria', 'tags'],
+   required: ['nombre', 'categoria', 'tags', 'descripcion'],
   properties: {
     nombre: {
       type: 'object',
@@ -56,6 +56,15 @@ const SINGLE_RESULT_SCHEMA = {
           es: { type: 'string' },
           en: { type: 'string' },
         },
+      },
+    },
+    descripcion: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['es', 'en'],
+      properties: {
+        es: { type: 'string' },
+        en: { type: 'string' },
       },
     },
   },
@@ -221,6 +230,10 @@ function buildAdultFallbackResult(payload, item, matchers) {
     },
     categoria: category,
     tags,
+    descripcion: {
+      es: `Modelo STL de ${sourceNameEs} listo para impresion 3D.`,
+      en: `STL model of ${sourceNameEn} ready for 3D printing.`,
+    },
   }
 }
 
@@ -238,6 +251,27 @@ function ensureBilingualName(raw) {
   return {
     es: plain,
     en: plain,
+  }
+}
+
+function ensureBilingualDescription(raw, fallbackEs, fallbackEn) {
+  if (raw && typeof raw === 'object') {
+    const es = pickFirstNonEmpty(raw.es, raw.descriptionEs, raw.descripcionEs, raw.description)
+    const en = pickFirstNonEmpty(raw.en, raw.descriptionEn, raw.descripcionEn)
+    const baseEs = pickFirstNonEmpty(fallbackEs, 'No hay descripcion de este producto.')
+    const baseEn = pickFirstNonEmpty(fallbackEn, 'No description available for this product.')
+    return {
+      es: pickFirstNonEmpty(es, en, baseEs),
+      en: pickFirstNonEmpty(en, es, baseEn),
+    }
+  }
+
+  const plain = pickFirstNonEmpty(raw)
+  const baseEs = pickFirstNonEmpty(fallbackEs, 'No hay descripcion de este producto.')
+  const baseEn = pickFirstNonEmpty(fallbackEn, 'No description available for this product.')
+  return {
+    es: pickFirstNonEmpty(plain, baseEs),
+    en: pickFirstNonEmpty(plain, baseEn),
   }
 }
 
@@ -468,9 +502,9 @@ function normalizeListShape(parsed) {
     ? parsed
     : parsed && typeof parsed === 'object' && (parsed.nombre || parsed.name || parsed.sourceTitle)
       ? [parsed]
-    : Array.isArray(parsed?.items)
-      ? parsed.items
-      : []
+      : Array.isArray(parsed?.items)
+        ? parsed.items
+        : []
 
   return arr
     .map((item) => {
@@ -488,54 +522,53 @@ function normalizeListShape(parsed) {
             ? item.suggestedExistingTagSlugs
             : []
 
-      return { nombre, categoria, tags: rawTags }
+      const descripcion = item?.descripcion || item?.description || {
+        es: pickFirstNonEmpty(item?.descripcionEs, item?.descriptionEs),
+        en: pickFirstNonEmpty(item?.descripcionEn, item?.descriptionEn),
+      }
+
+      return { nombre, categoria, tags: rawTags, descripcion }
     })
     .filter((x) => pickFirstNonEmpty(x?.nombre?.es, x?.nombre?.en))
 }
 
 function toDebugText(value) {
-  if (typeof value === 'string') return value
-  try {
-    return util.inspect(value, {
-      depth: 4,
-      colors: false,
-      maxArrayLength: 40,
-      maxStringLength: 6000,
-      compact: false,
-    })
-  } catch {
-    return String(value || '')
-  }
+  return util.inspect(value, { depth: 6, breakLength: 120, maxArrayLength: 50 })
 }
 
 async function classifySingleItem(ai, payload, item) {
+  const matchers = buildCatalogMatchers(payload)
   const { parts: imageParts, attachedImages } = await buildImagePartsForItem(item)
   const promptPayload = buildSingleItemPromptPayload(payload, item, attachedImages)
-  const matchers = buildCatalogMatchers(payload)
 
   const prompt = [
-    'Eres un asistente para clasificación de assets de tienda STL.',
-    'Recibirás UN solo asset y, cuando estén disponibles, imágenes reales adjuntas del asset.',
-    'Debes analizar primero las imágenes adjuntas para clasificarlo.',
-    'Si las imágenes son ambiguas, insuficientes o no están presentes, usa como respaldo assetName, sourceTitle y sourcePathHint.',
+    'Eres un asistente para clasificacion de assets de tienda STL.',
+    'Recibiras UN solo asset y, cuando esten disponibles, imagenes reales adjuntas del asset.',
+    'Debes analizar primero las imagenes adjuntas para clasificarlo.',
+    'Si las imagenes son ambiguas, insuficientes o no estan presentes, usa como respaldo assetName, sourceTitle y sourcePathHint.',
     'El dominio es una tienda de renders/modelos 3D.',
-    'Si el contenido muestra desnudez explícita, sexualidad evidente o una temática NSFW, debes usar una categoría adulta existente del catálogo si está disponible.',
-    'Debes elegir SOLO 1 categoría del catálogo recibido.',
+    'Si el contenido muestra desnudez explicita, sexualidad evidente o una tematica NSFW, debes usar una categoria adulta existente del catalogo si esta disponible.',
+    'Debes elegir SOLO 1 categoria del catalogo recibido.',
     'Debes devolver EXACTAMENTE 3 tags.',
-    'IMPORTANTE: cada tag debe venir como par bilingüe { es, en }.',
-    'Si un tag equivalente ya existe en el catálogo en español o en inglés, devuelve exactamente ese mismo par es/en del catálogo.',
-    'Si realmente no existe equivalente en el catálogo, propone tag nuevo también en formato bilingüe (es/en).',
-    'El nombre del asset debe devolverse SIEMPRE bilingüe en el objeto nombre: { es, en }.',
-    'La categoría debe devolverse SIEMPRE bilingüe en el objeto categoria: { es, en }.',
-    'Responde SOLO JSON válido, sin markdown ni texto extra, usando EXACTAMENTE esta forma:',
+    'IMPORTANTE: cada tag debe venir como par bilingue { es, en }.',
+    'Si un tag equivalente ya existe en el catalogo en espanol o en ingles, devuelve exactamente ese mismo par es/en del catalogo.',
+    'Si realmente no existe equivalente en el catalogo, propone tag nuevo tambien en formato bilingue (es/en).',
+    'El nombre del asset debe devolverse SIEMPRE bilingue en el objeto nombre: { es, en }.',
+    'La categoria debe devolverse SIEMPRE bilingue en el objeto categoria: { es, en }.',
+    'La descripcion debe devolverse SIEMPRE bilingue en el objeto descripcion: { es, en }.',
+    'Responde SOLO JSON valido, sin markdown ni texto extra, usando EXACTAMENTE esta forma:',
     JSON.stringify({
       nombre: { es: 'figura anime samurai', en: 'samurai anime figure' },
       categoria: { es: 'Anime', en: 'Anime' },
       tags: [
         { es: 'samurai', en: 'samurai' },
         { es: 'katana', en: 'katana' },
-        { es: 'fantasía', en: 'fantasy' },
+        { es: 'fantasia', en: 'fantasy' },
       ],
+      descripcion: {
+        es: 'Figura anime samurai lista para impresion 3D, ideal para coleccionistas y vitrinas tematicas.',
+        en: 'Samurai anime figure ready for 3D printing, ideal for collectors and themed display shelves.',
+      },
     }, null, 2),
     'Contexto JSON del asset:',
     JSON.stringify(promptPayload, null, 2),
@@ -561,13 +594,13 @@ async function classifySingleItem(ai, payload, item) {
     const rawResponseText = String(response?.text || '').trim()
     console.error('[BATCH][AI][PARSE_ERROR] No se pudo parsear JSON para', getItemDisplayName(item))
     console.error('[BATCH][AI][PARSE_ERROR][RAW_RESPONSE]', rawResponseText || toDebugText(response))
-    console.warn('[BATCH][AI][FALLBACK] Aplicando categoría/tag de adultos por parse fallido en', getItemDisplayName(item))
+    console.warn('[BATCH][AI][FALLBACK] Aplicando categoria/tag de adultos por parse fallido en', getItemDisplayName(item))
     return [buildAdultFallbackResult(payload, item, matchers)]
   }
 
   const normalized = normalizeListShape(parsed)
   if (!normalized.length) {
-    console.warn('[BATCH][AI][FALLBACK] Respuesta vacía/no usable, aplicando adultos en', getItemDisplayName(item))
+    console.warn('[BATCH][AI][FALLBACK] Respuesta vacia/no usable, aplicando adultos en', getItemDisplayName(item))
     return [buildAdultFallbackResult(payload, item, matchers)]
   }
 
@@ -575,6 +608,11 @@ async function classifySingleItem(ai, payload, item) {
     const namePair = ensureBilingualName(entry?.nombre)
     const category = normalizeCategory(entry?.categoria, payload, matchers)
     const tags = normalizeTags(entry?.tags, matchers)
+    const descriptionPair = ensureBilingualDescription(
+      entry?.descripcion,
+      `Modelo STL de ${namePair.es}.`,
+      `STL model of ${namePair.en}.`,
+    )
 
     return {
       itemId: Number(item?.itemId || 0) || null,
@@ -585,6 +623,10 @@ async function classifySingleItem(ai, payload, item) {
       },
       categoria: category,
       tags,
+      descripcion: {
+        es: descriptionPair.es,
+        en: descriptionPair.en,
+      },
     }
   })
 }

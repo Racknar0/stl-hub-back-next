@@ -34,6 +34,16 @@ function normalizeBilingualTitlePair(rawEs, rawEn, fallback = 'Asset') {
   };
 }
 
+function buildDefaultBilingualDescription(rawEs, rawEn, fallback = 'asset') {
+  const pair = normalizeBilingualTitlePair(rawEs, rawEn, fallback);
+  const esBase = String(pair.es || fallback || 'asset').trim();
+  const enBase = String(pair.en || esBase || fallback || 'asset').trim();
+  return {
+    es: `Modelo STL de ${esBase}.`,
+    en: `STL model of ${enBase}.`,
+  };
+}
+
 function normalizeTitleKey(raw) {
   return normalizeBaseTitle(raw, '').toLowerCase();
 }
@@ -426,6 +436,8 @@ export const scanLocalDirectory = async (req, res) => {
             const updateData = {
               title: bilingualTitle.es,
               titleEn: bilingualTitle.en,
+              description: String(existingItem.description || '').trim() || buildDefaultBilingualDescription(bilingualTitle.es, bilingualTitle.en, rawBaseTitle).es,
+              descriptionEn: String(existingItem.descriptionEn || '').trim() || buildDefaultBilingualDescription(bilingualTitle.es, bilingualTitle.en, rawBaseTitle).en,
             };
 
             if (existingItem.status === 'FAILED') {
@@ -496,6 +508,8 @@ export const scanLocalDirectory = async (req, res) => {
               folderName: assetFolder, // Si es '', el worker apuntará directo al batchFolder
               title: bilingualTitle.es,
               titleEn: bilingualTitle.en,
+              description: buildDefaultBilingualDescription(bilingualTitle.es, bilingualTitle.en, rawBaseTitle).es,
+              descriptionEn: buildDefaultBilingualDescription(bilingualTitle.es, bilingualTitle.en, rawBaseTitle).en,
               pesoMB,
               images: images.length > 0 ? images : [],
               // Fase 2 (preview): todavía no seteamos categorías/tags desde IA.
@@ -593,6 +607,11 @@ export const scanLocalDirectory = async (req, res) => {
             titleEn: safeName.en,
           };
 
+          const descEs = String(suggestion?.descripcion?.es || '').trim();
+          const descEn = String(suggestion?.descripcion?.en || '').trim();
+          if (descEs) data.description = descEs;
+          if (descEn) data.descriptionEn = descEn;
+
           const normalizedTags = normalizeBatchTags(tags, 3);
           if (normalizedTags.length > 0) data.tags = normalizedTags;
           if (categoryObj && (categoryObj.id || categoryObj.slug)) {
@@ -628,6 +647,7 @@ export const scanLocalDirectory = async (req, res) => {
               itemId,
               hasTags: Array.isArray(data.tags) ? data.tags.length : 0,
               hasCategories: Array.isArray(data.categories) ? data.categories.length : 0,
+              hasDescription: !!(data.description || data.descriptionEn),
             });
           }
         }
@@ -730,12 +750,14 @@ export const getBatchQueue = async (req, res) => {
 export const updateBatchItem = async (req, res) => {
   try {
     const { id } = req.params;
-    const { targetAccount, title, titleEn, tags, categories, similarityApproved } = req.body;
+    const { targetAccount, title, titleEn, description, descriptionEn, tags, categories, similarityApproved } = req.body;
 
     const data = {};
     if (targetAccount !== undefined) data.targetAccount = Number(targetAccount) || null;
     if (title !== undefined) data.title = title;
     if (titleEn !== undefined) data.titleEn = titleEn;
+    if (description !== undefined) data.description = String(description || '').trim() || null;
+    if (descriptionEn !== undefined) data.descriptionEn = String(descriptionEn || '').trim() || null;
     if (tags !== undefined) data.tags = normalizeBatchTags(tags, 3);
     if (categories !== undefined) data.categories = categories;
     if (similarityApproved !== undefined) data.similarityApproved = !!similarityApproved;

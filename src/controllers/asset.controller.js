@@ -10,6 +10,7 @@ import { startUploadsActive } from '../utils/uploadsActiveFlag.js';
 import { checkMegaLinkAlive } from '../utils/megaCheckFiles/megaLinkChecker.js';
 import { maybeCheckMegaOnVisit } from '../utils/megaCheckFiles/visitTriggeredMegaCheck.js';
 import { applyMegaProxy, listMegaProxies } from '../utils/megaProxy.js';
+import { GoogleGenAI } from '@google/genai';
 
 const prisma = new PrismaClient();
 import { randomizeFreebies, getRandomizeFreebiesCountFromEnv } from '../utils/randomizeFreebies.js';
@@ -47,6 +48,9 @@ const assetHashBackfillState =
         currentAssetId: null,
     };
 globalThis.__assetHashBackfillState = assetHashBackfillState;
+
+const ASSET_META_AI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
+const ASSET_DESCRIPTION_FALLBACK = 'No hay descripción de este producto.';
 
 function isMegaBatchQuietHoldActive(mainAccountId) {
     try {
@@ -668,6 +672,262 @@ function parseTagsPayload(val) {
             typeof v === 'number' ? { id: v } : { slug: safeName(String(v)) }
         )
         .filter(Boolean);
+}
+
+function normalizeMetaText(value, maxLen = 380) {
+    const txt = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!txt) return '';
+    if (txt.length <= maxLen) return txt;
+    return `${txt.slice(0, Math.max(0, maxLen - 1)).trim()}…`;
+}
+
+function parseJsonLoose(rawText) {
+    const txt = String(rawText || '').trim();
+    if (!txt) return null;
+    try {
+        return JSON.parse(txt);
+    } catch {}
+
+    const fenced = txt.match(/```json\s*([\s\S]*?)```/i) || txt.match(/```\s*([\s\S]*?)```/i);
+    if (fenced?.[1]) {
+        try {
+            return JSON.parse(fenced[1].trim());
+        } catch {}
+    }
+
+    const firstBrace = txt.indexOf('{');
+    const lastBrace = txt.lastIndexOf('}');
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+        try {
+            return JSON.parse(txt.slice(firstBrace, lastBrace + 1));
+        } catch {}
+    }
+
+    const firstBracket = txt.indexOf('[');
+    const lastBracket = txt.lastIndexOf(']');
+    if (firstBracket >= 0 && lastBracket > firstBracket) {
+        try {
+            return JSON.parse(txt.slice(firstBracket, lastBracket + 1));
+        } catch {}
+    }
+
+    return null;
+}
+
+function buildAssetMetaInput(asset) {
+    const categories = Array.isArray(asset?.categories)
+        ? asset.categories.map((c) => ({
+              id: c?.id,
+              es: c?.name || '',
+              en: c?.nameEn || c?.name || '',
+              slug: c?.slug || '',
+          }))
+        : [];
+    const tags = Array.isArray(asset?.tags)
+        ? asset.tags.map((t) => ({
+              id: t?.id,
+              es: t?.name || t?.slug || '',
+              en: t?.nameEn || t?.name || t?.slug || '',
+              slug: t?.slug || '',
+          }))
+        : [];
+
+    return {
+        id: Number(asset?.id || 0) || null,
+        titleEs: String(asset?.title || '').trim(),
+        titleEn: String(asset?.titleEn || '').trim(),
+        categories,
+        tags,
+        currentDescription: String(asset?.description || '').trim(),
+    };
+}
+
+function getGeminiClient() {
+    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+    if (!apiKey) return null;
+    return new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+            apiVersion: 'v1alpha',
+        },
+    });
+}
+
+async function generateSeoDescriptionForAsset(assetInput) {
+    const fallback = ASSET_DESCRIPTION_FALLBACK;
+    const ai = getGeminiClient();
+    if (!ai) return fallback;
+
+    const prompt = [
+        'Eres redactor SEO para tienda de modelos STL.',
+        'Genera una descripción corta en ESPAÑOL para ficha de producto.',
+        'Reglas: 2 a 3 frases, entre 120 y 260 caracteres, tono comercial natural, sin relleno, sin emojis, sin markdown.',
+        'Incluye intención de búsqueda y beneficio del modelo 3D, manteniendo texto claro y útil.',
+        'Si falta contexto, escribe una descripción genérica breve y correcta.',
+        'Responde SOLO JSON con forma: {"description":"..."}.',
+        'Contexto:',
+        JSON.stringify(assetInput, null, 2),
+    ].join('\n\n');
+
+    try {
+        const response = await ai.models.generateContent({
+            model: ASSET_META_AI_MODEL,
+            contents: [prompt],
+            config: {
+                responseMimeType: 'application/json',
+                responseJsonSchema: {
+                    type: 'object',
+                    additionalProperties: false,
+                    required: ['description'],
+                    properties: {
+                        description: { type: 'string' },
+                    },
+                },
+            },
+        });
+
+        const parsed = parseJsonLoose(response?.text);
+        const desc = normalizeMetaText(parsed?.description || '', 420);
+        return desc || fallback;
+    } catch (err) {
+        console.warn('[ASSETS][META][DESCRIPTION_AI_WARN]', err?.message || err);
+        return fallback;
+    }
+}
+
+function normalizeBilingualGeneratedTags(rawTags) {
+    const arr = Array.isArray(rawTags) ? rawTags : [];
+    const out = [];
+    const seen = new Set();
+
+    for (const item of arr) {
+        const es = normalizeMetaText(item?.es || item?.name || '', 64).toLowerCase();
+        const en = normalizeMetaText(item?.en || item?.nameEn || es || '', 64).toLowerCase();
+        const key = safeName(en || es || '');
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        out.push({
+            es: es || en,
+            en: en || es,
+        });
+        if (out.length >= 3) break;
+    }
+
+    return out;
+}
+
+async function generateSeoTagPairsForAsset(assetInput) {
+    const ai = getGeminiClient();
+    if (!ai) return [];
+
+    const prompt = [
+        'Eres especialista SEO para marketplace de modelos STL.',
+        'Devuelve EXACTAMENTE 3 tags relevantes para posicionamiento y búsqueda interna.',
+        'Cada tag debe ser corto (1 a 2 palabras) y bilingüe: { es, en }.',
+        'Evita tags genéricos como stl, print, 3d, model.',
+        'Responde SOLO JSON con esta forma: {"tags":[{"es":"...","en":"..."},{"es":"...","en":"..."},{"es":"...","en":"..."}]}.',
+        'Contexto:',
+        JSON.stringify(assetInput, null, 2),
+    ].join('\n\n');
+
+    try {
+        const response = await ai.models.generateContent({
+            model: ASSET_META_AI_MODEL,
+            contents: [prompt],
+            config: {
+                responseMimeType: 'application/json',
+                responseJsonSchema: {
+                    type: 'object',
+                    additionalProperties: false,
+                    required: ['tags'],
+                    properties: {
+                        tags: {
+                            type: 'array',
+                            minItems: 3,
+                            maxItems: 3,
+                            items: {
+                                type: 'object',
+                                additionalProperties: false,
+                                required: ['es', 'en'],
+                                properties: {
+                                    es: { type: 'string' },
+                                    en: { type: 'string' },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        });
+
+        const parsed = parseJsonLoose(response?.text);
+        return normalizeBilingualGeneratedTags(parsed?.tags);
+    } catch (err) {
+        console.warn('[ASSETS][META][TAGS_AI_WARN]', err?.message || err);
+        return [];
+    }
+}
+
+async function ensureTagIdsFromPairs(tagPairs) {
+    const ids = [];
+    const seenIds = new Set();
+
+    for (let i = 0; i < tagPairs.length; i += 1) {
+        const pair = tagPairs[i] || {};
+        const es = normalizeMetaText(pair.es || '', 64).toLowerCase();
+        const en = normalizeMetaText(pair.en || es || '', 64).toLowerCase();
+        const slug = safeName(en || es || `tag-${i + 1}`) || `tag-${Date.now()}-${i + 1}`;
+
+        let found = await prisma.tag.findFirst({
+            where: {
+                OR: [
+                    { slug },
+                    { slugEn: slug },
+                    ...(es ? [{ name: es }] : []),
+                    ...(en ? [{ nameEn: en }] : []),
+                ],
+            },
+            select: { id: true },
+        });
+
+        if (!found) {
+            try {
+                found = await prisma.tag.create({
+                    data: {
+                        name: es || en || slug,
+                        nameEn: en || es || null,
+                        slug,
+                        slugEn: slug,
+                    },
+                    select: { id: true },
+                });
+            } catch (createErr) {
+                if (createErr?.code === 'P2002') {
+                    found = await prisma.tag.findFirst({
+                        where: {
+                            OR: [
+                                { slug },
+                                { slugEn: slug },
+                                ...(es ? [{ name: es }] : []),
+                                ...(en ? [{ nameEn: en }] : []),
+                            ],
+                        },
+                        select: { id: true },
+                    });
+                } else {
+                    throw createErr;
+                }
+            }
+        }
+
+        const id = Number(found?.id || 0);
+        if (Number.isFinite(id) && id > 0 && !seenIds.has(id)) {
+            seenIds.add(id);
+            ids.push(id);
+        }
+    }
+
+    return ids;
 }
 
 // Generar slug único (hasta maxTries variantes) evitando crear archivos/directorios basura con slug repetido
@@ -2046,10 +2306,11 @@ export const updateAsset = async (req, res) => {
         if (!existing)
             return res.status(404).json({ message: 'Asset not found' });
 
-        const { title, titleEn, categories, tags, isPremium } = req.body;
+        const { title, titleEn, description, categories, tags, isPremium } = req.body;
         const data = {};
         if (title !== undefined) data.title = String(title);
         if (titleEn !== undefined) data.titleEn = String(titleEn);
+        if (description !== undefined) data.description = normalizeMetaText(String(description), 1200) || null;
         if (typeof isPremium !== 'undefined')
             data.isPremium = Boolean(isPremium);
 
@@ -2073,6 +2334,138 @@ export const updateAsset = async (req, res) => {
     } catch (e) {
         console.error('[ASSETS] update error:', e);
         return res.status(500).json({ message: 'Error updating asset' });
+    }
+};
+
+// POST /assets/meta/generate-descriptions
+export const generateAssetMetaDescriptions = async (req, res) => {
+    try {
+        const mode = String(req.body?.mode || 'selected').toLowerCase();
+        const maxAssets = Math.max(1, Math.min(200, Number(req.body?.limit) || 60));
+        const ids = Array.isArray(req.body?.assetIds)
+            ? req.body.assetIds.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0)
+            : [];
+
+        const where = {};
+        if (mode === 'selected') {
+            if (!ids.length) {
+                return res.status(400).json({ message: 'assetIds requerido para mode=selected' });
+            }
+            where.id = { in: ids };
+        } else if (mode === 'missing') {
+            where.OR = [{ description: null }, { description: '' }];
+            if (ids.length) where.id = { in: ids };
+        } else if (mode === 'all') {
+            if (ids.length) where.id = { in: ids };
+        } else {
+            return res.status(400).json({ message: 'mode inválido. Usa: selected|missing|all' });
+        }
+
+        const targets = await prisma.asset.findMany({
+            where,
+            include: {
+                categories: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+                tags: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+            },
+            orderBy: { id: 'desc' },
+            take: maxAssets,
+        });
+
+        if (!targets.length) {
+            return res.json({ success: true, processed: 0, updated: 0, items: [] });
+        }
+
+        let updated = 0;
+        const details = [];
+
+        for (const asset of targets) {
+            const input = buildAssetMetaInput(asset);
+            const generated = await generateSeoDescriptionForAsset(input);
+            const finalDescription = normalizeMetaText(generated || ASSET_DESCRIPTION_FALLBACK, 1200) || ASSET_DESCRIPTION_FALLBACK;
+
+            await prisma.asset.update({
+                where: { id: asset.id },
+                data: { description: finalDescription },
+            });
+
+            updated += 1;
+            details.push({ id: asset.id, description: finalDescription });
+        }
+
+        return res.json({
+            success: true,
+            processed: targets.length,
+            updated,
+            items: details,
+        });
+    } catch (e) {
+        console.error('[ASSETS][META] generate descriptions error:', e);
+        return res.status(500).json({ message: 'Error generating descriptions' });
+    }
+};
+
+// POST /assets/meta/generate-tags
+export const generateAssetMetaTags = async (req, res) => {
+    try {
+        const ids = Array.isArray(req.body?.assetIds)
+            ? req.body.assetIds.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0)
+            : [];
+        if (!ids.length) {
+            return res.status(400).json({ message: 'assetIds requerido' });
+        }
+
+        const targets = await prisma.asset.findMany({
+            where: { id: { in: ids } },
+            include: {
+                categories: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+                tags: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+            },
+        });
+
+        let updated = 0;
+        const details = [];
+
+        for (const asset of targets) {
+            const input = buildAssetMetaInput(asset);
+            const generatedPairs = await generateSeoTagPairsForAsset(input);
+            const tagIds = await ensureTagIdsFromPairs(generatedPairs);
+
+            if (!tagIds.length) {
+                details.push({ id: asset.id, updated: false, tags: [] });
+                continue;
+            }
+
+            const connect = tagIds.map((id) => ({ id }));
+            const row = await prisma.asset.update({
+                where: { id: asset.id },
+                data: {
+                    tags: {
+                        set: [],
+                        connect,
+                    },
+                },
+                include: {
+                    tags: { select: { id: true, slug: true, name: true, nameEn: true } },
+                },
+            });
+
+            updated += 1;
+            details.push({
+                id: asset.id,
+                updated: true,
+                tags: Array.isArray(row?.tags) ? row.tags.map((t) => ({ id: t.id, slug: t.slug, name: t.name, nameEn: t.nameEn })) : [],
+            });
+        }
+
+        return res.json({
+            success: true,
+            processed: targets.length,
+            updated,
+            items: details,
+        });
+    } catch (e) {
+        console.error('[ASSETS][META] generate tags error:', e);
+        return res.status(500).json({ message: 'Error generating tags' });
     }
 };
 

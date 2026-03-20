@@ -497,6 +497,8 @@ model BatchImportItem {
   pesoMB        Float                @default(0)
   title         String?
   titleEn       String?
+  description   String?              @db.Text
+  descriptionEn String?              @db.Text
   images        Json?                
   archiveFile   String?              
   
