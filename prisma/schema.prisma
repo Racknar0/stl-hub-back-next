@@ -217,6 +217,8 @@ model asset {
   megaLinkCheckedAt DateTime? // fecha del último chequeo
 
   createdAt DateTime       @default(now())
+  // Importante SEO: un trigger SQL evita que este campo cambie en updates operativos/masivos.
+  // Solo se toca en cambios reales de contenido del asset.
   updatedAt DateTime       @updatedAt
   // Réplicas en cuentas backup
   replicas  AssetReplica[]

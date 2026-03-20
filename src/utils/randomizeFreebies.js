@@ -35,7 +35,11 @@ export async function randomizeFreebies({
     const total = await client.asset.count({ where });
     if (total === 0) return { total: 0, selected: 0, count: effectiveN };
 
-    await client.asset.updateMany({ where, data: { isPremium: true } });
+    // Solo tocar los que realmente cambian (free -> premium) para evitar escrituras masivas innecesarias.
+    await client.asset.updateMany({
+      where: { ...where, isPremium: false },
+      data: { isPremium: true },
+    });
 
     if (effectiveN <= 0) return { total, selected: 0, count: effectiveN };
 
@@ -52,7 +56,7 @@ export async function randomizeFreebies({
 
     const pick = ids.slice(0, Math.min(effectiveN, ids.length));
     await client.asset.updateMany({
-      where: { id: { in: pick } },
+      where: { id: { in: pick }, isPremium: true },
       data: { isPremium: false },
     });
 
