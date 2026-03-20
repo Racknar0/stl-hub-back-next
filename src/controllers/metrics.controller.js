@@ -1,5 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import jwt from 'jsonwebtoken';
+import os from 'os';
+import fs from 'fs';
 
 const prisma = new PrismaClient();
 
@@ -66,6 +68,80 @@ function startOfDay(d) {
   const t = new Date(d)
   t.setHours(0,0,0,0)
   return t
+}
+
+function readLinuxMemorySnapshot() {
+  try {
+    const txt = fs.readFileSync('/proc/meminfo', 'utf8')
+    const lines = txt.split(/\r?\n/)
+    const map = {}
+
+    for (const raw of lines) {
+      const line = String(raw || '').trim()
+      if (!line) continue
+      const m = line.match(/^([A-Za-z_()]+):\s+(\d+)\s+kB$/)
+      if (!m) continue
+      map[m[1]] = Number(m[2]) * 1024
+    }
+
+    const totalBytes = Number(map.MemTotal || 0)
+    const availableBytes = Number(map.MemAvailable || (map.MemFree || 0) + (map.Buffers || 0) + (map.Cached || 0))
+
+    if (totalBytes <= 0) return null
+    return {
+      totalBytes,
+      availableBytes: Math.max(0, Math.min(totalBytes, availableBytes || 0)),
+    }
+  } catch {
+    return null
+  }
+}
+
+export async function getVpsMemoryMetrics(req, res) {
+  try {
+    const platform = String(process.platform || '').toLowerCase()
+
+    if (platform === 'win32') {
+      return res.json({ supported: false, platform })
+    }
+
+    let totalBytes = 0
+    let availableBytes = 0
+
+    if (platform === 'linux') {
+      const linuxSnapshot = readLinuxMemorySnapshot()
+      if (linuxSnapshot) {
+        totalBytes = Number(linuxSnapshot.totalBytes || 0)
+        availableBytes = Number(linuxSnapshot.availableBytes || 0)
+      }
+    }
+
+    if (!totalBytes || totalBytes <= 0) {
+      totalBytes = Number(os.totalmem() || 0)
+      availableBytes = Number(os.freemem() || 0)
+    }
+
+    if (!totalBytes || totalBytes <= 0) {
+      return res.status(500).json({ supported: false, error: 'memory-unavailable' })
+    }
+
+    availableBytes = Math.max(0, Math.min(totalBytes, availableBytes || 0))
+    const usedBytes = Math.max(0, totalBytes - availableBytes)
+    const usagePct = totalBytes > 0 ? Math.round((usedBytes / totalBytes) * 1000) / 10 : 0
+
+    return res.json({
+      supported: true,
+      platform,
+      totalBytes,
+      availableBytes,
+      usedBytes,
+      usagePct,
+      dangerThresholdPct: 90,
+    })
+  } catch (e) {
+    console.error('getVpsMemoryMetrics error', e)
+    return res.status(500).json({ supported: false, error: 'internal' })
+  }
 }
 
 export async function getUploadsMetrics(req, res) {

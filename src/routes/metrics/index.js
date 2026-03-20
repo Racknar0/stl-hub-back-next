@@ -1,5 +1,5 @@
 import express from 'express'
-import { getUploadsMetrics, getConnectionsToday } from '../../controllers/metrics.controller.js'
+import { getUploadsMetrics, getConnectionsToday, getVpsMemoryMetrics } from '../../controllers/metrics.controller.js'
 import { getUsersCount } from '../../controllers/metrics.controller.js'
 import { getDownloadMetrics } from '../../controllers/metrics.controller.js'
 import { getRegistrationMetrics } from '../../controllers/metrics.controller.js'
@@ -10,6 +10,7 @@ import { recordSearchEvent, recordSearchClick, getSearchInsights } from '../../c
 const router = express.Router()
 
 router.get('/uploads', getUploadsMetrics)
+router.get('/vps-memory', getVpsMemoryMetrics)
 router.get('/connections-today', getConnectionsToday)
 router.get('/users', getUsersCount)
 router.get('/downloads', getDownloadMetrics)
