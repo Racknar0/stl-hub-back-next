@@ -223,6 +223,44 @@ function preUploadCleanup() {
 function ensureDir(p) {
     if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
 }
+
+function truncateBatchNotification(text, max = 191) {
+    const s = String(text || '');
+    if (s.length <= max) return s;
+    return `${s.slice(0, Math.max(0, max - 1))}…`;
+}
+
+async function notifyBatchUploadFailure({
+    phase,
+    mainAccountId,
+    assetId,
+    backupAccountId,
+    error,
+    extra,
+}) {
+    try {
+        const title = truncateBatchNotification(
+            `[BATCH][${String(phase || 'UNKNOWN').toUpperCase()}] fallo de subida`
+        , 120);
+
+        const body = truncateBatchNotification(
+            `main=${mainAccountId || '-'} asset=${assetId || '-'} backup=${backupAccountId || '-'} err=${String(error || 'unknown').slice(0, 220)}${extra ? ` | ${extra}` : ''}`
+        , 191);
+
+        await prisma.notification.create({
+            data: {
+                title,
+                body,
+                status: 'UNREAD',
+                type: 'AUTOMATION',
+                typeStatus: 'ERROR',
+            },
+        });
+    } catch (notifyErr) {
+        console.warn('[BATCH][NOTIF][WARN] failed creating upload-failure notification:', notifyErr?.message || notifyErr);
+    }
+}
+
 function safeName(s) {
     return String(s || '')
         .trim()
@@ -4097,6 +4135,13 @@ export async function enqueueToMegaBatch(assetId) {
                                     console.error(`[BATCH][MAIN] fail asset=${aid} msg=${e.message}`);
                                     progressMap.delete(aid);
                                     try { await prisma.asset.update({ where: { id: aid }, data: { status: 'FAILED' } }); } catch {}
+                                    await notifyBatchUploadFailure({
+                                        phase: 'main',
+                                        mainAccountId: mainId,
+                                        assetId: aid,
+                                        error: e?.message || e,
+                                        extra: ctxMain,
+                                    });
                                 }
 
                                 // Evitar fallos en cascada: si un comando deja a MEGAcmd sin sesión,
@@ -4288,6 +4333,14 @@ export async function enqueueToMegaBatch(assetId) {
                                     });
                                 }
                             } catch {}
+                            await notifyBatchUploadFailure({
+                                phase: 'backup',
+                                mainAccountId: mainId,
+                                assetId: aid,
+                                backupAccountId: b.id,
+                                error: e?.message || e,
+                                extra: bctx,
+                            });
                         }
                         st.backupIndex = (Number(st.backupIndex) || 0) + 1;
                         st.currentReplicaAssetId = null;
@@ -4323,6 +4376,13 @@ export async function enqueueToMegaBatch(assetId) {
             }, `BATCH-MAIN-${mainId}`);
         } catch (e) {
             console.error(`[BATCH] error mainAccId=${mainId} msg=${e.message}`);
+            await notifyBatchUploadFailure({
+                phase: 'batch',
+                mainAccountId: mainId,
+                assetId: '-',
+                error: e?.message || e,
+                extra: 'fallo general en orquestacion batch',
+            });
             try {
                 const stNow = megaBatchByMain.get(mainId);
                 const pending = stNow ? Array.from(stNow.pending) : [];
