@@ -10,6 +10,122 @@ const BATCH_DIR = path.join(UPLOADS_DIR, 'batch_imports');
 const ARCHIVE_EXTS = ['.rar', '.zip', '.7z', '.tar', '.gz', '.tgz'];
 const TITLE_PREFIX_RE = /^\s*STL\s*-\s*/i;
 const MAX_ACCOUNT_UPLOAD_MB = Number(process.env.BATCH_ACCOUNT_MAX_MB) || (19 * 1024);
+const DEFAULT_BATCH_CATEGORY = { name: 'Anime', slug: 'anime' };
+const DEFAULT_BATCH_TAGS = [
+  { name: 'anime', slug: 'anime' },
+  { name: 'Japon', slug: 'japon' },
+];
+
+function normalizeToken(raw) {
+  return String(raw || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+function normalizeSlug(raw) {
+  return normalizeToken(raw)
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function collectEntityKeys(row) {
+  return new Set(
+    [
+      normalizeToken(row?.name),
+      normalizeToken(row?.nameEn),
+      normalizeToken(row?.slug),
+      normalizeToken(row?.slugEn),
+      normalizeSlug(row?.slug),
+      normalizeSlug(row?.slugEn),
+    ].filter(Boolean)
+  );
+}
+
+async function resolveOrCreateCategory(preferred) {
+  const all = await prisma.category.findMany({ select: { id: true, name: true, slug: true, nameEn: true, slugEn: true } });
+  const wanted = new Set([
+    normalizeToken(preferred?.name),
+    normalizeToken(preferred?.slug),
+    normalizeSlug(preferred?.slug || preferred?.name),
+  ].filter(Boolean));
+
+  let found = all.find((c) => {
+    const keys = collectEntityKeys(c);
+    for (const k of wanted) if (keys.has(k)) return true;
+    return false;
+  });
+
+  if (!found) {
+    const createData = {
+      name: String(preferred?.name || 'Anime').trim(),
+      slug: normalizeSlug(preferred?.slug || preferred?.name || 'anime') || 'anime',
+    };
+    try {
+      found = await prisma.category.create({ data: createData });
+    } catch {
+      const refreshed = await prisma.category.findMany({ select: { id: true, name: true, slug: true, nameEn: true, slugEn: true } });
+      found = refreshed.find((c) => {
+        const keys = collectEntityKeys(c);
+        for (const k of wanted) if (keys.has(k)) return true;
+        return false;
+      });
+    }
+  }
+
+  if (!found) throw new Error('No se pudo resolver categoría Anime en DB');
+  return { id: found.id, name: found.name, slug: found.slug };
+}
+
+async function resolveOrCreateTag(preferred) {
+  const all = await prisma.tag.findMany({ select: { id: true, name: true, slug: true, nameEn: true, slugEn: true } });
+  const wanted = new Set([
+    normalizeToken(preferred?.name),
+    normalizeToken(preferred?.slug),
+    normalizeSlug(preferred?.slug || preferred?.name),
+  ].filter(Boolean));
+
+  let found = all.find((t) => {
+    const keys = collectEntityKeys(t);
+    for (const k of wanted) if (keys.has(k)) return true;
+    return false;
+  });
+
+  if (!found) {
+    const createData = {
+      name: String(preferred?.name || 'anime').trim(),
+      slug: normalizeSlug(preferred?.slug || preferred?.name || 'anime') || 'anime',
+    };
+    try {
+      found = await prisma.tag.create({ data: createData });
+    } catch {
+      const refreshed = await prisma.tag.findMany({ select: { id: true, name: true, slug: true, nameEn: true, slugEn: true } });
+      found = refreshed.find((t) => {
+        const keys = collectEntityKeys(t);
+        for (const k of wanted) if (keys.has(k)) return true;
+        return false;
+      });
+    }
+  }
+
+  if (!found) throw new Error(`No se pudo resolver tag ${preferred?.name || preferred?.slug || ''} en DB`);
+  return { id: found.id, name: found.name, slug: found.slug };
+}
+
+async function resolveDefaultBatchSuggestions() {
+  const category = await resolveOrCreateCategory(DEFAULT_BATCH_CATEGORY);
+  const tags = [];
+  for (const pref of DEFAULT_BATCH_TAGS) {
+    const t = await resolveOrCreateTag(pref);
+    if (!tags.some((x) => Number(x.id) === Number(t.id))) tags.push(t);
+  }
+  return { categories: [category], tags };
+}
+
+function hasLinkedMetaIds(arr) {
+  return Array.isArray(arr) && arr.some((x) => Number(x?.id || 0) > 0);
+}
 
 function normalizeBaseTitle(raw, fallback = 'Asset') {
   const cleaned = String(raw || '').replace(TITLE_PREFIX_RE, '').trim();
@@ -184,6 +300,7 @@ export const scanLocalDirectory = async (req, res) => {
 
     let newlyQueuedCount = 0;
     const reservedKeys = await buildReservedBatchTitleSet();
+    const defaultMeta = await resolveDefaultBatchSuggestions();
 
     for (const folder of folders) {
       // Find or create the master BatchImport record
@@ -228,6 +345,13 @@ export const scanLocalDirectory = async (req, res) => {
             const updateData = {
               title: uniqueTitle,
             };
+
+            if (!hasLinkedMetaIds(existingItem.categories)) {
+              updateData.categories = defaultMeta.categories;
+            }
+            if (!hasLinkedMetaIds(existingItem.tags)) {
+              updateData.tags = defaultMeta.tags;
+            }
 
             if (existingItem.status === 'FAILED') {
               updateData.status = 'DRAFT';
@@ -289,12 +413,9 @@ export const scanLocalDirectory = async (req, res) => {
               title: uniqueTitle,
               pesoMB,
               images: images.length > 0 ? images : [],
-              // MOCK FASE 2: Sugerencias "IA" quemadas
-              categories: [{ slug: 'anime', name: 'Anime' }],
-              tags: [
-                { slug: 'anime', name: 'Anime' },
-                { slug: 'japon', name: 'Japón' }
-              ],
+              // Fase 2: simulación de respuesta IA usando categorías/tags canónicos de DB
+              categories: defaultMeta.categories,
+              tags: defaultMeta.tags,
               status: 'DRAFT',
               mainStatus: 'PENDING',
               backupStatus: 'PENDING',
