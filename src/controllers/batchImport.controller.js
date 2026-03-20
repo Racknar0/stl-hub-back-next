@@ -397,6 +397,7 @@ export const confirmBatchItems = async (req, res) => {
     const reservedKeys = await buildReservedBatchTitleSet(normalizedIds);
 
     let confirmed = 0;
+    const confirmedIds = [];
     const renamed = [];
     const rejectedOverLimit = [];
     for (const item of items) {
@@ -440,6 +441,7 @@ export const confirmBatchItems = async (req, res) => {
         }
       });
       confirmed++;
+      confirmedIds.push(item.id);
       if (uniqueTitle !== String(desired || '').trim()) {
         renamed.push({ id: item.id, from: String(desired || '').trim(), to: uniqueTitle });
       }
@@ -449,7 +451,7 @@ export const confirmBatchItems = async (req, res) => {
       ? `Confirmados ${confirmed}. Rechazados por límite de ${MAX_ACCOUNT_UPLOAD_MB}MB: ${rejectedOverLimit.length}`
       : undefined;
 
-    return res.json({ success: true, confirmed, renamed, rejectedOverLimit, message });
+    return res.json({ success: true, confirmed, confirmedIds, renamed, rejectedOverLimit, message });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
