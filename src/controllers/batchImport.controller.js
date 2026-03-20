@@ -96,6 +96,52 @@ function run7z(args) {
   });
 }
 
+function runUnrar(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('unrar', args, { shell: false });
+    let out = '', err = '';
+    child.stdout.on('data', d => (out += d.toString()));
+    child.stderr.on('data', d => (err += d.toString()));
+    child.on('error', (e) => reject(new Error(`Spawn error: ${e.message}`)));
+    child.on('close', code => {
+      if (code === 0) resolve(out);
+      else reject(new Error(`unrar exited ${code}: ${(err || out).slice(0, 300)}`));
+    });
+  });
+}
+
+function isUnsupportedArchiveMethodError(msg = '') {
+  return /unsupported method|no implementado|not implemented/i.test(String(msg || ''));
+}
+
+async function extractArchiveWithFallback(archivePath, extractDir) {
+  const args7z = ['x', archivePath, `-o${extractDir}`, '-y', '-aoa'];
+  try {
+    await run7z(args7z);
+    return { tool: '7z' };
+  } catch (e) {
+    const firstErr = String(e?.message || e);
+    const ext = path.extname(String(archivePath || '')).toLowerCase();
+    if (ext !== '.rar' || !isUnsupportedArchiveMethodError(firstErr)) {
+      throw e;
+    }
+
+    // Fallback para VPS con p7zip sin soporte completo de RAR.
+    try {
+      await runUnrar(['x', '-o+', '-y', archivePath, `${extractDir}${path.sep}`]);
+      return { tool: 'unrar' };
+    } catch (e2) {
+      const secondErr = String(e2?.message || e2);
+      if (/spawn error:.*unrar/i.test(secondErr)) {
+        throw new Error(
+          `RAR no soportado por 7z y no existe 'unrar' instalado. Detalle 7z: ${firstErr.slice(0, 180)}`
+        );
+      }
+      throw new Error(`7z: ${firstErr.slice(0, 160)} | unrar: ${secondErr.slice(0, 160)}`);
+    }
+  }
+}
+
 // POST /api/batch-imports/scan
 export const scanLocalDirectory = async (req, res) => {
   try {
@@ -114,13 +160,15 @@ export const scanLocalDirectory = async (req, res) => {
       console.log(`[BATCH SCAN] Descomprimiendo ${arc.name} → ${extractDir}`);
       try {
         fs.mkdirSync(extractDir, { recursive: true });
-        // Sin comillas manuales, Node se encarga
-        await run7z(['x', arcPath, `-o${extractDir}`, '-y', '-aoa']);
+        const extraction = await extractArchiveWithFallback(arcPath, extractDir);
         // Borrar el archivo comprimido original
         fs.unlinkSync(arcPath);
-        console.log(`[BATCH SCAN] OK ${arc.name}`);
+        console.log(`[BATCH SCAN] OK ${arc.name} (tool=${extraction.tool})`);
       } catch (e) {
         console.error(`[BATCH SCAN] Error descomprimiendo ${arc.name}: ${e.message}`);
+        try {
+          if (fs.existsSync(extractDir)) fs.rmSync(extractDir, { recursive: true, force: true });
+        } catch {}
       }
     }
 

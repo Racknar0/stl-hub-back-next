@@ -100,6 +100,47 @@ function run7z(args) {
   })
 }
 
+function runUnrar(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('unrar', args, { shell: false })
+    let out = '', err = ''
+    child.stdout.on('data', d => (out += d.toString()))
+    child.stderr.on('data', d => (err += d.toString()))
+    child.on('error', (e) => reject(new Error(`Spawn error: ${e.message}`)))
+    child.on('close', code =>
+      code === 0 ? resolve(out) : reject(new Error(`unrar exited ${code}: ${(err || out).slice(0, 300)}`))
+    )
+  })
+}
+
+function isUnsupportedArchiveMethodError(msg = '') {
+  return /unsupported method|no implementado|not implemented/i.test(String(msg || ''))
+}
+
+async function extractArchiveWithFallback(archivePath, extractDir) {
+  try {
+    await run7z(['x', archivePath, `-o${extractDir}`, '-y', '-aoa'])
+    return { tool: '7z' }
+  } catch (e) {
+    const firstErr = String(e?.message || e)
+    const ext = path.extname(String(archivePath || '')).toLowerCase()
+    if (ext !== '.rar' || !isUnsupportedArchiveMethodError(firstErr)) {
+      throw e
+    }
+
+    try {
+      await runUnrar(['x', '-o+', '-y', archivePath, `${extractDir}${path.sep}`])
+      return { tool: 'unrar' }
+    } catch (e2) {
+      const secondErr = String(e2?.message || e2)
+      if (/spawn error:.*unrar/i.test(secondErr)) {
+        throw new Error(`RAR no soportado por 7z y no existe 'unrar' instalado. Detalle 7z: ${firstErr.slice(0, 180)}`)
+      }
+      throw new Error(`7z: ${firstErr.slice(0, 160)} | unrar: ${secondErr.slice(0, 160)}`)
+    }
+  }
+}
+
 function killProcessTreeBestEffort(child, label) {
   try {
     if (!child?.pid) return
@@ -267,10 +308,9 @@ async function extractInnerArchives(folderPath) {
   const archives = getAllFiles(folderPath).filter(f => ARCHIVE_EXTS.includes(path.extname(f).toLowerCase()))
   for (const arc of archives) {
     try {
-      // Sin comillas manuales, Node se encarga
-      await run7z(['x', arc, `-o${path.dirname(arc)}`, '-y', '-aoa'])
+      const extraction = await extractArchiveWithFallback(arc, path.dirname(arc))
       fs.unlinkSync(arc)
-      console.log(`[BATCH][EXTRACT] OK ${path.basename(arc)}`)
+      console.log(`[BATCH][EXTRACT] OK ${path.basename(arc)} (tool=${extraction.tool})`)
     } catch (e) { console.error(`[BATCH][EXTRACT] Error ${path.basename(arc)}: ${e.message}`) }
   }
 }
