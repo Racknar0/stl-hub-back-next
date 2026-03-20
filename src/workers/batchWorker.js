@@ -44,10 +44,39 @@ const IMAGE_EXTS   = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff']
 const NOTIFICATION_BODY_MAX = 191
 let activeMegaSessionAccountId = 0
 const preferredProxyByAccountId = new Map()
+const sessionUploadedMbByAccountId = new Map()
+const MAX_ACCOUNT_UPLOAD_MB = Number(process.env.BATCH_ACCOUNT_MAX_MB) || (19 * 1024)
 
 // ────────────────────────────── HELPERS ──────────────────────────────
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
+
+function toSafeNumber(value, fallback = 0) {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : fallback
+}
+
+function getSessionUploadedMb(accountId) {
+  const id = Number(accountId) || 0
+  return toSafeNumber(sessionUploadedMbByAccountId.get(id), 0)
+}
+
+function registerSessionUploadedMb(accountId, addedMb) {
+  const id = Number(accountId) || 0
+  if (!id) return
+  const current = getSessionUploadedMb(id)
+  sessionUploadedMbByAccountId.set(id, current + Math.max(0, toSafeNumber(addedMb, 0)))
+}
+
+function createProgressLogger(label) {
+  let lastPct = -1
+  return (pct) => {
+    const normalized = Math.max(0, Math.min(100, Math.round(toSafeNumber(pct, 0))))
+    if (normalized <= lastPct) return
+    lastPct = normalized
+    console.log(`[BATCH][PROGRESS] ${label} ${normalized}%`)
+  }
+}
 
 function truncateText(text, max = NOTIFICATION_BODY_MAX) {
   const s = String(text || '')
@@ -457,6 +486,8 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
   const remotePath = path.posix.join(remoteBase, slug)
   const ctx = `batch-${role} accId=${account.id} alias=${account.alias || '--'}`
   const accountIdNum = Number(account.id) || 0
+  if (!fs.existsSync(archivePath)) throw new Error('Local archive not found: ' + archivePath)
+  const archiveSizeMb = fs.statSync(archivePath).size / (1024 * 1024)
   let publicLink = null
   const triedProxyUrls = new Set()
   let lastProxyUrl = preferredProxyByAccountId.get(accountIdNum) || ''
@@ -466,6 +497,15 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
       const manualSwitchRequested = consumeBatchProxySwitchRequest(account.__batchItemId)
       if (manualSwitchRequested && lastProxyUrl) {
         triedProxyUrls.add(lastProxyUrl)
+      }
+
+      const usedMb = toSafeNumber(account.storageUsedMB, 0)
+      const sessionUploadedMb = getSessionUploadedMb(accountIdNum)
+      const projectedMb = usedMb + sessionUploadedMb + archiveSizeMb
+      if (projectedMb > MAX_ACCOUNT_UPLOAD_MB) {
+        throw new Error(
+          `ACCOUNT_STORAGE_LIMIT_REACHED_${MAX_ACCOUNT_UPLOAD_MB}MB accId=${account.id} role=${role} used=${usedMb.toFixed(2)}MB session=${sessionUploadedMb.toFixed(2)}MB incoming=${archiveSizeMb.toFixed(2)}MB projected=${projectedMb.toFixed(2)}MB`
+        )
       }
 
       await withMegaLock(async () => {
@@ -525,7 +565,6 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
         await ensureMegaSessionForAccount(payload, account.id, ctx)
         await safeMkdir(remotePath)
 
-        if (!fs.existsSync(archivePath)) throw new Error('Local archive not found: ' + archivePath)
         console.log(`[BATCH][UPLOAD][${role.toUpperCase()}] attempt=${attempt} ${path.basename(archivePath)} → ${remotePath}`)
 
         await megaPutWithStall({
@@ -551,6 +590,7 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
       }, `BATCH-${role.toUpperCase()}-${account.id}`)
 
       console.log(`[BATCH][${role.toUpperCase()}][OK] accId=${account.id}`)
+      registerSessionUploadedMb(accountIdNum, archiveSizeMb)
       return publicLink  // éxito → salir del retry loop
 
     } catch (e) {
@@ -686,12 +726,14 @@ async function processMainQueueItem(item) {
     ctx = await prepareItemForMain(item, updateItem)
 
     await updateItem({ error: 'Subiendo a MEGA (Main)...', mainStatus: 'UPLOADING', mainProgress: 0 })
+    const logMainProgress = createProgressLogger(`item=${item.id} role=MAIN acc=${ctx.mainAccount.id}`)
     const megaLink = await uploadToAccountWithRetry({
       archivePath: ctx.finalArchivePath,
       slug: ctx.slug,
       account: { ...ctx.mainAccount, __batchItemId: item.id },
       role: 'main',
       onProgress: async (pct) => {
+        logMainProgress(pct)
         try { await updateItem({ mainProgress: Math.round(pct) }) } catch {}
       },
     })
@@ -777,7 +819,7 @@ async function processBackupsForCompletedItem(item) {
     }
 
     const archiveRel = String(asset.archiveName || '').replace(/^\/+/, '')
-    const archivePath = archiveRel ? path.join(UPLOADS_DIR, archiveRel) : ''
+    const archivePath = archiveRel ? path.join(ARCHIVES_DIR, archiveRel) : ''
     if (!archivePath || !fs.existsSync(archivePath)) {
       throw new Error(`Archivo local no encontrado para backup: ${archiveRel || '(vacío)'}`)
     }
@@ -787,11 +829,15 @@ async function processBackupsForCompletedItem(item) {
     const failedBackups = []
     for (const backup of backupAccounts) {
       try {
+        const logBackupProgress = createProgressLogger(`item=${item.id} role=BACKUP acc=${backup.id}`)
         await uploadToAccountWithRetry({
           archivePath,
           slug: asset.slug,
           account: { ...backup, __batchItemId: item.id },
           role: 'backup',
+          onProgress: (pct) => {
+            logBackupProgress(pct)
+          },
         })
       } catch (e) {
         const msg = String(e?.message || e)

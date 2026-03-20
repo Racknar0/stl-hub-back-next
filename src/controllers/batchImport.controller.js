@@ -9,6 +9,7 @@ const UPLOADS_DIR = path.resolve('uploads');
 const BATCH_DIR = path.join(UPLOADS_DIR, 'batch_imports');
 const ARCHIVE_EXTS = ['.rar', '.zip', '.7z', '.tar', '.gz', '.tgz'];
 const TITLE_PREFIX_RE = /^\s*STL\s*-\s*/i;
+const MAX_ACCOUNT_UPLOAD_MB = Number(process.env.BATCH_ACCOUNT_MAX_MB) || (19 * 1024);
 
 function normalizeBaseTitle(raw, fallback = 'Asset') {
   const cleaned = String(raw || '').replace(TITLE_PREFIX_RE, '').trim();
@@ -381,12 +382,48 @@ export const confirmBatchItems = async (req, res) => {
       orderBy: { createdAt: 'asc' },
     });
 
+    const targetAccountIds = Array.from(new Set(
+      items.map((it) => Number(it.targetAccount || 0)).filter((n) => Number.isFinite(n) && n > 0)
+    ));
+    const accountRows = targetAccountIds.length
+      ? await prisma.megaAccount.findMany({
+          where: { id: { in: targetAccountIds } },
+          select: { id: true, alias: true, storageUsedMB: true },
+        })
+      : [];
+    const accountById = new Map(accountRows.map((a) => [Number(a.id), a]));
+    const plannedExtraByAccount = new Map();
+
     const reservedKeys = await buildReservedBatchTitleSet(normalizedIds);
 
     let confirmed = 0;
     const renamed = [];
+    const rejectedOverLimit = [];
     for (const item of items) {
       if (!item.targetAccount) continue;
+
+      const accountId = Number(item.targetAccount || 0);
+      const acc = accountById.get(accountId);
+      if (!acc) continue;
+
+      const usedMb = Number(acc.storageUsedMB || 0);
+      const plannedMb = Number(plannedExtraByAccount.get(accountId) || 0);
+      const incomingMb = Number(item.pesoMB || 0);
+      const projectedMb = usedMb + plannedMb + incomingMb;
+
+      if (projectedMb > MAX_ACCOUNT_UPLOAD_MB) {
+        rejectedOverLimit.push({
+          itemId: item.id,
+          accountId,
+          accountAlias: acc.alias,
+          usedMb,
+          incomingMb,
+          projectedMb,
+          limitMb: MAX_ACCOUNT_UPLOAD_MB,
+        });
+        continue;
+      }
+      plannedExtraByAccount.set(accountId, plannedMb + incomingMb);
 
       const desired = item.title || item.folderName || `Asset ${item.id}`;
       const uniqueTitle = await ensureUniqueBatchTitle(desired, reservedKeys);
@@ -408,7 +445,11 @@ export const confirmBatchItems = async (req, res) => {
       }
     }
 
-    return res.json({ success: true, confirmed, renamed });
+    const message = rejectedOverLimit.length
+      ? `Confirmados ${confirmed}. Rechazados por límite de ${MAX_ACCOUNT_UPLOAD_MB}MB: ${rejectedOverLimit.length}`
+      : undefined;
+
+    return res.json({ success: true, confirmed, renamed, rejectedOverLimit, message });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
