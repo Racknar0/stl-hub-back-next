@@ -21,6 +21,13 @@ import sharp from 'sharp'
 import { withMegaLock } from '../utils/megaQueue.js'
 import { applyMegaProxy, listMegaProxies } from '../utils/megaProxy.js'
 import { decryptToJson } from '../utils/cryptoUtils.js'
+import {
+  registerActiveBatchUpload,
+  updateActiveBatchUpload,
+  clearActiveBatchUpload,
+  consumeBatchProxySwitchRequest,
+  hasBatchProxySwitchRequest,
+} from '../utils/batchProxySwitch.js'
 
 const prisma = new PrismaClient()
 const UPLOADS_DIR  = path.resolve('uploads')
@@ -35,6 +42,7 @@ const MAX_STALL_RETRIES = 3
 const ARCHIVE_EXTS = ['.rar', '.zip', '.7z', '.tar', '.gz', '.tgz']
 const IMAGE_EXTS   = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff']
 const NOTIFICATION_BODY_MAX = 191
+let activeMegaSessionAccountId = 0
 
 // ────────────────────────────── HELPERS ──────────────────────────────
 
@@ -187,9 +195,37 @@ async function megaLogin(payload, ctx) {
   console.log(`[BATCH][LOGIN][OK] ${ctx}`)
 }
 
+async function ensureMegaSessionForAccount(payload, accountId, ctx) {
+  if (activeMegaSessionAccountId === Number(accountId)) {
+    try {
+      await runCmd('mega-whoami', [])
+      console.log(`[BATCH][LOGIN][SKIP] sesión reutilizada accId=${accountId} ${ctx}`)
+      return
+    } catch {
+      activeMegaSessionAccountId = 0
+    }
+  }
+
+  if (activeMegaSessionAccountId > 0 && activeMegaSessionAccountId !== Number(accountId)) {
+    try { await megaLogout(`SWITCH acc ${activeMegaSessionAccountId} -> ${accountId}`) } catch {}
+    activeMegaSessionAccountId = 0
+  }
+
+  await megaLogin(payload, ctx)
+  activeMegaSessionAccountId = Number(accountId) || 0
+}
+
 // ────────── mega-put CON stall detection (idéntico al uploader) ──────────
 
-function megaPutWithStall({ srcPath, remotePath, logPrefix, onProgress, stallTimeoutMs = STALL_TIMEOUT_MS }) {
+function megaPutWithStall({
+  srcPath,
+  remotePath,
+  logPrefix,
+  onProgress,
+  stallTimeoutMs = STALL_TIMEOUT_MS,
+  shouldAbort,
+  onRegisterCancel,
+}) {
   return new Promise((resolve, reject) => {
     const child = spawn('mega-put', [srcPath, remotePath], { shell: true })
     attachAutoAcceptTerms(child, logPrefix || 'BATCH PUT')
@@ -214,9 +250,23 @@ function megaPutWithStall({ srcPath, remotePath, logPrefix, onProgress, stallTim
     const fail = (err) => { if (settled) return; settled = true; cleanup(); reject(err) }
     const ok   = ()    => { if (settled) return; settled = true; cleanup(); resolve() }
 
+    if (typeof onRegisterCancel === 'function') {
+      onRegisterCancel(() => {
+        if (settled) return
+        killProcessTreeBestEffort(child, logPrefix)
+        fail(new Error('FORCE_PROXY_SWITCH_REQUESTED'))
+      })
+    }
+
     // Stall watchdog
     if (stallTimeoutMs > 0) {
       stallTimer = setInterval(() => {
+        if (typeof shouldAbort === 'function' && shouldAbort()) {
+          console.warn(`[BATCH][ABORT] cambio manual de proxy solicitado ${logPrefix}`)
+          killProcessTreeBestEffort(child, logPrefix)
+          fail(new Error('FORCE_PROXY_SWITCH_REQUESTED'))
+          return
+        }
         const idle = Date.now() - lastProgressAt
         if (idle < stallTimeoutMs) return
         console.warn(`[BATCH][STALL] mega-put sin progreso ${Math.round(idle/1000)}s lastPct=${lastPct} ${logPrefix}`)
@@ -264,6 +314,15 @@ function slugify(str) {
     .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 120)
 }
 
+function safeSlugLikeUploader(str) {
+  return String(str || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-_]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 120)
+}
+
 async function uniqueSlug(baseSlug) {
   let candidate = baseSlug, suffix = 1
   while (true) {
@@ -300,6 +359,12 @@ async function ensureUniqueAssetTitle(rawTitle) {
   }
 
   throw new Error('No unique title available')
+}
+
+function ensurePrefixedTitle(rawTitle) {
+  const t = String(rawTitle || '').trim()
+  if (!t) return 'STL - Asset'
+  return /^\s*stl\s*-/i.test(t) ? t : `STL - ${t}`
 }
 
 // ──────────────────── EXTRACT + RECOMPRESS ────────────────────
@@ -391,23 +456,58 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
   const remotePath = path.posix.join(remoteBase, slug)
   const ctx = `batch-${role} accId=${account.id} alias=${account.alias || '--'}`
   let publicLink = null
+  const triedProxyUrls = new Set()
+  let lastProxyUrl = ''
 
   for (let attempt = 1; attempt <= MAX_STALL_RETRIES; attempt++) {
     try {
+      const manualSwitchRequested = consumeBatchProxySwitchRequest(account.__batchItemId)
+      if (manualSwitchRequested && lastProxyUrl) {
+        triedProxyUrls.add(lastProxyUrl)
+      }
+
       await withMegaLock(async () => {
         const proxies = await listMegaProxies()
         if (!proxies.length) {
           throw new Error('PROXY_REQUIRED_NO_PROXIES_AVAILABLE')
         }
-        const picked = proxies[Math.floor(Math.random() * proxies.length)]
+
+        let candidatePool = proxies.filter((p) => p?.proxyUrl && !triedProxyUrls.has(p.proxyUrl))
+        if (lastProxyUrl) {
+          const withoutLast = candidatePool.filter((p) => p.proxyUrl !== lastProxyUrl)
+          if (withoutLast.length) candidatePool = withoutLast
+        }
+        if (!candidatePool.length) {
+          candidatePool = proxies.filter((p) => p?.proxyUrl && (!lastProxyUrl || p.proxyUrl !== lastProxyUrl))
+        }
+        if (!candidatePool.length) {
+          candidatePool = proxies.filter((p) => p?.proxyUrl)
+        }
+        const picked = candidatePool[Math.floor(Math.random() * candidatePool.length)]
+        if (!picked?.proxyUrl) {
+          throw new Error('PROXY_REQUIRED_NO_VALID_PROXY')
+        }
+
         const proxyResult = await applyMegaProxy(picked, { ctx, timeoutMs: 15000, clearOnFail: false })
         if (!proxyResult?.enabled) {
           throw new Error(`PROXY_REQUIRED_APPLY_FAIL: ${proxyResult?.error || 'unknown'}`)
         }
+        triedProxyUrls.add(picked.proxyUrl)
+        lastProxyUrl = picked.proxyUrl
         console.log(`[BATCH][PROXY][OK] ${picked.proxyUrl} ${ctx}`)
 
-        await megaLogout(`PREV ${ctx}`)
-        await megaLogin(payload, ctx)
+        let cancelUploadNow = null
+        registerActiveBatchUpload(account.__batchItemId, {
+          phase: role,
+          accountId: account.id,
+          proxyUrl: picked.proxyUrl,
+          cancel: () => {
+            if (typeof cancelUploadNow === 'function') cancelUploadNow()
+          },
+        })
+        updateActiveBatchUpload(account.__batchItemId, { proxyUrl: picked.proxyUrl })
+
+        await ensureMegaSessionForAccount(payload, account.id, ctx)
         await safeMkdir(remotePath)
 
         if (!fs.existsSync(archivePath)) throw new Error('Local archive not found: ' + archivePath)
@@ -419,6 +519,8 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
           logPrefix: `batch-${role} accId=${account.id}`,
           stallTimeoutMs: STALL_TIMEOUT_MS,
           onProgress,
+          shouldAbort: () => hasBatchProxySwitchRequest(account.__batchItemId),
+          onRegisterCancel: (cancelFn) => { cancelUploadNow = cancelFn },
         })
 
         // Link público solo en role=main
@@ -430,14 +532,22 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
           } catch (e) { console.warn(`[BATCH][EXPORT] warn: ${e.message}`) }
         }
 
-        await megaLogout(`END ${ctx}`)
+        clearActiveBatchUpload(account.__batchItemId)
       }, `BATCH-${role.toUpperCase()}-${account.id}`)
 
       console.log(`[BATCH][${role.toUpperCase()}][OK] accId=${account.id}`)
       return publicLink  // éxito → salir del retry loop
 
     } catch (e) {
-      console.error(`[BATCH][${role.toUpperCase()}][FAIL] attempt=${attempt}/${MAX_STALL_RETRIES} accId=${account.id}: ${e.message}`)
+      clearActiveBatchUpload(account.__batchItemId)
+      const msg = String(e?.message || e)
+      console.error(`[BATCH][${role.toUpperCase()}][FAIL] attempt=${attempt}/${MAX_STALL_RETRIES} accId=${account.id}: ${msg}`)
+      if (/FORCE_PROXY_SWITCH_REQUESTED/i.test(msg)) {
+        // Reintento inmediato, sin consumir cupo por acción manual de "otro proxy".
+        attempt -= 1
+        await sleep(350)
+        continue
+      }
       if (attempt >= MAX_STALL_RETRIES) throw e
       // Espera antes de reintentar
       await sleep(5000)
@@ -459,7 +569,7 @@ async function createAssetRecord({ slug, title, archiveName, images, account, me
     archiveSizeB,
     fileSizeB: archiveSizeB,
     images: images || [],
-    status: 'PROCESSING',
+    status: 'PUBLISHED',
     megaLink: megaLink || null,
     megaLinkAlive: !!megaLink,
     megaLinkCheckedAt: megaLink ? new Date() : null,
@@ -486,7 +596,8 @@ async function prepareItemForMain(item, updateItem) {
   const batchFolder = await prisma.batchImport.findUnique({ where: { id: item.batchId } })
   const folderPath = path.join(BATCH_DIR, batchFolder?.folderName || '', item.folderName)
   const friendlyName = item.title || item.folderName || `item-${item.id}`
-  const baseSlug = slugify(item.folderName || friendlyName)
+  const titleForSlug = ensurePrefixedTitle(friendlyName)
+  const baseSlug = safeSlugLikeUploader(titleForSlug) || slugify(item.folderName || friendlyName)
   const slug = await uniqueSlug(baseSlug)
 
   console.log(`\n${'='.repeat(60)}`)
@@ -524,7 +635,7 @@ async function prepareItemForMain(item, updateItem) {
   fs.mkdirSync(archDir, { recursive: true })
   const finalArchivePath = path.join(archDir, `${slug}.${packed.ext}`)
   fs.copyFileSync(stagingArchivePath, finalArchivePath)
-  const archiveName = path.relative(UPLOADS_DIR, finalArchivePath).replace(/\\/g, '/')
+  const archiveName = path.relative(ARCHIVES_DIR, finalArchivePath).replace(/\\/g, '/')
 
   return {
     folderPath,
@@ -560,7 +671,7 @@ async function processMainQueueItem(item) {
     const megaLink = await uploadToAccountWithRetry({
       archivePath: ctx.finalArchivePath,
       slug: ctx.slug,
-      account: ctx.mainAccount,
+      account: { ...ctx.mainAccount, __batchItemId: item.id },
       role: 'main',
       onProgress: async (pct) => {
         try { await updateItem({ mainProgress: Math.round(pct) }) } catch {}
@@ -661,7 +772,7 @@ async function processBackupsForCompletedItem(item) {
         await uploadToAccountWithRetry({
           archivePath,
           slug: asset.slug,
-          account: backup,
+          account: { ...backup, __batchItemId: item.id },
           role: 'backup',
         })
       } catch (e) {

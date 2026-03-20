@@ -2,6 +2,7 @@
 import { spawn } from 'child_process';
 
 const VERBOSE_MEGA = /^(1|true|yes)$/i.test(String(process.env.MEGA_VERBOSE || ''));
+const AUTO_LOGOUT_DELAY_MS = Number(process.env.MEGA_AUTO_LOGOUT_DELAY_MS) || 45000;
 let chain = Promise.resolve();
 let active = 0;
 const listeners = new Set();
@@ -52,7 +53,7 @@ export function withMegaLock(fn, label = 'MEGA') {
               }
             } catch (e) { if (VERBOSE_MEGA) console.warn('[MEGA-AUTO-LOGOUT] warn:', e.message); }
           }
-        }, 2000);
+        }, AUTO_LOGOUT_DELAY_MS);
       }
     }
   };

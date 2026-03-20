@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
+import { requestBatchProxySwitch } from '../utils/batchProxySwitch.js';
 
 const prisma = new PrismaClient();
 const UPLOADS_DIR = path.resolve('uploads');
@@ -473,6 +474,40 @@ export const purgeAll = async (req, res) => {
 
     console.log(`[BATCH PURGE] Eliminados ${deletedItems.count} items, ${deletedBatches.count} batches, carpeta limpiada.`);
     return res.json({ success: true, message: `Eliminados ${deletedItems.count} items y ${deletedBatches.count} batches.` });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+// POST /api/batch-imports/items/:id/retry-proxy
+export const retryBatchItemWithAnotherProxy = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ success: false, message: 'id inválido' });
+    }
+
+    const item = await prisma.batchImportItem.findUnique({ where: { id } });
+    if (!item) return res.status(404).json({ success: false, message: 'Item no encontrado' });
+
+    const isUploading = String(item.mainStatus || '').toUpperCase() === 'UPLOADING' || String(item.backupStatus || '').toUpperCase() === 'UPLOADING';
+    if (!isUploading || String(item.status || '').toUpperCase() !== 'PROCESSING') {
+      return res.status(409).json({
+        success: false,
+        message: 'El item no está subiendo en este momento',
+      });
+    }
+
+    const result = requestBatchProxySwitch(id, 'manual-ui');
+
+    await prisma.batchImportItem.update({
+      where: { id },
+      data: {
+        error: 'Solicitud manual: cancelar subida actual y reintentar con otro proxy...',
+      },
+    });
+
+    return res.json({ success: true, result });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
