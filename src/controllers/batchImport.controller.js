@@ -522,6 +522,44 @@ export const purgeAll = async (req, res) => {
   }
 };
 
+// DELETE /api/batch-imports/completed
+export const purgeCompleted = async (req, res) => {
+  try {
+    const completedItems = await prisma.batchImportItem.findMany({
+      where: { status: 'COMPLETED' },
+      select: { id: true, batchId: true, folderName: true },
+    });
+
+    if (!completedItems.length) {
+      return res.json({ success: true, deletedCount: 0, message: 'No hay items completados para eliminar.' });
+    }
+
+    const touchedBatchIds = Array.from(new Set(completedItems.map((i) => Number(i.batchId)).filter((n) => Number.isFinite(n) && n > 0)));
+
+    await prisma.batchImportItem.deleteMany({
+      where: { id: { in: completedItems.map((i) => i.id) } },
+    });
+
+    for (const batchId of touchedBatchIds) {
+      const remaining = await prisma.batchImportItem.count({ where: { batchId } });
+      if (remaining <= 0) {
+        await prisma.batchImport.delete({ where: { id: batchId } }).catch(() => {});
+      } else {
+        await prisma.batchImport.update({ where: { id: batchId }, data: { totalItems: remaining } }).catch(() => {});
+      }
+    }
+
+    console.log(`[BATCH PURGE COMPLETED] Eliminados ${completedItems.length} items COMPLETED.`);
+    return res.json({
+      success: true,
+      deletedCount: completedItems.length,
+      message: `Eliminados ${completedItems.length} items completados.`,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
 // POST /api/batch-imports/items/:id/retry-proxy
 export const retryBatchItemWithAnotherProxy = async (req, res) => {
   try {
