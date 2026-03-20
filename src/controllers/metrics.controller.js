@@ -1,7 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import jwt from 'jsonwebtoken';
-import os from 'os';
-import fs from 'fs';
+import { execFileSync } from 'child_process';
+import path from 'path';
 
 const prisma = new PrismaClient();
 
@@ -70,26 +70,26 @@ function startOfDay(d) {
   return t
 }
 
-function readLinuxMemorySnapshot() {
+function readLinuxDiskSnapshot(targetPath) {
   try {
-    const txt = fs.readFileSync('/proc/meminfo', 'utf8')
-    const lines = txt.split(/\r?\n/)
-    const map = {}
+    const out = execFileSync('df', ['-kP', targetPath], { encoding: 'utf8' })
+    const lines = String(out || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+    if (lines.length < 2) return null
 
-    for (const raw of lines) {
-      const line = String(raw || '').trim()
-      if (!line) continue
-      const m = line.match(/^([A-Za-z_()]+):\s+(\d+)\s+kB$/)
-      if (!m) continue
-      map[m[1]] = Number(m[2]) * 1024
-    }
+    const dataLine = lines[lines.length - 1]
+    const cols = dataLine.split(/\s+/)
+    if (cols.length < 6) return null
 
-    const totalBytes = Number(map.MemTotal || 0)
-    const availableBytes = Number(map.MemAvailable || (map.MemFree || 0) + (map.Buffers || 0) + (map.Cached || 0))
+    const totalBytes = Number(cols[1] || 0) * 1024
+    const usedBytes = Number(cols[2] || 0) * 1024
+    const availableBytes = Number(cols[3] || 0) * 1024
 
-    if (totalBytes <= 0) return null
+    if (!Number.isFinite(totalBytes) || totalBytes <= 0) return null
+    const safeUsed = Number.isFinite(usedBytes) ? usedBytes : Math.max(0, totalBytes - availableBytes)
+
     return {
       totalBytes,
+      usedBytes: Math.max(0, Math.min(totalBytes, safeUsed || 0)),
       availableBytes: Math.max(0, Math.min(totalBytes, availableBytes || 0)),
     }
   } catch {
@@ -105,33 +105,34 @@ export async function getVpsMemoryMetrics(req, res) {
       return res.json({ supported: false, platform })
     }
 
+    const targetPath = String(process.env.VPS_STORAGE_PATH || path.resolve('uploads') || '/').trim() || '/'
+
     let totalBytes = 0
     let availableBytes = 0
+    let usedBytes = 0
 
     if (platform === 'linux') {
-      const linuxSnapshot = readLinuxMemorySnapshot()
+      const linuxSnapshot = readLinuxDiskSnapshot(targetPath) || readLinuxDiskSnapshot('/')
       if (linuxSnapshot) {
         totalBytes = Number(linuxSnapshot.totalBytes || 0)
         availableBytes = Number(linuxSnapshot.availableBytes || 0)
+        usedBytes = Number(linuxSnapshot.usedBytes || 0)
       }
     }
 
     if (!totalBytes || totalBytes <= 0) {
-      totalBytes = Number(os.totalmem() || 0)
-      availableBytes = Number(os.freemem() || 0)
-    }
-
-    if (!totalBytes || totalBytes <= 0) {
-      return res.status(500).json({ supported: false, error: 'memory-unavailable' })
+      return res.status(500).json({ supported: false, error: 'storage-unavailable' })
     }
 
     availableBytes = Math.max(0, Math.min(totalBytes, availableBytes || 0))
-    const usedBytes = Math.max(0, totalBytes - availableBytes)
+    usedBytes = Math.max(0, Math.min(totalBytes, usedBytes || (totalBytes - availableBytes)))
     const usagePct = totalBytes > 0 ? Math.round((usedBytes / totalBytes) * 1000) / 10 : 0
 
     return res.json({
       supported: true,
       platform,
+      metric: 'storage',
+      targetPath,
       totalBytes,
       availableBytes,
       usedBytes,
