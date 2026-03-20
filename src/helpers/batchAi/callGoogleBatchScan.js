@@ -12,6 +12,10 @@ const UPLOADS_DIR = path.resolve('uploads')
 const MAX_IMAGES_PER_ITEM = Math.max(1, Number(process.env.BATCH_AI_MAX_IMAGES_PER_ITEM) || 1)
 const MAX_IMAGE_BYTES = Math.max(256 * 1024, (Number(process.env.BATCH_AI_MAX_IMAGE_MB) || 4) * 1024 * 1024)
 const IMAGE_RESOLUTION_ENV = String(process.env.BATCH_AI_MEDIA_RESOLUTION || 'low').trim().toLowerCase()
+const AI_RETRY_MAX_ATTEMPTS = Math.max(0, Number(process.env.BATCH_AI_RETRY_MAX_ATTEMPTS) || 4)
+const AI_RETRY_BASE_MS = Math.max(250, Number(process.env.BATCH_AI_RETRY_BASE_MS) || 1500)
+const AI_RETRY_MAX_MS = Math.max(AI_RETRY_BASE_MS, Number(process.env.BATCH_AI_RETRY_MAX_MS) || 30_000)
+const AI_RATE_LIMIT_COOLDOWN_MS = Math.max(500, Number(process.env.BATCH_AI_RATE_LIMIT_COOLDOWN_MS) || 1200)
 
 function resolveMediaResolutionLevel(raw) {
   if (raw === 'high') return PartMediaResolutionLevel.MEDIA_RESOLUTION_HIGH
@@ -117,6 +121,74 @@ function normalizeTagLabel(value) {
     .trim()
     .toLowerCase()
     .replace(/\s+/g, ' ')
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)))
+}
+
+function readNestedNumber(obj, keys = []) {
+  let ref = obj
+  for (const key of keys) {
+    if (!ref || typeof ref !== 'object') return null
+    ref = ref[key]
+  }
+  const n = Number(ref)
+  return Number.isFinite(n) ? n : null
+}
+
+function extractErrorStatusCode(error) {
+  const directCode = readNestedNumber(error, ['code'])
+  if (directCode && directCode >= 100 && directCode <= 599) return directCode
+
+  const statusCandidates = [
+    readNestedNumber(error, ['status']),
+    readNestedNumber(error, ['statusCode']),
+    readNestedNumber(error, ['response', 'status']),
+    readNestedNumber(error, ['error', 'code']),
+  ].filter(Boolean)
+  if (statusCandidates.length) return statusCandidates[0]
+
+  const msg = String(error?.message || error || '')
+  const statusMatch = msg.match(/\b(4\d\d|5\d\d)\b/)
+  if (statusMatch?.[1]) {
+    const parsed = Number(statusMatch[1])
+    if (Number.isFinite(parsed)) return parsed
+  }
+
+  return 0
+}
+
+function isRateLimitError(error) {
+  const code = extractErrorStatusCode(error)
+  if (code === 429) return true
+  const msg = String(error?.message || error || '').toLowerCase()
+  return /too many requests|rate limit|quota|resource exhausted|429/.test(msg)
+}
+
+function isRetryableAiError(error) {
+  const code = extractErrorStatusCode(error)
+  if ([408, 409, 425, 429, 500, 502, 503, 504].includes(code)) return true
+  const msg = String(error?.message || error || '').toLowerCase()
+  return /timeout|timed out|temporar|try again|unavailable|internal|network|connection reset|econnreset|etimedout/.test(msg)
+}
+
+function computeRetryWaitMs(retryNumber, error) {
+  const safeRetry = Math.max(1, Number(retryNumber) || 1)
+  const base = Math.min(AI_RETRY_MAX_MS, AI_RETRY_BASE_MS * (2 ** (safeRetry - 1)))
+  const jitter = Math.floor(Math.random() * Math.max(200, Math.floor(base * 0.35)))
+  const cooldown = isRateLimitError(error) ? AI_RATE_LIMIT_COOLDOWN_MS : 0
+  return Math.min(AI_RETRY_MAX_MS, base + jitter + cooldown)
+}
+
+function withAiMeta(error, meta) {
+  if (error && typeof error === 'object') {
+    error.__batchAiMeta = meta
+    return error
+  }
+  const wrapped = new Error(String(error || 'BATCH_AI_ERROR'))
+  wrapped.__batchAiMeta = meta
+  return wrapped
 }
 
 function buildTagCanonicalKey(tag) {
@@ -580,14 +652,44 @@ async function classifySingleItem(ai, payload, item) {
     availableImages: Number(item?.imagesCount || 0),
   })
 
-  const response = await ai.models.generateContent({
-    model: MODEL_NAME,
-    contents: [prompt, ...imageParts],
-    config: {
-      responseMimeType: 'application/json',
-      responseJsonSchema: SINGLE_RESULT_SCHEMA,
-    },
-  })
+  let response = null
+  let retriesUsed = 0
+  let rateLimitedSeen = false
+
+  while (true) {
+    try {
+      response = await ai.models.generateContent({
+        model: MODEL_NAME,
+        contents: [prompt, ...imageParts],
+        config: {
+          responseMimeType: 'application/json',
+          responseJsonSchema: SINGLE_RESULT_SCHEMA,
+        },
+      })
+      break
+    } catch (error) {
+      const retryable = isRetryableAiError(error)
+      const rateLimited = isRateLimitError(error)
+      if (rateLimited) rateLimitedSeen = true
+
+      if (!retryable || retriesUsed >= AI_RETRY_MAX_ATTEMPTS) {
+        throw withAiMeta(error, {
+          retriesUsed,
+          attemptsUsed: retriesUsed + 1,
+          retryable,
+          rateLimited: rateLimitedSeen || rateLimited,
+          statusCode: extractErrorStatusCode(error),
+        })
+      }
+
+      retriesUsed += 1
+      const waitMs = computeRetryWaitMs(retriesUsed, error)
+      console.warn(
+        `[BATCH][AI][RETRY] item="${getItemDisplayName(item)}" retry=${retriesUsed}/${AI_RETRY_MAX_ATTEMPTS} waitMs=${waitMs} status=${extractErrorStatusCode(error) || '-'} reason=${String(error?.message || error).slice(0, 220)}`,
+      )
+      await sleep(waitMs)
+    }
+  }
 
   const parsed = extractJsonFromText(response?.text)
   if (!parsed) {
@@ -595,16 +697,25 @@ async function classifySingleItem(ai, payload, item) {
     console.error('[BATCH][AI][PARSE_ERROR] No se pudo parsear JSON para', getItemDisplayName(item))
     console.error('[BATCH][AI][PARSE_ERROR][RAW_RESPONSE]', rawResponseText || toDebugText(response))
     console.warn('[BATCH][AI][FALLBACK] Aplicando categoria/tag de adultos por parse fallido en', getItemDisplayName(item))
-    return [buildAdultFallbackResult(payload, item, matchers)]
+    return {
+      results: [buildAdultFallbackResult(payload, item, matchers)],
+      retriesUsed,
+      rateLimitedSeen,
+    }
   }
 
   const normalized = normalizeListShape(parsed)
   if (!normalized.length) {
     console.warn('[BATCH][AI][FALLBACK] Respuesta vacia/no usable, aplicando adultos en', getItemDisplayName(item))
-    return [buildAdultFallbackResult(payload, item, matchers)]
+    return {
+      results: [buildAdultFallbackResult(payload, item, matchers)],
+      retriesUsed,
+      rateLimitedSeen,
+    }
   }
 
-  return normalized.map((entry) => {
+  return {
+    results: normalized.map((entry) => {
     const namePair = ensureBilingualName(entry?.nombre)
     const category = normalizeCategory(entry?.categoria, payload, matchers)
     const tags = normalizeTags(entry?.tags, matchers)
@@ -628,7 +739,10 @@ async function classifySingleItem(ai, payload, item) {
         en: descriptionPair.en,
       },
     }
-  })
+    }),
+    retriesUsed,
+    rateLimitedSeen,
+  }
 }
 
 export async function callGoogleBatchScan(payload) {
@@ -653,6 +767,12 @@ export async function callGoogleBatchScan(payload) {
     console.info(`[BATCH][AI][START] items=${scannedItems.length} model=${MODEL_NAME}`)
 
     const normalized = []
+    const failedItemIds = []
+    let failedItems = 0
+    let retriedItems = 0
+    let retryAttempts = 0
+    let rateLimitedItems = 0
+    let rateLimitRecoveredItems = 0
     let done = 0
     for (const item of scannedItems) {
       const total = scannedItems.length || 1
@@ -660,8 +780,29 @@ export async function callGoogleBatchScan(payload) {
       console.info(`[BATCH][AI][PROGRESS] ${startPct}% (${done}/${total}) procesando "${getItemDisplayName(item)}"`)
       try {
         const result = await classifySingleItem(ai, payload, item)
-        normalized.push(...result)
+        const itemResults = Array.isArray(result?.results) ? result.results : []
+        const retriesUsed = Math.max(0, Number(result?.retriesUsed || 0))
+        const rateLimitedSeen = !!result?.rateLimitedSeen
+
+        normalized.push(...itemResults)
+        if (retriesUsed > 0) {
+          retriedItems += 1
+          retryAttempts += retriesUsed
+        }
+        if (rateLimitedSeen) {
+          rateLimitRecoveredItems += 1
+        }
       } catch (error) {
+        const aiMeta = error?.__batchAiMeta || {}
+        const retriesUsed = Math.max(0, Number(aiMeta?.retriesUsed || 0))
+        const rateLimited = !!aiMeta?.rateLimited || isRateLimitError(error)
+        if (retriesUsed > 0) {
+          retriedItems += 1
+          retryAttempts += retriesUsed
+        }
+        if (rateLimited) rateLimitedItems += 1
+        failedItems += 1
+        if (Number(item?.itemId || 0) > 0) failedItemIds.push(Number(item.itemId))
         console.error('[BATCH][AI][ITEM_ERROR]', getItemDisplayName(item), error?.message || error)
         console.error('[BATCH][AI][ITEM_ERROR][DETAIL]', toDebugText(error))
       } finally {
@@ -676,10 +817,37 @@ export async function callGoogleBatchScan(payload) {
 
     console.info(`[BATCH][AI][DONE] itemsProcesados=${done}/${scannedItems.length || 0} sugerencias=${normalized.length}`)
 
-    return normalized
+    return {
+      suggestions: normalized,
+      stats: {
+        totalItems: scannedItems.length,
+        processedItems: done,
+        successItems: Math.max(0, done - failedItems),
+        failedItems,
+        failedItemIds,
+        retriedItems,
+        retryAttempts,
+        rateLimitedItems,
+        rateLimitRecoveredItems,
+      },
+    }
   } catch (error) {
     console.error('[BATCH][AI][ERROR]', error?.message || error)
     console.error('[BATCH][AI][ERROR][DETAIL]', toDebugText(error))
-    return []
+    return {
+      suggestions: [],
+      stats: {
+        totalItems: Array.isArray(payload?.scanContext?.scannedItems) ? payload.scanContext.scannedItems.length : 0,
+        processedItems: 0,
+        successItems: 0,
+        failedItems: 0,
+        failedItemIds: [],
+        retriedItems: 0,
+        retryAttempts: 0,
+        rateLimitedItems: 0,
+        rateLimitRecoveredItems: 0,
+        globalError: String(error?.message || error || 'BATCH_AI_ERROR'),
+      },
+    }
   }
 }

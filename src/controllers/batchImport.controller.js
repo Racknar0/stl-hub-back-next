@@ -302,6 +302,134 @@ function removeDirIfEmpty(absDir) {
   } catch {}
 }
 
+function unpackAiScanResult(rawValue) {
+  if (Array.isArray(rawValue)) {
+    return { suggestions: rawValue, stats: null };
+  }
+  if (!rawValue || typeof rawValue !== 'object') {
+    return { suggestions: [], stats: null };
+  }
+
+  const suggestions = Array.isArray(rawValue.suggestions)
+    ? rawValue.suggestions
+    : Array.isArray(rawValue.items)
+      ? rawValue.items
+      : [];
+  const stats = rawValue.stats && typeof rawValue.stats === 'object' ? rawValue.stats : null;
+
+  return { suggestions, stats };
+}
+
+async function applyAiSuggestionsToBatchItems(rawSuggestions, { source = 'manual-retry-ai' } = {}) {
+  const aiSuggestions = Array.isArray(rawSuggestions) ? rawSuggestions : [];
+  if (aiSuggestions.length <= 0) {
+    console.log(`[BATCH][AI][APPLY] source=${source} sugerencias=0`);
+    return { applied: 0, skipped: 0, failed: 0, total: 0 };
+  }
+
+  let applied = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  for (const suggestion of aiSuggestions) {
+    const itemId = Number(suggestion?.itemId || 0);
+    if (!itemId) continue;
+
+    const nameEs = String(suggestion?.nombre?.es || '').trim();
+    const nameEn = String(suggestion?.nombre?.en || '').trim();
+    const safeName = normalizeBilingualTitlePair(nameEs, nameEn, 'Asset');
+
+    const tags = Array.isArray(suggestion?.tags)
+      ? suggestion.tags.slice(0, 3)
+      : [];
+
+    const categoryObj = suggestion?.categoria && typeof suggestion.categoria === 'object'
+      ? suggestion.categoria
+      : null;
+
+    const data = {
+      title: safeName.es,
+      titleEn: safeName.en,
+    };
+
+    const descEs = String(suggestion?.descripcion?.es || '').trim();
+    const descEn = String(suggestion?.descripcion?.en || '').trim();
+    if (descEs) data.description = descEs;
+    if (descEn) data.descriptionEn = descEn;
+
+    const normalizedTags = normalizeBatchTags(tags, 3);
+    if (normalizedTags.length > 0) data.tags = normalizedTags;
+    if (categoryObj && (categoryObj.id || categoryObj.slug)) {
+      data.categories = [categoryObj];
+    }
+
+    try {
+      const current = await prisma.batchImportItem.findUnique({
+        where: { id: itemId },
+        select: { id: true, status: true },
+      });
+
+      if (!current) {
+        skipped += 1;
+        continue;
+      }
+
+      const statusNow = String(current.status || '').toUpperCase();
+      if (!['DRAFT', 'FAILED', 'PENDING'].includes(statusNow)) {
+        skipped += 1;
+        continue;
+      }
+
+      await prisma.batchImportItem.update({
+        where: { id: itemId },
+        data,
+      });
+      applied += 1;
+    } catch (applyErr) {
+      failed += 1;
+      console.error('[BATCH][AI][APPLY_WARN]', applyErr?.message || applyErr);
+      console.error('[BATCH][AI][APPLY_WARN][ITEM]', {
+        itemId,
+        hasTags: Array.isArray(data.tags) ? data.tags.length : 0,
+        hasCategories: Array.isArray(data.categories) ? data.categories.length : 0,
+        hasDescription: !!(data.description || data.descriptionEn),
+      });
+    }
+  }
+
+  console.log(`[BATCH][AI][APPLY] source=${source} sugerencias aplicadas=${applied} skip=${skipped} fail=${failed} total=${aiSuggestions.length}`);
+  return { applied, skipped, failed, total: aiSuggestions.length };
+}
+
+function buildAiScanItemFromBatchItem(item) {
+  const batchFolder = String(item?.batch?.folderName || '').trim();
+  const itemFolder = String(item?.folderName || '').trim();
+  const sourcePathHint = itemFolder
+    ? (batchFolder ? `${batchFolder}/${itemFolder}` : itemFolder)
+    : (batchFolder || itemFolder || 'batch-item');
+
+  const sourceTitle = String(item?.title || itemFolder || batchFolder || `Asset ${item?.id || ''}`).trim() || 'Asset';
+  const sourceTitleEn = String(item?.titleEn || sourceTitle).trim() || sourceTitle;
+  const imagePaths = Array.isArray(item?.images)
+    ? item.images.map((img) => String(img || '').trim()).filter(Boolean)
+    : [];
+
+  return {
+    itemId: Number(item?.id || 0) || null,
+    batchFolder,
+    itemFolder: itemFolder || '(root)',
+    assetName: sourceTitle,
+    sourceTitle,
+    sourceTitleEn,
+    sourcePathHint,
+    sizeMB: Number(item?.pesoMB || 0),
+    imagesCount: imagePaths.length,
+    imagePaths,
+    imageNameHints: imagePaths.slice(0, 4).map((img) => String(img || '').split('/').pop()).filter(Boolean),
+    existingStatus: String(item?.status || 'DRAFT'),
+  };
+}
+
 // POST /api/batch-imports/scan
 export const scanLocalDirectory = async (req, res) => {
   const extractedArchivesThisRun = [];
@@ -553,6 +681,7 @@ export const scanLocalDirectory = async (req, res) => {
 
     let aiTimedOut = false;
     let aiApplyDeferred = false;
+    let aiStats = null;
     try {
       const [categoriesCatalog, tagsCatalog] = await Promise.all([
         prisma.category.findMany({
@@ -576,6 +705,23 @@ export const scanLocalDirectory = async (req, res) => {
       const rawTimeout = Number(process.env.BATCH_SCAN_AI_TIMEOUT_MS || 45_000);
       const aiTimeoutMs = Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 0;
       console.info(`[BATCH SCAN][AI] iniciando clasificación items=${aiScannedItems.length} timeoutMs=${aiTimeoutMs}`);
+
+      const unpackAiScanResult = (rawValue) => {
+        if (Array.isArray(rawValue)) {
+          return { suggestions: rawValue, stats: null };
+        }
+        if (!rawValue || typeof rawValue !== 'object') {
+          return { suggestions: [], stats: null };
+        }
+        const suggestions = Array.isArray(rawValue.suggestions)
+          ? rawValue.suggestions
+          : Array.isArray(rawValue.items)
+            ? rawValue.items
+            : [];
+        const stats = rawValue.stats && typeof rawValue.stats === 'object' ? rawValue.stats : null;
+        return { suggestions, stats };
+      };
+
       const applyAiSuggestions = async (rawSuggestions, { source = 'inline' } = {}) => {
         const aiSuggestions = Array.isArray(rawSuggestions) ? rawSuggestions : [];
         if (aiSuggestions.length <= 0) {
@@ -658,12 +804,14 @@ export const scanLocalDirectory = async (req, res) => {
       const aiPromise = callGoogleBatchScan(aiPayload);
       if (aiTimeoutMs > 0) {
         try {
-          const aiResult = await withTimeout(
+          const aiResultRaw = await withTimeout(
             aiPromise,
             aiTimeoutMs,
             'BATCH_AI_SCAN_TIMEOUT'
           );
-          await applyAiSuggestions(aiResult, { source: 'inline' });
+          const { suggestions, stats } = unpackAiScanResult(aiResultRaw);
+          if (stats) aiStats = stats;
+          await applyAiSuggestions(suggestions, { source: 'inline' });
         } catch (aiErr) {
           aiTimedOut = String(aiErr?.code || aiErr?.message || '').includes('BATCH_AI_SCAN_TIMEOUT');
           if (aiTimedOut) {
@@ -672,7 +820,17 @@ export const scanLocalDirectory = async (req, res) => {
 
             // Continuar en background y persistir cuando finalice, aunque la respuesta HTTP ya haya salido.
             aiPromise
-              .then((lateResult) => applyAiSuggestions(lateResult, { source: 'deferred-timeout' }))
+              .then((lateRawResult) => {
+                const { suggestions, stats } = unpackAiScanResult(lateRawResult);
+                if (stats) {
+                  console.info('[BATCH][AI][DEFERRED][STATS]', {
+                    failedItems: Number(stats.failedItems || 0),
+                    rateLimitedItems: Number(stats.rateLimitedItems || 0),
+                    retryAttempts: Number(stats.retryAttempts || 0),
+                  });
+                }
+                return applyAiSuggestions(suggestions, { source: 'deferred-timeout' });
+              })
               .catch((lateErr) => {
                 console.error('[BATCH][AI][DEFERRED][ERROR]', lateErr?.message || lateErr);
               });
@@ -681,8 +839,10 @@ export const scanLocalDirectory = async (req, res) => {
           }
         }
       } else {
-        const aiResult = await aiPromise;
-        await applyAiSuggestions(aiResult, { source: 'inline-no-timeout' });
+        const aiResultRaw = await aiPromise;
+        const { suggestions, stats } = unpackAiScanResult(aiResultRaw);
+        if (stats) aiStats = stats;
+        await applyAiSuggestions(suggestions, { source: 'inline-no-timeout' });
       }
     } catch (e) {
       console.error('[BATCH][AI][SCAN][WARN]', e?.message || e);
@@ -701,7 +861,7 @@ export const scanLocalDirectory = async (req, res) => {
       }
     }
 
-    console.info(`[BATCH SCAN][DONE] nuevos=${newlyQueuedCount} comprimidos-borrados=${deletedArchivesCount}/${extractedArchivesThisRun.length} aiTimedOut=${aiTimedOut ? 'yes' : 'no'}`);
+    console.info(`[BATCH SCAN][DONE] nuevos=${newlyQueuedCount} comprimidos-borrados=${deletedArchivesCount}/${extractedArchivesThisRun.length} aiTimedOut=${aiTimedOut ? 'yes' : 'no'} aiFailed=${Number(aiStats?.failedItems || 0)}`);
 
     return res.json({
       success: true,
@@ -710,7 +870,12 @@ export const scanLocalDirectory = async (req, res) => {
       deletedArchivesCount,
       processedArchivesCount: extractedArchivesThisRun.length,
       aiTimedOut,
-      aiApplyDeferred
+      aiApplyDeferred,
+      aiStats,
+      aiFailedItems: Number(aiStats?.failedItems || 0),
+      aiRateLimitedItems: Number(aiStats?.rateLimitedItems || 0),
+      aiRetryAttempts: Number(aiStats?.retryAttempts || 0),
+      aiFailedItemIds: Array.isArray(aiStats?.failedItemIds) ? aiStats.failedItemIds : [],
     });
 
   } catch (error) {
@@ -733,14 +898,134 @@ export const scanLocalDirectory = async (req, res) => {
 // GET /api/batch-imports
 export const getBatchQueue = async (req, res) => {
   try {
+    const limitRaw = Number(req?.query?.limit);
+    const take = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 5000) : undefined;
     const queue = await prisma.batchImportItem.findMany({
       include: {
         batch: true
       },
       orderBy: { createdAt: 'desc' },
-      take: 200
+      ...(take ? { take } : {})
     });
     return res.json({ success: true, items: queue });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+// POST /api/batch-imports/retry-ai
+export const retryBatchAiFailedItems = async (req, res) => {
+  try {
+    const rawIds = Array.isArray(req?.body?.itemIds) ? req.body.itemIds : [];
+    const requestedIds = Array.from(new Set(rawIds.map(Number).filter((n) => Number.isFinite(n) && n > 0)));
+    if (!requestedIds.length) {
+      return res.status(400).json({ success: false, message: 'itemIds requerido' });
+    }
+
+    const items = await prisma.batchImportItem.findMany({
+      where: { id: { in: requestedIds } },
+      include: { batch: { select: { folderName: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const targets = items.filter((item) => ['DRAFT', 'FAILED', 'PENDING'].includes(String(item?.status || '').toUpperCase()));
+    if (!targets.length) {
+      return res.json({
+        success: true,
+        message: 'No hay items elegibles para reintento de IA.',
+        requestedCount: requestedIds.length,
+        targetCount: 0,
+        apply: { applied: 0, skipped: 0, failed: 0, total: 0 },
+        aiStats: null,
+        aiFailedItems: 0,
+        aiRateLimitedItems: 0,
+        aiRetryAttempts: 0,
+        aiFailedItemIds: [],
+      });
+    }
+
+    const aiScannedItems = targets.map(buildAiScanItemFromBatchItem);
+    const [categoriesCatalog, tagsCatalog] = await Promise.all([
+      prisma.category.findMany({
+        orderBy: { name: 'asc' },
+        select: { id: true, name: true, slug: true, nameEn: true, slugEn: true },
+      }),
+      prisma.tag.findMany({
+        orderBy: { name: 'asc' },
+        select: { id: true, name: true, slug: true, nameEn: true, slugEn: true },
+      }),
+    ]);
+
+    const aiPayload = buildBatchScanRequestData(req, {
+      foldersCount: 0,
+      newlyQueuedCount: 0,
+      scannedItems: aiScannedItems,
+    }, {
+      categories: categoriesCatalog,
+      tags: tagsCatalog,
+    });
+
+    const rawTimeout = Number(process.env.BATCH_RETRY_AI_TIMEOUT_MS || 0);
+    const aiTimeoutMs = Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 0;
+
+    const aiPromise = callGoogleBatchScan(aiPayload);
+    let aiTimedOut = false;
+    let aiApplyDeferred = false;
+    let aiStats = null;
+    let apply = { applied: 0, skipped: 0, failed: 0, total: 0 };
+
+    if (aiTimeoutMs > 0) {
+      try {
+        const aiResultRaw = await withTimeout(aiPromise, aiTimeoutMs, 'BATCH_AI_RETRY_TIMEOUT');
+        const { suggestions, stats } = unpackAiScanResult(aiResultRaw);
+        if (stats) aiStats = stats;
+        apply = await applyAiSuggestionsToBatchItems(suggestions, { source: 'manual-retry-ai' });
+      } catch (aiErr) {
+        aiTimedOut = String(aiErr?.code || aiErr?.message || '').includes('BATCH_AI_RETRY_TIMEOUT');
+        if (aiTimedOut) {
+          aiApplyDeferred = true;
+          aiPromise
+            .then((lateRaw) => {
+              const { suggestions, stats } = unpackAiScanResult(lateRaw);
+              if (stats) {
+                console.info('[BATCH][AI][RETRY_DEFERRED][STATS]', {
+                  failedItems: Number(stats.failedItems || 0),
+                  rateLimitedItems: Number(stats.rateLimitedItems || 0),
+                  retryAttempts: Number(stats.retryAttempts || 0),
+                });
+              }
+              return applyAiSuggestionsToBatchItems(suggestions, { source: 'manual-retry-ai-deferred' });
+            })
+            .catch((lateErr) => {
+              console.error('[BATCH][AI][RETRY_DEFERRED][ERROR]', lateErr?.message || lateErr);
+            });
+        } else {
+          throw aiErr;
+        }
+      }
+    } else {
+      const aiResultRaw = await aiPromise;
+      const { suggestions, stats } = unpackAiScanResult(aiResultRaw);
+      if (stats) aiStats = stats;
+      apply = await applyAiSuggestionsToBatchItems(suggestions, { source: 'manual-retry-ai' });
+    }
+
+    return res.json({
+      success: true,
+      message: aiTimedOut
+        ? 'Reintento IA en progreso diferido por timeout.'
+        : `Reintento IA completado sobre ${targets.length} item(s).`,
+      requestedCount: requestedIds.length,
+      targetCount: targets.length,
+      aiTimedOut,
+      aiApplyDeferred,
+      apply,
+      aiStats,
+      aiFailedItems: Number(aiStats?.failedItems || 0),
+      aiRateLimitedItems: Number(aiStats?.rateLimitedItems || 0),
+      aiRetryAttempts: Number(aiStats?.retryAttempts || 0),
+      aiFailedItemIds: Array.isArray(aiStats?.failedItemIds) ? aiStats.failedItemIds : [],
+    });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
