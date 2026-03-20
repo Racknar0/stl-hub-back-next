@@ -1230,6 +1230,11 @@ async function processBackupsForCompletedItem(item) {
             logBackupProgress(pct)
           },
         })
+
+        // Mantener storage de backups sincronizado tras cada transacción de subida.
+        try {
+          await refreshMainAccountStorageMetrics(backup, `item=${item.id} phase=backup acc=${backup.id}`)
+        } catch {}
       } catch (e) {
         const msg = String(e?.message || e)
         failedBackups.push({ id: backup.id, alias: backup.alias || backup.email || `acc-${backup.id}`, error: msg })

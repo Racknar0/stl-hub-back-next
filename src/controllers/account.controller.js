@@ -292,6 +292,87 @@ function parseSizeToMB(str) {
   return Math.round(num * factor);
 }
 
+async function refreshAccountStorageInCurrentSession(accountId, ctx = '') {
+  const id = Number(accountId);
+  if (!Number.isFinite(id) || id <= 0) return null;
+
+  const parseDfText = (txtRaw) => {
+    const txt = String(txtRaw || '');
+    let storageUsedMB = 0;
+    let storageTotalMB = 0;
+
+    let m =
+      txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i) ||
+      txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i) ||
+      txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i) ||
+      txt.match(/almacenamiento\s+de\s+la\s+cuenta\s*:\s*([^\n]+?)\s*de\s*([^\n]+)/i) ||
+      txt.match(/almacenamiento\s*:\s*([\d.,]+\s*[KMGT]?B)\s*de\s*([\d.,]+\s*[KMGT]?B)/i);
+
+    if (m) {
+      storageUsedMB = parseSizeToMB(m[1]);
+      storageTotalMB = parseSizeToMB(m[2]);
+    }
+
+    if (!storageTotalMB) {
+      const p =
+        txt.match(/storage[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:of|de)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:used|usado)?/i) ||
+        txt.match(/almacenamiento[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:de|of)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:usado|used)?/i);
+      if (p) {
+        storageTotalMB = parseSizeToMB(p[2]);
+        const pct = parseFloat(String(p[1]).replace(',', '.'));
+        if (!Number.isNaN(pct) && Number.isFinite(pct) && storageTotalMB > 0) {
+          storageUsedMB = Math.round((pct / 100) * storageTotalMB);
+        }
+      }
+    }
+
+    if (!storageTotalMB || storageTotalMB <= 0) storageTotalMB = DEFAULT_FREE_QUOTA_MB;
+    if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB;
+
+    return { storageUsedMB, storageTotalMB };
+  };
+
+  const label = ctx ? ` ${ctx}` : '';
+  try {
+    const out = await runCmdWithTimeout('mega-df', ['-h'], MEGA_READONLY_TIMEOUT_MS);
+    const txt = (out.out || out.err || '').toString();
+    const parsed = parseDfText(txt);
+    const updated = await prisma.megaAccount.update({
+      where: { id },
+      data: {
+        storageUsedMB: parsed.storageUsedMB,
+        storageTotalMB: parsed.storageTotalMB,
+        lastCheckAt: new Date(),
+      },
+      select: { id: true, storageUsedMB: true, storageTotalMB: true },
+    });
+    log.info(`[SYNC][METRICS][OK] accId=${id} used=${updated.storageUsedMB}MB total=${updated.storageTotalMB}MB${label}`);
+    return updated;
+  } catch (e) {
+    log.warn(`[SYNC][METRICS][WARN] mega-df -h accId=${id}${label}: ${String(e.message || e).slice(0, 200)}`);
+  }
+
+  try {
+    const out = await runCmdWithTimeout('mega-df', [], MEGA_READONLY_TIMEOUT_MS);
+    const txt = (out.out || out.err || '').toString();
+    const parsed = parseDfText(txt);
+    const updated = await prisma.megaAccount.update({
+      where: { id },
+      data: {
+        storageUsedMB: parsed.storageUsedMB,
+        storageTotalMB: parsed.storageTotalMB,
+        lastCheckAt: new Date(),
+      },
+      select: { id: true, storageUsedMB: true, storageTotalMB: true },
+    });
+    log.info(`[SYNC][METRICS][OK] fallback accId=${id} used=${updated.storageUsedMB}MB total=${updated.storageTotalMB}MB${label}`);
+    return updated;
+  } catch (e) {
+    log.warn(`[SYNC][METRICS][WARN] mega-df fallback accId=${id}${label}: ${String(e.message || e).slice(0, 200)}`);
+    return null;
+  }
+}
+
 // Flag central para habilitar/deshabilitar exportación de links públicos en sincronizaciones
 // Requerimiento del usuario: NO generar ni guardar links públicos durante backups.
 const ENABLE_PUBLIC_LINK_EXPORT = false;
@@ -1425,6 +1506,16 @@ export const syncMainToBackups = async (req, res) => {
           }
           actions.push({ backupId: b.id, assetId: a.id, status: 'COMPLETED', newLink: false });
           globalDone++;
+        }
+
+        // Refrescar métricas del backup en la misma sesión antes de logout.
+        try {
+          await refreshAccountStorageInCurrentSession(
+            b.id,
+            `sync main=${mainId} backup=${b.id}`
+          );
+        } catch (e) {
+          logSync(`Backup ${b.id}: no se pudieron refrescar métricas: ${String(e?.message || e).slice(0, 200)}`, 'warn');
         }
       }, `SYNC-BACKUP-${b.id}`);
 

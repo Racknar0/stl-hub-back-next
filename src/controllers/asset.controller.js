@@ -4594,6 +4594,15 @@ export async function enqueueToMegaReal(asset) {
                     megaLink: publicLink || undefined,
                 },
             });
+
+            // Refrescar métricas de la cuenta MAIN en la misma sesión
+            // para evitar desfase tras subidas por flujo legacy.
+            try {
+                await refreshAccountStorageFromMegaDfInCurrentSession(
+                    acc.id,
+                    `legacy-main-upload asset=${asset.id} accId=${acc.id}`
+                );
+            } catch {}
         }, 'MAIN-UPLOAD');
     console.log(`[UPLOAD] Finalizada asset=${asset.id} 100%`);
     } catch (e) {
@@ -4774,6 +4783,15 @@ async function replicateAssetToBackupsSequential(assetId) {
                 } catch {
                     console.log(`[MEGA][LOGOUT][WARN] replica accId=${b.id}`);
                 }
+
+                // Refrescar métricas del BACKUP en la misma sesión
+                // luego de cada réplica subida por flujo legacy.
+                try {
+                    await refreshAccountStorageFromMegaDfInCurrentSession(
+                        b.id,
+                        `legacy-backup-upload asset=${asset.id} backupAccId=${b.id}`
+                    );
+                } catch {}
             }, `REPLICA-${b.id}`);
             replicaProgressMap.set(`${asset.id}:${b.id}`, 100);
             await prisma.assetReplica.update({
@@ -5094,6 +5112,16 @@ export const deleteAsset = async (req, res) => {
                             e.message
                         );
                     }
+
+                    // Refrescar storage de la cuenta en la misma sesión antes de logout.
+                    // Evita desincronización tras borrar desde Assets/Similares.
+                    try {
+                        await refreshAccountStorageFromMegaDfInCurrentSession(
+                            acc.id,
+                            `${ctx} phase=delete`
+                        );
+                    } catch {}
+
                     await megaLogoutBestEffort(`POST ${ctx}`);
                 }, `DEL-${acc.id}`);
             } catch (e) {
@@ -6237,6 +6265,15 @@ export async function restoreAssetFromBackup(req, res) {
       publicLink = await getOrCreateLink(mainRemoteFile, 'RESTORE EXPORT');
       if (publicLink) console.log(`[RESTORE] Link: ${publicLink}`);
       else console.warn('[RESTORE] No se pudo obtener link público');
+
+            // Mantener métricas de la cuenta main sincronizadas en la misma sesión
+            // donde se restaura/sube el archivo.
+            try {
+                await refreshAccountStorageFromMegaDfInCurrentSession(
+                    mainAcc.id,
+                    `restore asset=${asset.id} mainAccId=${mainAcc.id}`
+                );
+            } catch {}
 
       try { await runCmd('mega-logout', []); } catch {}
     }, `RESTORE-MAIN-${mainAcc.id}`);
