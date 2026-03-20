@@ -108,6 +108,48 @@ function toSafeNumber(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback
 }
 
+function parseSizeToMB(str) {
+  if (!str) return 0
+  const s = String(str).trim().toUpperCase()
+  const m = s.match(/[\d.,]+\s*[KMGT]?B/)
+  if (!m) return 0
+  const num = parseFloat((m[0].match(/[\d.,]+/) || ['0'])[0].replace(',', '.'))
+  const unit = (m[0].match(/[KMGT]?B/) || ['MB'])[0]
+  const factor = unit === 'KB' ? 1 / 1024 : unit === 'MB' ? 1 : unit === 'GB' ? 1024 : unit === 'TB' ? 1024 * 1024 : 1 / (1024 * 1024)
+  return Math.round(num * factor)
+}
+
+function parseStorageFromMegaDfText(txt) {
+  const text = String(txt || '')
+  let used = 0
+  let total = 0
+
+  let m = text.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i)
+    || text.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i)
+    || text.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i)
+    || text.match(/almacenamiento\s+de\s+la\s+cuenta\s*:\s*([^\n]+?)\s*de\s*([^\n]+)/i)
+    || text.match(/almacenamiento\s*:\s*([\d.,]+\s*[KMGT]?B)\s*de\s*([\d.,]+\s*[KMGT]?B)/i)
+
+  if (m) {
+    used = parseSizeToMB(m[1])
+    total = parseSizeToMB(m[2])
+  }
+
+  if (!total) {
+    const p = text.match(/storage[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:of|de)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:used|usado)?/i)
+      || text.match(/almacenamiento[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:de|of)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:usado|used)?/i)
+    if (p) {
+      total = parseSizeToMB(p[2])
+      const pct = parseFloat(String(p[1]).replace(',', '.'))
+      if (!Number.isNaN(pct) && Number.isFinite(pct)) {
+        used = Math.round((pct / 100) * total)
+      }
+    }
+  }
+
+  return { used, total }
+}
+
 function getSessionUploadedMb(accountId) {
   const id = Number(accountId) || 0
   return toSafeNumber(sessionUploadedMbByAccountId.get(id), 0)
@@ -149,6 +191,95 @@ async function notifyAutomation({ title, body, typeStatus = 'ERROR' }) {
     })
   } catch (e) {
     console.error('[BATCH][NOTIFY][WARN]', e.message)
+  }
+}
+
+async function refreshMainAccountStorageMetrics(mainAccount, extraCtx = '') {
+  const accountId = Number(mainAccount?.id || 0)
+  if (!accountId) return null
+
+  const creds = mainAccount?.credentials
+  if (!creds) return null
+
+  let payload
+  try {
+    payload = decryptToJson(creds.encData, creds.encIv, creds.encTag)
+  } catch (e) {
+    console.warn(`[BATCH][ACCOUNT][REFRESH][WARN] decrypt fail accId=${accountId}: ${e.message}`)
+    return null
+  }
+
+  const baseFolder = (mainAccount?.baseFolder || '/').replace(/\\/g, '/')
+  let storageUsedMB = 0
+  let storageTotalMB = 0
+
+  try {
+    await withMegaLock(async () => {
+      const ctx = `batch-main-metrics accId=${accountId}${extraCtx ? ` ${extraCtx}` : ''}`
+      await ensureMegaSessionForAccount(payload, accountId, ctx)
+
+      try {
+        const out = await runCmd('mega-df', ['-h'])
+        const parsed = parseStorageFromMegaDfText(out)
+        storageUsedMB = parsed.used
+        storageTotalMB = parsed.total
+      } catch (e) {
+        console.warn(`[BATCH][ACCOUNT][REFRESH][WARN] mega-df -h accId=${accountId}: ${e.message}`)
+      }
+
+      if (!storageTotalMB) {
+        try {
+          const out = await runCmd('mega-df', [])
+          const parsed = parseStorageFromMegaDfText(out)
+          storageUsedMB = parsed.used
+          storageTotalMB = parsed.total
+        } catch (e) {
+          console.warn(`[BATCH][ACCOUNT][REFRESH][WARN] mega-df accId=${accountId}: ${e.message}`)
+        }
+      }
+
+      if (!storageUsedMB) {
+        try {
+          const out = await runCmd('mega-du', ['-h', baseFolder || '/'])
+          const mm = String(out || '').match(/[\r\n]*\s*([\d.,]+\s*[KMGT]?B)/i) || String(out || '').match(/([\d.,]+\s*[KMGT]?B)/i)
+          if (mm) storageUsedMB = parseSizeToMB(mm[1])
+        } catch (e) {
+          console.warn(`[BATCH][ACCOUNT][REFRESH][WARN] mega-du accId=${accountId}: ${e.message}`)
+        }
+      }
+    }, `BATCH-MAIN-METRICS-${accountId}`)
+  } catch (e) {
+    console.warn(`[BATCH][ACCOUNT][REFRESH][WARN] lock/session accId=${accountId}: ${e.message}`)
+    return null
+  }
+
+  const prevUsed = toSafeNumber(mainAccount?.storageUsedMB, 0)
+  const prevTotal = toSafeNumber(mainAccount?.storageTotalMB, 0)
+  if (!storageUsedMB && prevUsed > 0) storageUsedMB = prevUsed
+  if (!storageTotalMB && prevTotal > 0) storageTotalMB = prevTotal
+  if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB
+  if (!storageUsedMB && !storageTotalMB) return null
+
+  try {
+    const updated = await prisma.megaAccount.update({
+      where: { id: accountId },
+      data: {
+        storageUsedMB,
+        storageTotalMB,
+        status: 'CONNECTED',
+        statusMessage: null,
+        lastCheckAt: new Date(),
+      },
+      select: { id: true, storageUsedMB: true, storageTotalMB: true },
+    })
+
+    // Ya persistimos la métrica real; reseteamos el acumulado de sesión para evitar doble conteo.
+    sessionUploadedMbByAccountId.set(accountId, 0)
+    console.log(`[BATCH][ACCOUNT][REFRESH][OK] accId=${accountId} used=${updated.storageUsedMB}MB total=${updated.storageTotalMB}MB`)
+    return updated
+  } catch (e) {
+    console.warn(`[BATCH][ACCOUNT][REFRESH][WARN] db update accId=${accountId}: ${e.message}`)
+    return null
   }
 }
 
@@ -961,6 +1092,12 @@ async function processMainQueueItem(item) {
       },
     })
 
+    await updateItem({ mainStatus: 'OK', mainProgress: 100, error: 'Actualizando espacio de cuenta...' })
+    const refreshedMain = await refreshMainAccountStorageMetrics(ctx.mainAccount, `item=${item.id}`)
+    if (refreshedMain) {
+      ctx.mainAccount.storageUsedMB = Number(refreshedMain.storageUsedMB || ctx.mainAccount.storageUsedMB || 0)
+      ctx.mainAccount.storageTotalMB = Number(refreshedMain.storageTotalMB || ctx.mainAccount.storageTotalMB || 0)
+    }
     await updateItem({ mainStatus: 'OK', mainProgress: 100, error: 'Guardando en base de datos...' })
 
     const asset = await createAssetRecord({
