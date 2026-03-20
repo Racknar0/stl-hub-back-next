@@ -248,6 +248,44 @@ async function withTimeout(promise, timeoutMs, timeoutCode = 'OP_TIMEOUT') {
   }
 }
 
+function collectFolderStats(dirPath) {
+  let fileCount = 0;
+  let totalBytes = 0;
+
+  const walk = (dir) => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(abs);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      fileCount += 1;
+      try {
+        totalBytes += fs.statSync(abs).size;
+      } catch {}
+    }
+  };
+
+  walk(dirPath);
+  return { fileCount, totalBytes };
+}
+
+function removeDirIfEmpty(absDir) {
+  try {
+    if (!fs.existsSync(absDir)) return;
+    const entries = fs.readdirSync(absDir);
+    if (entries.length === 0) fs.rmSync(absDir, { recursive: true, force: true });
+  } catch {}
+}
+
 // POST /api/batch-imports/scan
 export const scanLocalDirectory = async (req, res) => {
   const extractedArchivesThisRun = [];
@@ -343,10 +381,30 @@ export const scanLocalDirectory = async (req, res) => {
       const foldersToProcess = assetFolders.length > 0 ? assetFolders : [''];
 
       for (const assetFolder of foldersToProcess) {
+        const assetPath = path.join(batchPath, assetFolder);
+        const stats = collectFolderStats(assetPath);
+        const isEmptyAssetFolder = Number(stats.fileCount || 0) <= 0;
+
         // Create an item if it doesn't exist
         const existingItem = await prisma.batchImportItem.findFirst({
           where: { batchId: batch.id, folderName: assetFolder }
         });
+
+        if (isEmptyAssetFolder) {
+          // Evitar basura en cola: carpeta vacía no se procesa.
+          if (existingItem && ['DRAFT', 'FAILED', 'PENDING'].includes(String(existingItem.status || '').toUpperCase())) {
+            await prisma.batchImportItem.delete({ where: { id: existingItem.id } }).catch(() => {});
+          }
+
+          if (assetFolder) {
+            try { if (fs.existsSync(assetPath)) fs.rmSync(assetPath, { recursive: true, force: true }); } catch {}
+          } else {
+            removeDirIfEmpty(batchPath);
+          }
+
+          console.info(`[BATCH SCAN][SKIP_EMPTY] batch=${folder} assetFolder=${assetFolder || '(root)'}`);
+          continue;
+        }
 
         const rawBaseTitle = assetFolder ? assetFolder.replace(/_/g, ' ') : folder.replace(/_/g, ' ');
 
@@ -405,20 +463,9 @@ export const scanLocalDirectory = async (req, res) => {
           const bilingualTitle = normalizeBilingualTitlePair(uniqueTitle, uniqueTitle, rawBaseTitle);
 
           // Calculate size
-          const assetPath = path.join(batchPath, assetFolder);
           let pesoMB = 0;
           try {
-             let totalBytes = 0;
-             const traverse = (dir) => {
-               const files = fs.readdirSync(dir);
-               for (const f of files) {
-                 const p = path.join(dir, f);
-                 const st = fs.statSync(p);
-                 if (st.isDirectory()) traverse(p);
-                 else totalBytes += st.size;
-               }
-             };
-             traverse(assetPath);
+             const totalBytes = Number(stats.totalBytes || 0);
              pesoMB = Number((totalBytes / (1024 * 1024)).toFixed(2));
           } catch(e) {}
 
@@ -527,6 +574,8 @@ export const scanLocalDirectory = async (req, res) => {
       const aiSuggestions = Array.isArray(aiResult) ? aiResult : [];
       if (aiSuggestions.length > 0) {
         let applied = 0;
+        let skipped = 0;
+        let failed = 0;
         for (const suggestion of aiSuggestions) {
           const itemId = Number(suggestion?.itemId || 0);
           if (!itemId) continue;
@@ -555,19 +604,38 @@ export const scanLocalDirectory = async (req, res) => {
           }
 
           try {
-            const result = await prisma.batchImportItem.updateMany({
-              where: {
-                id: itemId,
-                status: { in: ['DRAFT', 'FAILED'] },
-              },
+            const current = await prisma.batchImportItem.findUnique({
+              where: { id: itemId },
+              select: { id: true, status: true },
+            });
+
+            if (!current) {
+              skipped += 1;
+              continue;
+            }
+
+            const statusNow = String(current.status || '').toUpperCase();
+            if (!['DRAFT', 'FAILED', 'PENDING'].includes(statusNow)) {
+              skipped += 1;
+              continue;
+            }
+
+            await prisma.batchImportItem.update({
+              where: { id: itemId },
               data,
             });
-            if (Number(result?.count || 0) > 0) applied += 1;
+            applied += 1;
           } catch (applyErr) {
+            failed += 1;
             console.error('[BATCH][AI][APPLY_WARN]', applyErr?.message || applyErr);
+            console.error('[BATCH][AI][APPLY_WARN][ITEM]', {
+              itemId,
+              hasTags: Array.isArray(data.tags) ? data.tags.length : 0,
+              hasCategories: Array.isArray(data.categories) ? data.categories.length : 0,
+            });
           }
         }
-        console.log(`[BATCH][AI][APPLY] sugerencias aplicadas: ${applied}/${aiSuggestions.length}`);
+        console.log(`[BATCH][AI][APPLY] sugerencias aplicadas=${applied} skip=${skipped} fail=${failed} total=${aiSuggestions.length}`);
       }
     } catch (e) {
       console.error('[BATCH][AI][SCAN][WARN]', e?.message || e);
