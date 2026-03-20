@@ -39,6 +39,7 @@ const STAGING_DIR  = path.join(UPLOADS_DIR, 'batch_staging')
 const POLL_INTERVAL_MS = 5_000
 const STALL_TIMEOUT_MS = Number(process.env.MEGA_STALL_TIMEOUT_MS) || 3 * 60 * 1000  // 3 min
 const MAX_STALL_RETRIES = 3
+const UPLOAD_PROGRESS_HEARTBEAT_MS = Number(process.env.BATCH_PROGRESS_HEARTBEAT_MS) || 10_000
 const ARCHIVE_EXTS = ['.rar', '.zip', '.7z', '.tar', '.gz', '.tgz']
 const IMAGE_EXTS   = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff']
 const NOTIFICATION_BODY_MAX = 191
@@ -443,7 +444,7 @@ function megaPutWithStall({
     const child = spawn('mega-put', [srcPath, remotePath], { shell: true })
     attachAutoAcceptTerms(child, logPrefix || 'BATCH PUT')
 
-    let settled = false, lastPct = -1, lastProgressAt = Date.now(), stallTimer = null
+    let settled = false, lastPct = -1, lastProgressAt = Date.now(), stallTimer = null, lastHeartbeatAt = 0
 
     const noteProgress = (pct) => {
       if (pct > lastPct) { lastPct = pct; lastProgressAt = Date.now() }
@@ -452,6 +453,10 @@ function megaPutWithStall({
 
     const parseProgress = (buf) => {
       const txt = buf.toString()
+      if (txt && txt.trim()) {
+        // Aunque MEGA no imprima porcentajes, hay actividad útil para evitar falsos stalls.
+        lastProgressAt = Date.now()
+      }
       const re = /([0-9]{1,3}(?:\.[0-9]+)?)\s*%/g
       let m, last = null
       while ((m = re.exec(txt)) !== null) last = m[1]
@@ -481,6 +486,12 @@ function megaPutWithStall({
           return
         }
         const idle = Date.now() - lastProgressAt
+        const now = Date.now()
+        if (now - lastHeartbeatAt >= UPLOAD_PROGRESS_HEARTBEAT_MS) {
+          const pctText = lastPct >= 0 ? `${Math.round(lastPct)}%` : 'en curso'
+          console.log(`[BATCH][PROGRESS] ${logPrefix} ${pctText} idle=${Math.round(idle / 1000)}s`)
+          lastHeartbeatAt = now
+        }
         if (idle < stallTimeoutMs) return
         console.warn(`[BATCH][STALL] mega-put sin progreso ${Math.round(idle/1000)}s lastPct=${lastPct} ${logPrefix}`)
         killProcessTreeBestEffort(child, logPrefix)
