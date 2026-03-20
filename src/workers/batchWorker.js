@@ -43,6 +43,7 @@ const ARCHIVE_EXTS = ['.rar', '.zip', '.7z', '.tar', '.gz', '.tgz']
 const IMAGE_EXTS   = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff']
 const NOTIFICATION_BODY_MAX = 191
 let activeMegaSessionAccountId = 0
+const preferredProxyByAccountId = new Map()
 
 // ────────────────────────────── HELPERS ──────────────────────────────
 
@@ -455,9 +456,10 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
   const remoteBase = (account.baseFolder || '/').replace(/\\/g, '/')
   const remotePath = path.posix.join(remoteBase, slug)
   const ctx = `batch-${role} accId=${account.id} alias=${account.alias || '--'}`
+  const accountIdNum = Number(account.id) || 0
   let publicLink = null
   const triedProxyUrls = new Set()
-  let lastProxyUrl = ''
+  let lastProxyUrl = preferredProxyByAccountId.get(accountIdNum) || ''
 
   for (let attempt = 1; attempt <= MAX_STALL_RETRIES; attempt++) {
     try {
@@ -472,18 +474,30 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
           throw new Error('PROXY_REQUIRED_NO_PROXIES_AVAILABLE')
         }
 
-        let candidatePool = proxies.filter((p) => p?.proxyUrl && !triedProxyUrls.has(p.proxyUrl))
-        if (lastProxyUrl) {
-          const withoutLast = candidatePool.filter((p) => p.proxyUrl !== lastProxyUrl)
-          if (withoutLast.length) candidatePool = withoutLast
+        let picked = null
+        const shouldReuseLastProxy = Boolean(lastProxyUrl && attempt === 1 && !manualSwitchRequested)
+        if (shouldReuseLastProxy) {
+          picked = proxies.find((p) => p?.proxyUrl === lastProxyUrl) || null
+          if (picked?.proxyUrl) {
+            console.log(`[BATCH][PROXY][REUSE] ${picked.proxyUrl} ${ctx}`)
+          }
         }
-        if (!candidatePool.length) {
-          candidatePool = proxies.filter((p) => p?.proxyUrl && (!lastProxyUrl || p.proxyUrl !== lastProxyUrl))
+
+        if (!picked) {
+          let candidatePool = proxies.filter((p) => p?.proxyUrl && !triedProxyUrls.has(p.proxyUrl))
+          if (lastProxyUrl) {
+            const withoutLast = candidatePool.filter((p) => p.proxyUrl !== lastProxyUrl)
+            if (withoutLast.length) candidatePool = withoutLast
+          }
+          if (!candidatePool.length) {
+            candidatePool = proxies.filter((p) => p?.proxyUrl && (!lastProxyUrl || p.proxyUrl !== lastProxyUrl))
+          }
+          if (!candidatePool.length) {
+            candidatePool = proxies.filter((p) => p?.proxyUrl)
+          }
+          picked = candidatePool[Math.floor(Math.random() * candidatePool.length)]
         }
-        if (!candidatePool.length) {
-          candidatePool = proxies.filter((p) => p?.proxyUrl)
-        }
-        const picked = candidatePool[Math.floor(Math.random() * candidatePool.length)]
+
         if (!picked?.proxyUrl) {
           throw new Error('PROXY_REQUIRED_NO_VALID_PROXY')
         }
@@ -494,6 +508,7 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
         }
         triedProxyUrls.add(picked.proxyUrl)
         lastProxyUrl = picked.proxyUrl
+        preferredProxyByAccountId.set(accountIdNum, picked.proxyUrl)
         console.log(`[BATCH][PROXY][OK] ${picked.proxyUrl} ${ctx}`)
 
         let cancelUploadNow = null
@@ -548,7 +563,10 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
         await sleep(350)
         continue
       }
-      if (attempt >= MAX_STALL_RETRIES) throw e
+      if (attempt >= MAX_STALL_RETRIES) {
+        preferredProxyByAccountId.delete(accountIdNum)
+        throw e
+      }
       // Espera antes de reintentar
       await sleep(5000)
     }
