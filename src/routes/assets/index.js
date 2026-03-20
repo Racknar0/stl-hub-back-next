@@ -27,6 +27,7 @@ import {
   testUploadSpeed,
   getStagedStatus,
   getStagedStatusBatch,
+  getBatchImportsStagedStatus,
   getScpConfig,
   getScpCommand,
   getUploadsRoot,
@@ -107,6 +108,8 @@ router.get('/:id/full-progress', getFullProgress);
 router.get('/staged-status', getStagedStatus);
 router.get('/staged-status/batch', getStagedStatusBatch);
 router.post('/staged-status/batch', getStagedStatusBatch);
+router.get('/staged-status/batch-imports', getBatchImportsStagedStatus);
+router.post('/staged-status/batch-imports', getBatchImportsStagedStatus);
 
 //! A partir de aquí, requieren admin
 router.use(requireAuth, requireAdmin)

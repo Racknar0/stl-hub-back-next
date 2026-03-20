@@ -801,7 +801,7 @@ async function createAssetRecord({ slug, title, titleEn, archiveName, images, ac
     megaLinkAlive: !!megaLink,
     megaLinkCheckedAt: megaLink ? new Date() : null,
     accountId: account.id,
-    isPremium: false,
+    isPremium: true,
   }
 
   // Conectar categorías/tags con relaciones si se enviaron

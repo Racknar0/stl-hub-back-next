@@ -182,6 +182,7 @@ function getBatchInfoForAsset(assetId, mainAccountId) {
 
 const UPLOADS_DIR = path.resolve('uploads');
 const TEMP_DIR = path.join(UPLOADS_DIR, 'tmp');
+const BATCH_IMPORTS_DIR = path.join(UPLOADS_DIR, 'batch_imports');
 const IMAGES_DIR = path.join(UPLOADS_DIR, 'images');
 const ARCHIVES_DIR = path.join(UPLOADS_DIR, 'archives');
 const SYNC_CACHE_DIR = path.join(UPLOADS_DIR, 'sync-cache');
@@ -2722,6 +2723,67 @@ export const getStagedStatusBatch = async (req, res) => {
     }
 }
 
+// GET/POST /api/assets/staged-status/batch-imports
+// Igual que staged-status/batch, pero restringido a uploads/batch_imports.
+export const getBatchImportsStagedStatus = async (req, res) => {
+    try {
+        const isPost = String(req.method).toUpperCase() === 'POST'
+        const pathsParam = isPost ? (req.body?.paths) : (req.query?.paths)
+        const expectedParam = isPost ? (req.body?.expectedSizes) : (req.query?.expectedSizes)
+        let paths = []
+        let expectedSizes = []
+        try {
+            if (Array.isArray(pathsParam)) paths = pathsParam
+            else paths = JSON.parse(String(pathsParam || '[]'))
+        } catch { paths = [] }
+        try {
+            if (Array.isArray(expectedParam)) expectedSizes = expectedParam
+            else expectedSizes = JSON.parse(String(expectedParam || '[]'))
+        } catch { expectedSizes = [] }
+
+        if (!Array.isArray(paths) || paths.length === 0) {
+            return res.status(400).json({ message: 'paths array required' })
+        }
+
+        expectedSizes = (expectedSizes || []).map((v) => Number(v || 0))
+        const batchRoot = path.resolve(BATCH_IMPORTS_DIR) + path.sep
+
+        const results = paths.map((raw, idx) => {
+            const rel = String(raw || '').trim()
+            const normRel = rel.replace(/\\/g, '/').replace(/^\/+/, '')
+            const abs = path.join(UPLOADS_DIR, normRel)
+            const absResolved = path.resolve(abs)
+            if (!absResolved.startsWith(batchRoot)) {
+                return { path: normRel, exists: false, sizeB: 0, mtimeMs: 0, percent: undefined, error: 'invalid path' }
+            }
+
+            let exists = false
+            let sizeB = 0
+            let mtimeMs = 0
+            try {
+                const st = fs.statSync(absResolved)
+                if (st.isFile()) {
+                    exists = true
+                    sizeB = Number(st.size)
+                    mtimeMs = Number(st.mtimeMs)
+                }
+            } catch {}
+
+            const expected = Number(expectedSizes[idx] || 0)
+            let percent = undefined
+            if (exists && expected > 0) {
+                percent = Math.max(0, Math.min(100, Math.floor((sizeB / expected) * 100)))
+            }
+            return { path: normRel, exists, sizeB, mtimeMs, percent }
+        })
+
+        return res.json({ ok: true, data: results })
+    } catch (e) {
+        console.error('[ASSETS] staged-status batch-imports error:', e)
+        return res.status(500).json({ message: 'Error getting staged-status batch-imports' })
+    }
+}
+
 // GET /api/assets/scp-config (admin-only)
 // Devuelve configuración de SCP desde el servidor (no incluye password)
 export const getScpConfig = async (_req, res) => {
@@ -2766,11 +2828,15 @@ const buildUploaderScpCommands = ({ host, user, port, remoteBase, batchId }) => 
     };
 };
 
-const buildBatchScpCommands = ({ host, user, port, remoteBase }) => {
+const buildBatchScpCommands = ({ host, user, port, remoteBase, filename }) => {
     const remoteBatchImportsDir = `${remoteBase}/uploads/batch_imports`;
+    const safeFile = String(filename || '').trim().replace(/["\\]/g, '_').replace(/[\r\n]+/g, ' ')
     return {
         remoteBatchImportsDir,
         mkdirCmd: `ssh ${user}@${host} "mkdir -p ${remoteBatchImportsDir}"`,
+        singleFileCmd: safeFile
+            ? `cd C:\\stl-hub\\super-batch; scp -P ${port} "${safeFile}" ${user}@${host}:${remoteBatchImportsDir}/`
+            : '',
         folderContentCmd: `cd C:\\stl-hub\\super-batch; scp -P ${port} -r .\\* ${user}@${host}:${remoteBatchImportsDir}/`,
     };
 };
@@ -2808,7 +2874,7 @@ export const getScpCommand = async (req, res) => {
 
         const commands =
             mode === 'batch'
-                ? buildBatchScpCommands(cfg)
+                ? buildBatchScpCommands({ ...cfg, filename: req.body?.filename })
                 : buildUploaderScpCommands({ ...cfg, batchId: req.body?.batchId });
 
         return res.json({ ok: true, mode, config: cfg, commands });
