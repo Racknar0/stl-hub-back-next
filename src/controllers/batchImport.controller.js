@@ -261,10 +261,19 @@ export const scanLocalDirectory = async (req, res) => {
     const topArchives = topEntries
       .filter(e => e.isFile() && ARCHIVE_EXTS.includes(path.extname(e.name).toLowerCase()));
 
+    console.info(`[BATCH SCAN][START] batchDir=${BATCH_DIR} archives=${topArchives.length}`);
+
+    let archivesDone = 0;
+
     for (const arc of topArchives) {
       const arcPath = path.join(BATCH_DIR, arc.name);
       const extractDir = path.join(BATCH_DIR, path.parse(arc.name).name);
       const extractDirExistedBefore = fs.existsSync(extractDir);
+      const nextArchiveNumber = archivesDone + 1;
+      const startPct = topArchives.length > 0
+        ? Math.round((archivesDone / topArchives.length) * 100)
+        : 100;
+      console.info(`[BATCH SCAN][DECOMPRESS] ${startPct}% (${nextArchiveNumber}/${topArchives.length}) iniciando ${arc.name}`);
       console.log(`[BATCH SCAN] Descomprimiendo ${arc.name} → ${extractDir}`);
       try {
         fs.mkdirSync(extractDir, { recursive: true });
@@ -275,8 +284,18 @@ export const scanLocalDirectory = async (req, res) => {
           extractDir,
           extractDirExistedBefore,
         });
+        archivesDone += 1;
+        const donePct = topArchives.length > 0
+          ? Math.round((archivesDone / topArchives.length) * 100)
+          : 100;
+        console.info(`[BATCH SCAN][DECOMPRESS] ${donePct}% (${archivesDone}/${topArchives.length}) completado ${arc.name}`);
         console.log(`[BATCH SCAN] OK ${arc.name} (tool=${extraction.tool})`);
       } catch (e) {
+        archivesDone += 1;
+        const donePct = topArchives.length > 0
+          ? Math.round((archivesDone / topArchives.length) * 100)
+          : 100;
+        console.warn(`[BATCH SCAN][DECOMPRESS] ${donePct}% (${archivesDone}/${topArchives.length}) fallo ${arc.name}`);
         console.error(`[BATCH SCAN] Error descomprimiendo ${arc.name}: ${e.message}`);
         try {
           if (!extractDirExistedBefore && fs.existsSync(extractDir)) {
@@ -289,6 +308,7 @@ export const scanLocalDirectory = async (req, res) => {
     // ─── STEP 1: Leer carpetas resultantes ───
     const entries = fs.readdirSync(BATCH_DIR, { withFileTypes: true });
     const folders = entries.filter(e => e.isDirectory()).map(e => e.name);
+    console.info(`[BATCH SCAN][DISCOVERY] carpetas detectadas=${folders.length}`);
 
     if (folders.length === 0) {
       return res.json({ success: true, message: 'No folders found in batch_imports', count: 0 });
@@ -462,6 +482,8 @@ export const scanLocalDirectory = async (req, res) => {
       });
     }
 
+    console.info(`[BATCH SCAN][DISCOVERY] items preparados para IA=${aiScannedItems.length} nuevos=${newlyQueuedCount}`);
+
     let aiTimedOut = false;
     try {
       const [categoriesCatalog, tagsCatalog] = await Promise.all([
@@ -484,6 +506,7 @@ export const scanLocalDirectory = async (req, res) => {
         tags: tagsCatalog,
       });
       const aiTimeoutMs = Math.max(10_000, Number(process.env.BATCH_SCAN_AI_TIMEOUT_MS) || 45_000);
+      console.info(`[BATCH SCAN][AI] iniciando clasificación items=${aiScannedItems.length} timeoutMs=${aiTimeoutMs}`);
       let aiResult = [];
       try {
         aiResult = await withTimeout(
@@ -562,6 +585,8 @@ export const scanLocalDirectory = async (req, res) => {
         console.warn(`[BATCH SCAN] Warn borrando comprimido ${extracted.archiveName}: ${e.message}`);
       }
     }
+
+    console.info(`[BATCH SCAN][DONE] nuevos=${newlyQueuedCount} comprimidos-borrados=${deletedArchivesCount}/${extractedArchivesThisRun.length} aiTimedOut=${aiTimedOut ? 'yes' : 'no'}`);
 
     return res.json({
       success: true,

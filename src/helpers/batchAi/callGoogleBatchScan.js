@@ -608,14 +608,24 @@ export async function callGoogleBatchScan(payload) {
       ? payload.scanContext.scannedItems
       : []
 
+    console.info(`[BATCH][AI][START] items=${scannedItems.length} model=${MODEL_NAME}`)
+
     const normalized = []
+    let done = 0
     for (const item of scannedItems) {
+      const total = scannedItems.length || 1
+      const startPct = Math.round((done / total) * 100)
+      console.info(`[BATCH][AI][PROGRESS] ${startPct}% (${done}/${total}) procesando "${getItemDisplayName(item)}"`)
       try {
         const result = await classifySingleItem(ai, payload, item)
         normalized.push(...result)
       } catch (error) {
         console.error('[BATCH][AI][ITEM_ERROR]', getItemDisplayName(item), error?.message || error)
         console.error('[BATCH][AI][ITEM_ERROR][DETAIL]', toDebugText(error))
+      } finally {
+        done += 1
+        const endPct = Math.round((done / total) * 100)
+        console.info(`[BATCH][AI][PROGRESS] ${endPct}% (${done}/${total})`)
       }
     }
 
@@ -627,6 +637,8 @@ export async function callGoogleBatchScan(payload) {
       maxStringLength: null,
       compact: false,
     }))
+
+    console.info(`[BATCH][AI][DONE] itemsProcesados=${done}/${scannedItems.length || 0} sugerencias=${normalized.length}`)
 
     return normalized
   } catch (error) {
