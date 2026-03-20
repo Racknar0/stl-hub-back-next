@@ -184,6 +184,7 @@ model asset {
   titleEn     String? // nombre en inglés
   slug        String  @unique
   description String?
+  descriptionEn String? // descripción en inglés
   isPremium   Boolean @default(false)
 
   // Enlace de MEGA (placeholder, se modificará más adelante)
