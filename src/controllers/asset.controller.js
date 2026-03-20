@@ -2868,6 +2868,7 @@ const buildBatchScpCommands = ({ host, user, port, remoteBase, filename }) => {
             ? `cd C:\\stl-hub\\super-batch; scp -P ${port} "${safeFile}" ${user}@${host}:${remoteBatchImportsDir}/`
             : '',
         folderContentCmd: `cd C:\\stl-hub\\super-batch; scp -P ${port} -r .\\* ${user}@${host}:${remoteBatchImportsDir}/`,
+        winscpKeepupCmd: `Set-Location g:\\STLHUB; powershell -ExecutionPolicy Bypass -File .\\tools\\winscp-keepup.ps1 -BatchFolderName "super-batch" -LocalRoot "C:\\stl-hub" -HostName "${host}" -Port ${port} -UserName "${user}" -RemotePath "${remoteBatchImportsDir}"`,
     };
 };
 
