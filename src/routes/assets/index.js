@@ -28,6 +28,7 @@ import {
   getStagedStatus,
   getStagedStatusBatch,
   getScpConfig,
+  getScpCommand,
   getUploadsRoot,
   holdUploadsActive,
   holdMegaBatchQuiet,
@@ -134,6 +135,7 @@ router.get('/', listAssets);
 router.get('/check-unique', checkAssetUnique);
 // Nuevo: configuración SCP del servidor (seguro, sin password)
 router.get('/scp-config', getScpConfig);
+router.post('/scp-command', getScpCommand);
 router.get('/uploads-root', getUploadsRoot);
 // Nuevo: mantener lock uploads-active durante sesiones largas (modo SCP / rellenar cola)
 router.post('/hold-uploads-active', holdUploadsActive);

@@ -2726,13 +2726,95 @@ export const getStagedStatusBatch = async (req, res) => {
 // Devuelve configuración de SCP desde el servidor (no incluye password)
 export const getScpConfig = async (_req, res) => {
     try {
-        const host = process.env.SCP_HOST || '';
-        const user = process.env.SCP_USER || '';
+        const host = String(process.env.SCP_HOST || '').trim();
+        const user = String(process.env.SCP_USER || '').trim();
         const port = Number(process.env.SCP_PORT || 22);
-        const remoteBase = process.env.SCP_REMOTE_BASE || '';
+        const remoteBase = String(process.env.SCP_REMOTE_BASE || '').trim().replace(/\\/g, '/').replace(/\/$/, '');
         return res.json({ host, user, port, remoteBase });
     } catch (e) {
         return res.status(500).json({ message: 'Error getting SCP config' });
+    }
+};
+
+const getScpServerConfig = () => {
+    const host = String(process.env.SCP_HOST || '').trim();
+    const user = String(process.env.SCP_USER || '').trim();
+    const port = Number(process.env.SCP_PORT || 22);
+    const remoteBase = String(process.env.SCP_REMOTE_BASE || '').trim().replace(/\\/g, '/').replace(/\/$/, '');
+    return { host, user, port: Number.isFinite(port) && port > 0 ? port : 22, remoteBase };
+};
+
+const sanitizeBatchId = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return '<batchId>';
+    const safe = raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
+    return safe || '<batchId>';
+};
+
+const buildUploaderScpCommands = ({ host, user, port, remoteBase, batchId }) => {
+    const safeBatchId = sanitizeBatchId(batchId);
+    const remoteTmpDir = `${remoteBase}/uploads/tmp/${safeBatchId}`;
+    const recommendedLocalFolder = safeBatchId;
+
+    return {
+        remoteTmpDir,
+        recommendedLocalFolder,
+        mkdirCmd: `ssh ${user}@${host} "mkdir -p ${remoteTmpDir}"`,
+        singleFileCmd: `scp -P ${port} "C:\\ruta\\a\\tu\\archivo.zip" ${user}@${host}:${remoteTmpDir}/`,
+        folderContentCmd: `cd C:\\stl-hub\\${recommendedLocalFolder}; scp -P ${port} -r .\\* ${user}@${host}:${remoteTmpDir}/`,
+        winscpKeepupCmd: `Set-Location g:\\STLHUB; powershell -ExecutionPolicy Bypass -File .\\tools\\winscp-keepup.ps1 -BatchFolderName \"${recommendedLocalFolder}\"`,
+    };
+};
+
+const buildBatchScpCommands = ({ host, user, port, remoteBase }) => {
+    const remoteBatchImportsDir = `${remoteBase}/uploads/batch_imports`;
+    return {
+        remoteBatchImportsDir,
+        mkdirCmd: `ssh ${user}@${host} "mkdir -p ${remoteBatchImportsDir}"`,
+        folderContentCmd: `cd C:\\stl-hub\\super-batch; scp -P ${port} -r .\\* ${user}@${host}:${remoteBatchImportsDir}/`,
+    };
+};
+
+// POST /api/assets/scp-command (admin-only)
+// Devuelve comandos SCP calculados en backend y desbloqueados por PIN.
+// Body:
+//  - pin: string (requerido)
+//  - mode: 'uploader' | 'batch' (default: 'uploader')
+//  - batchId?: string (solo uploader)
+export const getScpCommand = async (req, res) => {
+    try {
+        const providedPin = String(req.body?.pin || '').trim();
+        const expectedPin = String(process.env.SCP_UNLOCK_PIN || process.env.SCP_PIN || '1991').trim();
+        if (!providedPin || providedPin !== expectedPin) {
+            return res.status(403).json({ message: 'PIN inválido' });
+        }
+
+        const mode = String(req.body?.mode || 'uploader').toLowerCase();
+        if (mode !== 'uploader' && mode !== 'batch') {
+            return res.status(400).json({ message: 'mode inválido (uploader|batch)' });
+        }
+
+        const cfg = getScpServerConfig();
+        if (!cfg.host || !cfg.user || !cfg.remoteBase) {
+            return res.status(500).json({
+                message: 'Configuración SCP incompleta en backend (.env)',
+                missing: {
+                    host: !cfg.host,
+                    user: !cfg.user,
+                    remoteBase: !cfg.remoteBase,
+                },
+            });
+        }
+
+        const commands =
+            mode === 'batch'
+                ? buildBatchScpCommands(cfg)
+                : buildUploaderScpCommands({ ...cfg, batchId: req.body?.batchId });
+
+        return res.json({ ok: true, mode, config: cfg, commands });
+    } catch (e) {
+        console.error('[ASSETS] scp-command error:', e);
+        return res.status(500).json({ message: 'Error generating SCP command' });
     }
 };
 
