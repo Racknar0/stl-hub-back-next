@@ -103,6 +103,24 @@ function pickFirstNonEmpty(...values) {
   return ''
 }
 
+function normalizeTagLabel(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+}
+
+function buildTagCanonicalKey(tag) {
+  return (
+    slugify(tag?.slug) ||
+    slugify(tag?.slugEn) ||
+    slugify(tag?.es) ||
+    slugify(tag?.en) ||
+    slugify(tag?.name) ||
+    slugify(tag?.nameEn)
+  )
+}
+
 function buildCatalogMatchers(payload) {
   const categories = Array.isArray(payload?.dbCatalog?.categories) ? payload.dbCatalog.categories : []
   const tags = Array.isArray(payload?.dbCatalog?.tags) ? payload.dbCatalog.tags : []
@@ -259,20 +277,22 @@ function normalizeTagPair(rawTag, matchers) {
   if (typeof rawTag === 'string') {
     const matched = matchers.findTag(rawTag)
     if (matched) {
+      const nameEs = normalizeTagLabel(matched.name)
+      const nameEn = normalizeTagLabel(matched.nameEn || matched.name)
       return {
         id: matched.id,
-        slug: matched.slug,
-        slugEn: matched.slugEn || null,
-        name: matched.name,
-        nameEn: matched.nameEn || matched.name,
-        es: matched.name,
-        en: matched.nameEn || matched.name,
+        slug: slugify(matched.slug || nameEn || nameEs) || 'tag',
+        slugEn: slugify(matched.slugEn || nameEn || nameEs) || null,
+        name: nameEs,
+        nameEn: nameEn,
+        es: nameEs,
+        en: nameEn,
         fromCatalog: true,
         iaSuggested: true,
       }
     }
 
-    const clean = pickFirstNonEmpty(rawTag)
+    const clean = normalizeTagLabel(pickFirstNonEmpty(rawTag))
     return {
       slug: slugify(clean),
       name: clean,
@@ -291,21 +311,23 @@ function normalizeTagPair(rawTag, matchers) {
     matchers.findTag(pair.en)
 
   if (matched) {
+    const nameEs = normalizeTagLabel(matched.name)
+    const nameEn = normalizeTagLabel(matched.nameEn || matched.name)
     return {
       id: matched.id,
-      slug: matched.slug,
-      slugEn: matched.slugEn || null,
-      name: matched.name,
-      nameEn: matched.nameEn || matched.name,
-      es: matched.name,
-      en: matched.nameEn || matched.name,
+      slug: slugify(matched.slug || nameEn || nameEs) || 'tag',
+      slugEn: slugify(matched.slugEn || nameEn || nameEs) || null,
+      name: nameEs,
+      nameEn: nameEn,
+      es: nameEs,
+      en: nameEn,
       fromCatalog: true,
       iaSuggested: true,
     }
   }
 
-  const es = pickFirstNonEmpty(pair.es, pair.en)
-  const en = pickFirstNonEmpty(pair.en, pair.es)
+  const es = normalizeTagLabel(pickFirstNonEmpty(pair.es, pair.en))
+  const en = normalizeTagLabel(pickFirstNonEmpty(pair.en, pair.es))
   return {
     slug: slugify(en || es),
     name: es,
@@ -324,7 +346,7 @@ function normalizeTags(rawTags, matchers) {
 
   for (const rawTag of values) {
     const tag = normalizeTagPair(rawTag, matchers)
-    const key = normalizeText(tag.slug || tag.es || tag.en)
+    const key = buildTagCanonicalKey(tag)
     if (!key || seen.has(key)) continue
     seen.add(key)
     normalized.push(tag)

@@ -36,6 +36,81 @@ function buildAssetTitle(baseTitle) {
   return `STL - ${String(baseTitle || '').trim()}`;
 }
 
+function normalizeTagLabel(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+function normalizeTagSlug(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function normalizeBatchTagEntry(raw) {
+  if (typeof raw === 'string') {
+    const label = normalizeTagLabel(raw);
+    if (!label) return null;
+    return {
+      name: label,
+      nameEn: label,
+      es: label,
+      en: label,
+      slug: normalizeTagSlug(label),
+      slugEn: normalizeTagSlug(label),
+    };
+  }
+
+  if (!raw || typeof raw !== 'object') return null;
+
+  const id = Number(raw.id || 0);
+  const es = normalizeTagLabel(raw.es || raw.name || raw.label || '');
+  const en = normalizeTagLabel(raw.en || raw.nameEn || es);
+  const slug = normalizeTagSlug(raw.slug || en || es);
+  const slugEn = normalizeTagSlug(raw.slugEn || en || es);
+
+  if (!id && !es && !en && !slug) return null;
+
+  return {
+    ...(id > 0 ? { id } : {}),
+    ...(es ? { name: es, es } : {}),
+    ...(en ? { nameEn: en, en } : {}),
+    ...(slug ? { slug } : {}),
+    ...(slugEn ? { slugEn } : {}),
+  };
+}
+
+function normalizeBatchTags(rawTags, max = 3) {
+  const input = Array.isArray(rawTags) ? rawTags : [];
+  const out = [];
+  const seen = new Set();
+
+  for (const entry of input) {
+    const tag = normalizeBatchTagEntry(entry);
+    if (!tag) continue;
+    const key =
+      normalizeTagSlug(tag.slug) ||
+      normalizeTagSlug(tag.slugEn) ||
+      normalizeTagSlug(tag.es) ||
+      normalizeTagSlug(tag.en) ||
+      normalizeTagSlug(tag.name) ||
+      normalizeTagSlug(tag.nameEn) ||
+      String(tag.id || '').trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(tag);
+    if (out.length >= max) break;
+  }
+
+  return out;
+}
+
 async function assetTitleExists(baseTitle) {
   const full = buildAssetTitle(baseTitle);
   const existing = await prisma.asset.findFirst({
@@ -450,7 +525,8 @@ export const scanLocalDirectory = async (req, res) => {
             titleEn: safeName.en,
           };
 
-          if (tags.length > 0) data.tags = tags;
+          const normalizedTags = normalizeBatchTags(tags, 3);
+          if (normalizedTags.length > 0) data.tags = normalizedTags;
           if (categoryObj && (categoryObj.id || categoryObj.slug)) {
             data.categories = [categoryObj];
           }
@@ -539,7 +615,7 @@ export const updateBatchItem = async (req, res) => {
     if (targetAccount !== undefined) data.targetAccount = Number(targetAccount) || null;
     if (title !== undefined) data.title = title;
     if (titleEn !== undefined) data.titleEn = titleEn;
-    if (tags !== undefined) data.tags = tags;
+    if (tags !== undefined) data.tags = normalizeBatchTags(tags, 3);
     if (categories !== undefined) data.categories = categories;
     if (similarityApproved !== undefined) data.similarityApproved = !!similarityApproved;
 
