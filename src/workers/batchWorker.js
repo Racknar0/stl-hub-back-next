@@ -43,6 +43,7 @@ const ARCHIVE_EXTS = ['.rar', '.zip', '.7z', '.tar', '.gz', '.tgz']
 const IMAGE_EXTS   = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff']
 const NOTIFICATION_BODY_MAX = 191
 let activeMegaSessionAccountId = 0
+let activeMegaProxyUrl = ''
 const preferredProxyByAccountId = new Map()
 const sessionUploadedMbByAccountId = new Map()
 const MAX_ACCOUNT_UPLOAD_MB = Number(process.env.BATCH_ACCOUNT_MAX_MB) || (19 * 1024)
@@ -491,6 +492,7 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
   let publicLink = null
   const triedProxyUrls = new Set()
   let lastProxyUrl = preferredProxyByAccountId.get(accountIdNum) || ''
+  const accountSwitching = activeMegaSessionAccountId > 0 && activeMegaSessionAccountId !== accountIdNum
 
   for (let attempt = 1; attempt <= MAX_STALL_RETRIES; attempt++) {
     try {
@@ -515,7 +517,12 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
         }
 
         let picked = null
-        const shouldReuseLastProxy = Boolean(lastProxyUrl && attempt === 1 && !manualSwitchRequested)
+        const shouldReuseLastProxy = Boolean(
+          lastProxyUrl
+          && attempt === 1
+          && !manualSwitchRequested
+          && !(accountSwitching && activeMegaProxyUrl && lastProxyUrl === activeMegaProxyUrl)
+        )
         if (shouldReuseLastProxy) {
           picked = proxies.find((p) => p?.proxyUrl === lastProxyUrl) || null
           if (picked?.proxyUrl) {
@@ -525,6 +532,10 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
 
         if (!picked) {
           let candidatePool = proxies.filter((p) => p?.proxyUrl && !triedProxyUrls.has(p.proxyUrl))
+          if (accountSwitching && activeMegaProxyUrl) {
+            const withoutActiveProxy = candidatePool.filter((p) => p.proxyUrl !== activeMegaProxyUrl)
+            if (withoutActiveProxy.length) candidatePool = withoutActiveProxy
+          }
           if (lastProxyUrl) {
             const withoutLast = candidatePool.filter((p) => p.proxyUrl !== lastProxyUrl)
             if (withoutLast.length) candidatePool = withoutLast
@@ -548,6 +559,7 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
         }
         triedProxyUrls.add(picked.proxyUrl)
         lastProxyUrl = picked.proxyUrl
+        activeMegaProxyUrl = picked.proxyUrl
         preferredProxyByAccountId.set(accountIdNum, picked.proxyUrl)
         console.log(`[BATCH][PROXY][OK] ${picked.proxyUrl} ${ctx}`)
 
