@@ -398,6 +398,162 @@ function ensurePrefixedTitle(rawTitle) {
   return /^\s*stl\s*-/i.test(t) ? t : `STL - ${t}`
 }
 
+function normalizeToken(raw) {
+  return String(raw || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+}
+
+function firstNonEmpty(...values) {
+  for (const v of values) {
+    const s = String(v || '').trim()
+    if (s) return s
+  }
+  return ''
+}
+
+function normalizeTagInput(rawTag) {
+  if (typeof rawTag === 'string') {
+    const value = firstNonEmpty(rawTag)
+    return {
+      id: 0,
+      name: value,
+      nameEn: value,
+      slug: slugify(value) || 'tag',
+      slugEn: slugify(value) || null,
+    }
+  }
+
+  const id = Number(rawTag?.id || 0)
+  const name = firstNonEmpty(rawTag?.name, rawTag?.es, rawTag?.label)
+  const nameEn = firstNonEmpty(rawTag?.nameEn, rawTag?.en, name)
+  const slug = firstNonEmpty(rawTag?.slug, slugify(nameEn || name), 'tag')
+  const slugEn = firstNonEmpty(rawTag?.slugEn, slugify(nameEn), slugify(name), '')
+
+  return {
+    id,
+    name,
+    nameEn,
+    slug,
+    slugEn: slugEn || null,
+  }
+}
+
+function collectTagKeys(tag) {
+  return [
+    normalizeToken(tag?.name),
+    normalizeToken(tag?.nameEn),
+    normalizeToken(tag?.slug),
+    normalizeToken(tag?.slugEn),
+  ].filter(Boolean)
+}
+
+function makeUniqueValue(base, usedSet, fallback = 'tag') {
+  let candidate = String(base || '').trim() || fallback
+  let idx = 1
+  while (usedSet.has(normalizeToken(candidate))) {
+    idx += 1
+    candidate = `${String(base || fallback).trim() || fallback}-${idx}`
+  }
+  return candidate
+}
+
+async function resolveTagConnectIds(rawTags) {
+  if (!Array.isArray(rawTags) || rawTags.length === 0) return []
+
+  const parsed = rawTags.map(normalizeTagInput)
+    .filter((t) => t.id > 0 || t.name || t.nameEn || t.slug)
+
+  if (!parsed.length) return []
+
+  const existing = await prisma.tag.findMany({
+    select: { id: true, name: true, nameEn: true, slug: true, slugEn: true },
+  })
+
+  const byId = new Map(existing.map((t) => [Number(t.id), t]))
+  const byKey = new Map()
+  const usedName = new Set()
+  const usedSlug = new Set()
+  const usedSlugEn = new Set()
+
+  for (const t of existing) {
+    usedName.add(normalizeToken(t.name))
+    usedSlug.add(normalizeToken(t.slug))
+    if (t.slugEn) usedSlugEn.add(normalizeToken(t.slugEn))
+    for (const key of collectTagKeys(t)) byKey.set(key, t)
+  }
+
+  const connectIds = []
+  const seenIds = new Set()
+
+  for (const input of parsed) {
+    let found = null
+
+    if (input.id > 0) {
+      found = byId.get(input.id) || null
+    }
+
+    if (!found) {
+      const inputKeys = collectTagKeys(input)
+      found = inputKeys.map((k) => byKey.get(k)).find(Boolean) || null
+    }
+
+    if (!found) {
+      const baseName = firstNonEmpty(input.name, input.nameEn, input.slug, 'tag')
+      const baseNameEn = firstNonEmpty(input.nameEn, input.name, baseName)
+      const baseSlug = firstNonEmpty(input.slug, slugify(baseNameEn), slugify(baseName), 'tag')
+      const baseSlugEn = firstNonEmpty(input.slugEn, slugify(baseNameEn), slugify(baseName), '')
+
+      const uniqueName = makeUniqueValue(baseName, usedName, 'tag')
+      usedName.add(normalizeToken(uniqueName))
+
+      const uniqueSlug = makeUniqueValue(baseSlug, usedSlug, 'tag')
+      usedSlug.add(normalizeToken(uniqueSlug))
+
+      const uniqueSlugEn = baseSlugEn ? makeUniqueValue(baseSlugEn, usedSlugEn, '') : ''
+      if (uniqueSlugEn) usedSlugEn.add(normalizeToken(uniqueSlugEn))
+
+      try {
+        found = await prisma.tag.create({
+          data: {
+            name: uniqueName,
+            nameEn: baseNameEn,
+            slug: uniqueSlug,
+            slugEn: uniqueSlugEn || null,
+          },
+          select: { id: true, name: true, nameEn: true, slug: true, slugEn: true },
+        })
+      } catch {
+        const fallback = await prisma.tag.findFirst({
+          where: {
+            OR: [
+              { slug: uniqueSlug },
+              { name: uniqueName },
+            ],
+          },
+          select: { id: true, name: true, nameEn: true, slug: true, slugEn: true },
+        })
+        found = fallback || null
+      }
+
+      if (found) {
+        byId.set(Number(found.id), found)
+        for (const key of collectTagKeys(found)) byKey.set(key, found)
+      }
+    }
+
+    const foundId = Number(found?.id || 0)
+    if (foundId > 0 && !seenIds.has(foundId)) {
+      seenIds.add(foundId)
+      connectIds.push(foundId)
+    }
+  }
+
+  return connectIds
+}
+
 // ──────────────────── EXTRACT + RECOMPRESS ────────────────────
 
 async function extractInnerArchives(folderPath) {
@@ -627,13 +783,14 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
 
 // ──────────────────── CREAR ASSET EN BD (idéntico al uploader) ────────────────────
 
-async function createAssetRecord({ slug, title, archiveName, images, account, megaLink, sizeBytes, tags, categories }) {
+async function createAssetRecord({ slug, title, titleEn, archiveName, images, account, megaLink, sizeBytes, tags, categories }) {
   const fullTitle = await ensureUniqueAssetTitle(title)
+  const fullTitleEn = ensurePrefixedTitle(titleEn || title)
   const archiveSizeB = BigInt(sizeBytes || 0)
 
   const data = {
     title: fullTitle,
-    titleEn: fullTitle,
+    titleEn: fullTitleEn,
     slug,
     archiveName,
     archiveSizeB,
@@ -652,7 +809,10 @@ async function createAssetRecord({ slug, title, archiveName, images, account, me
     data.categories = { connect: categories.map(c => ({ id: typeof c === 'object' ? c.id : Number(c) })).filter(c => c.id) }
   }
   if (Array.isArray(tags) && tags.length > 0) {
-    data.tags = { connect: tags.map(t => ({ id: typeof t === 'object' ? t.id : Number(t) })).filter(t => t.id) }
+    const tagIds = await resolveTagConnectIds(tags)
+    if (tagIds.length > 0) {
+      data.tags = { connect: tagIds.map((id) => ({ id })) }
+    }
   }
 
   const asset = await prisma.asset.create({ data })
@@ -755,6 +915,7 @@ async function processMainQueueItem(item) {
     const asset = await createAssetRecord({
       slug: ctx.slug,
       title: item.title || ctx.friendlyName,
+      titleEn: item.titleEn || item.title || ctx.friendlyName,
       archiveName: ctx.archiveName,
       images: ctx.imagePaths,
       account: ctx.mainAccount,

@@ -15,6 +15,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@google/genai": "^1.46.0",
     "@paypal/checkout-server-sdk": "^1.0.3",
     "@prisma/client": "^6.5.0",
     "bcrypt": "^5.1.1",

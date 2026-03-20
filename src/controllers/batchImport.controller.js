@@ -3,6 +3,8 @@ import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
 import { requestBatchProxySwitch } from '../utils/batchProxySwitch.js';
+import { buildBatchScanRequestData } from '../helpers/batchAi/buildBatchScanRequestData.js';
+import { callGoogleBatchScan } from '../helpers/batchAi/callGoogleBatchScan.js';
 
 const prisma = new PrismaClient();
 const UPLOADS_DIR = path.resolve('uploads');
@@ -10,126 +12,20 @@ const BATCH_DIR = path.join(UPLOADS_DIR, 'batch_imports');
 const ARCHIVE_EXTS = ['.rar', '.zip', '.7z', '.tar', '.gz', '.tgz'];
 const TITLE_PREFIX_RE = /^\s*STL\s*-\s*/i;
 const MAX_ACCOUNT_UPLOAD_MB = Number(process.env.BATCH_ACCOUNT_MAX_MB) || (19 * 1024);
-const DEFAULT_BATCH_CATEGORY = { name: 'Anime', slug: 'anime' };
-const DEFAULT_BATCH_TAGS = [
-  { name: 'anime', slug: 'anime' },
-  { name: 'Japon', slug: 'japon' },
-];
-
-function normalizeToken(raw) {
-  return String(raw || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .trim();
-}
-
-function normalizeSlug(raw) {
-  return normalizeToken(raw)
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
-
-function collectEntityKeys(row) {
-  return new Set(
-    [
-      normalizeToken(row?.name),
-      normalizeToken(row?.nameEn),
-      normalizeToken(row?.slug),
-      normalizeToken(row?.slugEn),
-      normalizeSlug(row?.slug),
-      normalizeSlug(row?.slugEn),
-    ].filter(Boolean)
-  );
-}
-
-async function resolveOrCreateCategory(preferred) {
-  const all = await prisma.category.findMany({ select: { id: true, name: true, slug: true, nameEn: true, slugEn: true } });
-  const wanted = new Set([
-    normalizeToken(preferred?.name),
-    normalizeToken(preferred?.slug),
-    normalizeSlug(preferred?.slug || preferred?.name),
-  ].filter(Boolean));
-
-  let found = all.find((c) => {
-    const keys = collectEntityKeys(c);
-    for (const k of wanted) if (keys.has(k)) return true;
-    return false;
-  });
-
-  if (!found) {
-    const createData = {
-      name: String(preferred?.name || 'Anime').trim(),
-      slug: normalizeSlug(preferred?.slug || preferred?.name || 'anime') || 'anime',
-    };
-    try {
-      found = await prisma.category.create({ data: createData });
-    } catch {
-      const refreshed = await prisma.category.findMany({ select: { id: true, name: true, slug: true, nameEn: true, slugEn: true } });
-      found = refreshed.find((c) => {
-        const keys = collectEntityKeys(c);
-        for (const k of wanted) if (keys.has(k)) return true;
-        return false;
-      });
-    }
-  }
-
-  if (!found) throw new Error('No se pudo resolver categoría Anime en DB');
-  return { id: found.id, name: found.name, slug: found.slug };
-}
-
-async function resolveOrCreateTag(preferred) {
-  const all = await prisma.tag.findMany({ select: { id: true, name: true, slug: true, nameEn: true, slugEn: true } });
-  const wanted = new Set([
-    normalizeToken(preferred?.name),
-    normalizeToken(preferred?.slug),
-    normalizeSlug(preferred?.slug || preferred?.name),
-  ].filter(Boolean));
-
-  let found = all.find((t) => {
-    const keys = collectEntityKeys(t);
-    for (const k of wanted) if (keys.has(k)) return true;
-    return false;
-  });
-
-  if (!found) {
-    const createData = {
-      name: String(preferred?.name || 'anime').trim(),
-      slug: normalizeSlug(preferred?.slug || preferred?.name || 'anime') || 'anime',
-    };
-    try {
-      found = await prisma.tag.create({ data: createData });
-    } catch {
-      const refreshed = await prisma.tag.findMany({ select: { id: true, name: true, slug: true, nameEn: true, slugEn: true } });
-      found = refreshed.find((t) => {
-        const keys = collectEntityKeys(t);
-        for (const k of wanted) if (keys.has(k)) return true;
-        return false;
-      });
-    }
-  }
-
-  if (!found) throw new Error(`No se pudo resolver tag ${preferred?.name || preferred?.slug || ''} en DB`);
-  return { id: found.id, name: found.name, slug: found.slug };
-}
-
-async function resolveDefaultBatchSuggestions() {
-  const category = await resolveOrCreateCategory(DEFAULT_BATCH_CATEGORY);
-  const tags = [];
-  for (const pref of DEFAULT_BATCH_TAGS) {
-    const t = await resolveOrCreateTag(pref);
-    if (!tags.some((x) => Number(x.id) === Number(t.id))) tags.push(t);
-  }
-  return { categories: [category], tags };
-}
-
-function hasLinkedMetaIds(arr) {
-  return Array.isArray(arr) && arr.some((x) => Number(x?.id || 0) > 0);
-}
 
 function normalizeBaseTitle(raw, fallback = 'Asset') {
   const cleaned = String(raw || '').replace(TITLE_PREFIX_RE, '').trim();
   return cleaned || fallback;
+}
+
+function normalizeBilingualTitlePair(rawEs, rawEn, fallback = 'Asset') {
+  const es = normalizeBaseTitle(rawEs, '');
+  const en = normalizeBaseTitle(rawEn, '');
+  const base = es || en || normalizeBaseTitle(fallback, 'Asset');
+  return {
+    es: es || base,
+    en: en || base,
+  };
 }
 
 function normalizeTitleKey(raw) {
@@ -300,7 +196,7 @@ export const scanLocalDirectory = async (req, res) => {
 
     let newlyQueuedCount = 0;
     const reservedKeys = await buildReservedBatchTitleSet();
-    const defaultMeta = await resolveDefaultBatchSuggestions();
+    const aiScannedItems = [];
 
     for (const folder of folders) {
       // Find or create the master BatchImport record
@@ -341,17 +237,12 @@ export const scanLocalDirectory = async (req, res) => {
             const currentKey = normalizeTitleKey(ownTitle);
             if (currentKey) reservedKeys.delete(currentKey);
             const uniqueTitle = await ensureUniqueBatchTitle(ownTitle || rawBaseTitle, reservedKeys);
+            const bilingualTitle = normalizeBilingualTitlePair(uniqueTitle, existingItem.titleEn || uniqueTitle, rawBaseTitle);
 
             const updateData = {
-              title: uniqueTitle,
+              title: bilingualTitle.es,
+              titleEn: bilingualTitle.en,
             };
-
-            if (!hasLinkedMetaIds(existingItem.categories)) {
-              updateData.categories = defaultMeta.categories;
-            }
-            if (!hasLinkedMetaIds(existingItem.tags)) {
-              updateData.tags = defaultMeta.tags;
-            }
 
             if (existingItem.status === 'FAILED') {
               updateData.status = 'DRAFT';
@@ -366,12 +257,32 @@ export const scanLocalDirectory = async (req, res) => {
               data: updateData,
             });
           }
+
+          aiScannedItems.push({
+            itemId: existingItem.id,
+            batchFolder: folder,
+            itemFolder: assetFolder || '(root)',
+            assetName: rawBaseTitle,
+            sourceTitle: existingItem.title || rawBaseTitle,
+            sourceTitleEn: existingItem.titleEn || existingItem.title || rawBaseTitle,
+            sourcePathHint: assetFolder ? `${folder}/${assetFolder}` : folder,
+            sizeMB: Number(existingItem.pesoMB || 0),
+            imagesCount: Array.isArray(existingItem.images) ? existingItem.images.length : 0,
+            imagePaths: Array.isArray(existingItem.images)
+              ? existingItem.images.map((img) => String(img || '').trim()).filter(Boolean)
+              : [],
+            imageNameHints: Array.isArray(existingItem.images)
+              ? existingItem.images.slice(0, 4).map((img) => String(img || '').split('/').pop()).filter(Boolean)
+              : [],
+            existingStatus: existingItem.status,
+          });
           itemsCount++;
           continue;
         }
 
         if (!existingItem) {
           const uniqueTitle = await ensureUniqueBatchTitle(rawBaseTitle, reservedKeys);
+          const bilingualTitle = normalizeBilingualTitlePair(uniqueTitle, uniqueTitle, rawBaseTitle);
 
           // Calculate size
           const assetPath = path.join(batchPath, assetFolder);
@@ -406,21 +317,39 @@ export const scanLocalDirectory = async (req, res) => {
             findImages(assetPath);
           } catch {}
 
-          await prisma.batchImportItem.create({
+          const createdItem = await prisma.batchImportItem.create({
             data: {
               batchId: batch.id,
               folderName: assetFolder, // Si es '', el worker apuntará directo al batchFolder
-              title: uniqueTitle,
+              title: bilingualTitle.es,
+              titleEn: bilingualTitle.en,
               pesoMB,
               images: images.length > 0 ? images : [],
-              // Fase 2: simulación de respuesta IA usando categorías/tags canónicos de DB
-              categories: defaultMeta.categories,
-              tags: defaultMeta.tags,
+              // Fase 2 (preview): todavía no seteamos categorías/tags desde IA.
               status: 'DRAFT',
               mainStatus: 'PENDING',
               backupStatus: 'PENDING',
               mainProgress: 0
             }
+          });
+
+          aiScannedItems.push({
+            itemId: createdItem.id,
+            batchFolder: folder,
+            itemFolder: assetFolder || '(root)',
+            assetName: rawBaseTitle,
+            sourceTitle: bilingualTitle.es,
+            sourceTitleEn: bilingualTitle.en,
+            sourcePathHint: assetFolder ? `${folder}/${assetFolder}` : folder,
+            sizeMB: Number(pesoMB || 0),
+            imagesCount: Array.isArray(images) ? images.length : 0,
+            imagePaths: Array.isArray(images)
+              ? images.map((img) => String(img || '').trim()).filter(Boolean)
+              : [],
+            imageNameHints: Array.isArray(images)
+              ? images.slice(0, 4).map((img) => String(img || '').split('/').pop()).filter(Boolean)
+              : [],
+            existingStatus: 'NEW',
           });
           newlyQueuedCount++;
         }
@@ -431,6 +360,76 @@ export const scanLocalDirectory = async (req, res) => {
         where: { id: batch.id },
         data: { totalItems: itemsCount }
       });
+    }
+
+    try {
+      const [categoriesCatalog, tagsCatalog] = await Promise.all([
+        prisma.category.findMany({
+          orderBy: { name: 'asc' },
+          select: { id: true, name: true, slug: true, nameEn: true, slugEn: true },
+        }),
+        prisma.tag.findMany({
+          orderBy: { name: 'asc' },
+          select: { id: true, name: true, slug: true, nameEn: true, slugEn: true },
+        }),
+      ]);
+
+      const aiPayload = buildBatchScanRequestData(req, {
+        foldersCount: folders.length,
+        newlyQueuedCount,
+        scannedItems: aiScannedItems,
+      }, {
+        categories: categoriesCatalog,
+        tags: tagsCatalog,
+      });
+      const aiResult = await callGoogleBatchScan(aiPayload);
+
+      const aiSuggestions = Array.isArray(aiResult) ? aiResult : [];
+      if (aiSuggestions.length > 0) {
+        let applied = 0;
+        for (const suggestion of aiSuggestions) {
+          const itemId = Number(suggestion?.itemId || 0);
+          if (!itemId) continue;
+
+          const nameEs = String(suggestion?.nombre?.es || '').trim();
+          const nameEn = String(suggestion?.nombre?.en || '').trim();
+          const safeName = normalizeBilingualTitlePair(nameEs, nameEn, 'Asset');
+
+          const tags = Array.isArray(suggestion?.tags)
+            ? suggestion.tags.slice(0, 3)
+            : [];
+
+          const categoryObj = suggestion?.categoria && typeof suggestion.categoria === 'object'
+            ? suggestion.categoria
+            : null;
+
+          const data = {
+            title: safeName.es,
+            titleEn: safeName.en,
+          };
+
+          if (tags.length > 0) data.tags = tags;
+          if (categoryObj && (categoryObj.id || categoryObj.slug)) {
+            data.categories = [categoryObj];
+          }
+
+          try {
+            const result = await prisma.batchImportItem.updateMany({
+              where: {
+                id: itemId,
+                status: { in: ['DRAFT', 'FAILED'] },
+              },
+              data,
+            });
+            if (Number(result?.count || 0) > 0) applied += 1;
+          } catch (applyErr) {
+            console.error('[BATCH][AI][APPLY_WARN]', applyErr?.message || applyErr);
+          }
+        }
+        console.log(`[BATCH][AI][APPLY] sugerencias aplicadas: ${applied}/${aiSuggestions.length}`);
+      }
+    } catch (e) {
+      console.error('[BATCH][AI][SCAN][WARN]', e?.message || e);
     }
 
     return res.json({
@@ -465,11 +464,12 @@ export const getBatchQueue = async (req, res) => {
 export const updateBatchItem = async (req, res) => {
   try {
     const { id } = req.params;
-    const { targetAccount, title, tags, categories, similarityApproved } = req.body;
+    const { targetAccount, title, titleEn, tags, categories, similarityApproved } = req.body;
 
     const data = {};
     if (targetAccount !== undefined) data.targetAccount = Number(targetAccount) || null;
     if (title !== undefined) data.title = title;
+    if (titleEn !== undefined) data.titleEn = titleEn;
     if (tags !== undefined) data.tags = tags;
     if (categories !== undefined) data.categories = categories;
     if (similarityApproved !== undefined) data.similarityApproved = !!similarityApproved;
@@ -547,7 +547,7 @@ export const confirmBatchItems = async (req, res) => {
       }
       plannedExtraByAccount.set(accountId, plannedMb + incomingMb);
 
-      const desired = item.title || item.folderName || `Asset ${item.id}`;
+      const desired = item.title || item.titleEn || item.folderName || `Asset ${item.id}`;
       const uniqueTitle = await ensureUniqueBatchTitle(desired, reservedKeys);
 
       await prisma.batchImportItem.update({
