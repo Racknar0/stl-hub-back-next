@@ -6,6 +6,7 @@ const router = express.Router();
 
 router.post('/scan', requireAuth, scanLocalDirectory);
 router.post('/retry-ai', requireAuth, retryBatchAiFailedItems);
+router.post('/ai-metadata', requireAuth, retryBatchAiFailedItems);
 router.get('/', requireAuth, getBatchQueue);
 router.patch('/items/:id', requireAuth, updateBatchItem);
 router.post('/confirm', requireAuth, confirmBatchItems);

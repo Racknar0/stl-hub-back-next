@@ -677,176 +677,7 @@ export const scanLocalDirectory = async (req, res) => {
       });
     }
 
-    console.info(`[BATCH SCAN][DISCOVERY] items preparados para IA=${aiScannedItems.length} nuevos=${newlyQueuedCount}`);
-
-    let aiTimedOut = false;
-    let aiApplyDeferred = false;
-    let aiStats = null;
-    try {
-      const [categoriesCatalog, tagsCatalog] = await Promise.all([
-        prisma.category.findMany({
-          orderBy: { name: 'asc' },
-          select: { id: true, name: true, slug: true, nameEn: true, slugEn: true },
-        }),
-        prisma.tag.findMany({
-          orderBy: { name: 'asc' },
-          select: { id: true, name: true, slug: true, nameEn: true, slugEn: true },
-        }),
-      ]);
-
-      const aiPayload = buildBatchScanRequestData(req, {
-        foldersCount: folders.length,
-        newlyQueuedCount,
-        scannedItems: aiScannedItems,
-      }, {
-        categories: categoriesCatalog,
-        tags: tagsCatalog,
-      });
-      const rawTimeout = Number(process.env.BATCH_SCAN_AI_TIMEOUT_MS || 45_000);
-      const aiTimeoutMs = Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 0;
-      console.info(`[BATCH SCAN][AI] iniciando clasificación items=${aiScannedItems.length} timeoutMs=${aiTimeoutMs}`);
-
-      const unpackAiScanResult = (rawValue) => {
-        if (Array.isArray(rawValue)) {
-          return { suggestions: rawValue, stats: null };
-        }
-        if (!rawValue || typeof rawValue !== 'object') {
-          return { suggestions: [], stats: null };
-        }
-        const suggestions = Array.isArray(rawValue.suggestions)
-          ? rawValue.suggestions
-          : Array.isArray(rawValue.items)
-            ? rawValue.items
-            : [];
-        const stats = rawValue.stats && typeof rawValue.stats === 'object' ? rawValue.stats : null;
-        return { suggestions, stats };
-      };
-
-      const applyAiSuggestions = async (rawSuggestions, { source = 'inline' } = {}) => {
-        const aiSuggestions = Array.isArray(rawSuggestions) ? rawSuggestions : [];
-        if (aiSuggestions.length <= 0) {
-          console.log(`[BATCH][AI][APPLY] source=${source} sugerencias=0`);
-          return { applied: 0, skipped: 0, failed: 0, total: 0 };
-        }
-
-        let applied = 0;
-        let skipped = 0;
-        let failed = 0;
-        for (const suggestion of aiSuggestions) {
-          const itemId = Number(suggestion?.itemId || 0);
-          if (!itemId) continue;
-
-          const nameEs = String(suggestion?.nombre?.es || '').trim();
-          const nameEn = String(suggestion?.nombre?.en || '').trim();
-          const safeName = normalizeBilingualTitlePair(nameEs, nameEn, 'Asset');
-
-          const tags = Array.isArray(suggestion?.tags)
-            ? suggestion.tags.slice(0, 3)
-            : [];
-
-          const categoryObj = suggestion?.categoria && typeof suggestion.categoria === 'object'
-            ? suggestion.categoria
-            : null;
-
-          const data = {
-            title: safeName.es,
-            titleEn: safeName.en,
-          };
-
-          const descEs = String(suggestion?.descripcion?.es || '').trim();
-          const descEn = String(suggestion?.descripcion?.en || '').trim();
-          if (descEs) data.description = descEs;
-          if (descEn) data.descriptionEn = descEn;
-
-          const normalizedTags = normalizeBatchTags(tags, 3);
-          if (normalizedTags.length > 0) data.tags = normalizedTags;
-          if (categoryObj && (categoryObj.id || categoryObj.slug)) {
-            data.categories = [categoryObj];
-          }
-
-          try {
-            const current = await prisma.batchImportItem.findUnique({
-              where: { id: itemId },
-              select: { id: true, status: true },
-            });
-
-            if (!current) {
-              skipped += 1;
-              continue;
-            }
-
-            const statusNow = String(current.status || '').toUpperCase();
-            if (!['DRAFT', 'FAILED', 'PENDING'].includes(statusNow)) {
-              skipped += 1;
-              continue;
-            }
-
-            await prisma.batchImportItem.update({
-              where: { id: itemId },
-              data,
-            });
-            applied += 1;
-          } catch (applyErr) {
-            failed += 1;
-            console.error('[BATCH][AI][APPLY_WARN]', applyErr?.message || applyErr);
-            console.error('[BATCH][AI][APPLY_WARN][ITEM]', {
-              itemId,
-              hasTags: Array.isArray(data.tags) ? data.tags.length : 0,
-              hasCategories: Array.isArray(data.categories) ? data.categories.length : 0,
-              hasDescription: !!(data.description || data.descriptionEn),
-            });
-          }
-        }
-        console.log(`[BATCH][AI][APPLY] source=${source} sugerencias aplicadas=${applied} skip=${skipped} fail=${failed} total=${aiSuggestions.length}`);
-        return { applied, skipped, failed, total: aiSuggestions.length };
-      };
-
-      const aiPromise = callGoogleBatchScan(aiPayload);
-      if (aiTimeoutMs > 0) {
-        try {
-          const aiResultRaw = await withTimeout(
-            aiPromise,
-            aiTimeoutMs,
-            'BATCH_AI_SCAN_TIMEOUT'
-          );
-          const { suggestions, stats } = unpackAiScanResult(aiResultRaw);
-          if (stats) aiStats = stats;
-          await applyAiSuggestions(suggestions, { source: 'inline' });
-        } catch (aiErr) {
-          aiTimedOut = String(aiErr?.code || aiErr?.message || '').includes('BATCH_AI_SCAN_TIMEOUT');
-          if (aiTimedOut) {
-            aiApplyDeferred = true;
-            console.warn(`[BATCH][AI][SCAN][TIMEOUT] timeoutMs=${aiTimeoutMs} items=${aiScannedItems.length}`);
-
-            // Continuar en background y persistir cuando finalice, aunque la respuesta HTTP ya haya salido.
-            aiPromise
-              .then((lateRawResult) => {
-                const { suggestions, stats } = unpackAiScanResult(lateRawResult);
-                if (stats) {
-                  console.info('[BATCH][AI][DEFERRED][STATS]', {
-                    failedItems: Number(stats.failedItems || 0),
-                    rateLimitedItems: Number(stats.rateLimitedItems || 0),
-                    retryAttempts: Number(stats.retryAttempts || 0),
-                  });
-                }
-                return applyAiSuggestions(suggestions, { source: 'deferred-timeout' });
-              })
-              .catch((lateErr) => {
-                console.error('[BATCH][AI][DEFERRED][ERROR]', lateErr?.message || lateErr);
-              });
-          } else {
-            console.error('[BATCH][AI][SCAN][WARN]', aiErr?.message || aiErr);
-          }
-        }
-      } else {
-        const aiResultRaw = await aiPromise;
-        const { suggestions, stats } = unpackAiScanResult(aiResultRaw);
-        if (stats) aiStats = stats;
-        await applyAiSuggestions(suggestions, { source: 'inline-no-timeout' });
-      }
-    } catch (e) {
-      console.error('[BATCH][AI][SCAN][WARN]', e?.message || e);
-    }
+    console.info(`[BATCH SCAN][DISCOVERY] items detectados=${aiScannedItems.length} nuevos=${newlyQueuedCount}`);
 
     // Solo borramos comprimidos originales cuando TODO el scan terminó correctamente.
     let deletedArchivesCount = 0;
@@ -861,21 +692,15 @@ export const scanLocalDirectory = async (req, res) => {
       }
     }
 
-    console.info(`[BATCH SCAN][DONE] nuevos=${newlyQueuedCount} comprimidos-borrados=${deletedArchivesCount}/${extractedArchivesThisRun.length} aiTimedOut=${aiTimedOut ? 'yes' : 'no'} aiFailed=${Number(aiStats?.failedItems || 0)}`);
+    console.info(`[BATCH SCAN][DONE] nuevos=${newlyQueuedCount} comprimidos-borrados=${deletedArchivesCount}/${extractedArchivesThisRun.length} itemsDetectados=${aiScannedItems.length}`);
 
     return res.json({
       success: true,
-      message: `Scanned and queued ${newlyQueuedCount} new items across batches.`,
+      message: `Escaneo completado. Se detectaron ${aiScannedItems.length} item(s) y se encolaron ${newlyQueuedCount} nuevos.`,
       newlyQueuedCount,
+      scannedItemsCount: aiScannedItems.length,
       deletedArchivesCount,
       processedArchivesCount: extractedArchivesThisRun.length,
-      aiTimedOut,
-      aiApplyDeferred,
-      aiStats,
-      aiFailedItems: Number(aiStats?.failedItems || 0),
-      aiRateLimitedItems: Number(aiStats?.rateLimitedItems || 0),
-      aiRetryAttempts: Number(aiStats?.retryAttempts || 0),
-      aiFailedItemIds: Array.isArray(aiStats?.failedItemIds) ? aiStats.failedItemIds : [],
     });
 
   } catch (error) {
