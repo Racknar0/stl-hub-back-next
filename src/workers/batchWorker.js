@@ -34,10 +34,33 @@ const STALL_TIMEOUT_MS = Number(process.env.MEGA_STALL_TIMEOUT_MS) || 3 * 60 * 1
 const MAX_STALL_RETRIES = 3
 const ARCHIVE_EXTS = ['.rar', '.zip', '.7z', '.tar', '.gz', '.tgz']
 const IMAGE_EXTS   = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff']
+const NOTIFICATION_BODY_MAX = 191
 
 // ────────────────────────────── HELPERS ──────────────────────────────
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
+
+function truncateText(text, max = NOTIFICATION_BODY_MAX) {
+  const s = String(text || '')
+  if (s.length <= max) return s
+  return `${s.slice(0, Math.max(0, max - 1))}…`
+}
+
+async function notifyAutomation({ title, body, typeStatus = 'ERROR' }) {
+  try {
+    await prisma.notification.create({
+      data: {
+        title: truncateText(title, 120),
+        body: truncateText(body, NOTIFICATION_BODY_MAX),
+        status: 'UNREAD',
+        type: 'AUTOMATION',
+        typeStatus,
+      },
+    })
+  } catch (e) {
+    console.error('[BATCH][NOTIFY][WARN]', e.message)
+  }
+}
 
 function runCmd(cmd, args = []) {
   return new Promise((resolve, reject) => {
@@ -211,6 +234,33 @@ async function uniqueSlug(baseSlug) {
   }
 }
 
+function normalizeTitleBase(raw) {
+  const plain = String(raw || '').replace(/^\s*STL\s*-\s*/i, '').trim()
+  return plain || 'Asset'
+}
+
+function withTitlePrefix(base) {
+  return `STL - ${String(base || '').trim()}`
+}
+
+async function ensureUniqueAssetTitle(rawTitle) {
+  const base = normalizeTitleBase(rawTitle)
+  let attempt = 1
+
+  while (attempt <= 500) {
+    const candidateBase = attempt === 1 ? base : `${base} (${attempt})`
+    const full = withTitlePrefix(candidateBase)
+    const exists = await prisma.asset.findFirst({
+      where: { OR: [{ title: full }, { titleEn: full }] },
+      select: { id: true },
+    })
+    if (!exists) return full
+    attempt += 1
+  }
+
+  throw new Error('No unique title available')
+}
+
 // ──────────────────── EXTRACT + RECOMPRESS ────────────────────
 
 async function extractInnerArchives(folderPath) {
@@ -227,14 +277,27 @@ async function extractInnerArchives(folderPath) {
 
 async function recompressFolder(folderPath, outputName) {
   fs.mkdirSync(STAGING_DIR, { recursive: true })
-  const outputPath = path.join(STAGING_DIR, `${outputName}.rar`)
-  if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath)
+  const outputRarPath = path.join(STAGING_DIR, `${outputName}.rar`)
+  const outputZipPath = path.join(STAGING_DIR, `${outputName}.zip`)
+  if (fs.existsSync(outputRarPath)) fs.unlinkSync(outputRarPath)
+  if (fs.existsSync(outputZipPath)) fs.unlinkSync(outputZipPath)
 
-  // Sin comillas manuales, Node se encarga
-  await run7z(['a', '-trar', outputPath, path.join(folderPath, '*'), '-r', '-mx5'])
-  const sizeMB = fs.existsSync(outputPath) ? (fs.statSync(outputPath).size / (1024 * 1024)).toFixed(1) : 0
-  console.log(`[BATCH][RECOMPRESS] OK → ${outputName}.rar (${sizeMB} MB)`)
-  return outputPath
+  // Intento primario: RAR. En algunos entornos 7z no soporta creación de RAR.
+  try {
+    await run7z(['a', '-trar', outputRarPath, path.join(folderPath, '*'), '-r', '-mx5'])
+    const sizeMB = fs.existsSync(outputRarPath) ? (fs.statSync(outputRarPath).size / (1024 * 1024)).toFixed(1) : 0
+    console.log(`[BATCH][RECOMPRESS] OK → ${outputName}.rar (${sizeMB} MB)`)
+    return { outputPath: outputRarPath, ext: 'rar' }
+  } catch (e) {
+    const msg = String(e?.message || e)
+    if (!/no implementado|not implemented/i.test(msg)) throw e
+    console.warn('[BATCH][RECOMPRESS][WARN] RAR no soportado por 7z en este host, fallback a ZIP')
+  }
+
+  await run7z(['a', '-tzip', outputZipPath, path.join(folderPath, '*'), '-r', '-mx5'])
+  const sizeMB = fs.existsSync(outputZipPath) ? (fs.statSync(outputZipPath).size / (1024 * 1024)).toFixed(1) : 0
+  console.log(`[BATCH][RECOMPRESS] OK → ${outputName}.zip (${sizeMB} MB)`)
+  return { outputPath: outputZipPath, ext: 'zip' }
 }
 
 async function extractImages(folderPath, slug) {
@@ -291,17 +354,18 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
 
   for (let attempt = 1; attempt <= MAX_STALL_RETRIES; attempt++) {
     try {
-      // Aplicar proxy
-      const proxies = await listMegaProxies()
-      if (proxies.length > 0) {
-        const picked = proxies[Math.floor(Math.random() * proxies.length)]
-        try {
-          const r = await applyMegaProxy(picked, { ctx, timeoutMs: 15000, clearOnFail: false })
-          if (r?.enabled) console.log(`[BATCH][PROXY][OK] ${picked.proxyUrl} ${ctx}`)
-        } catch {}
-      }
-
       await withMegaLock(async () => {
+        const proxies = await listMegaProxies()
+        if (!proxies.length) {
+          throw new Error('PROXY_REQUIRED_NO_PROXIES_AVAILABLE')
+        }
+        const picked = proxies[Math.floor(Math.random() * proxies.length)]
+        const proxyResult = await applyMegaProxy(picked, { ctx, timeoutMs: 15000, clearOnFail: false })
+        if (!proxyResult?.enabled) {
+          throw new Error(`PROXY_REQUIRED_APPLY_FAIL: ${proxyResult?.error || 'unknown'}`)
+        }
+        console.log(`[BATCH][PROXY][OK] ${picked.proxyUrl} ${ctx}`)
+
         await megaLogout(`PREV ${ctx}`)
         await megaLogin(payload, ctx)
         await safeMkdir(remotePath)
@@ -344,8 +408,7 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
 // ──────────────────── CREAR ASSET EN BD (idéntico al uploader) ────────────────────
 
 async function createAssetRecord({ slug, title, archiveName, images, account, megaLink, sizeBytes, tags, categories }) {
-  // Título con prefijo "STL - " igual que el uploader
-  const fullTitle = title.startsWith('STL - ') ? title : `STL - ${title}`
+  const fullTitle = await ensureUniqueAssetTitle(title)
   const archiveSizeB = BigInt(sizeBytes || 0)
 
   const data = {
@@ -377,17 +440,17 @@ async function createAssetRecord({ slug, title, archiveName, images, account, me
   return asset
 }
 
-// ──────────────────── PROCESAR UN ITEM COMPLETO ────────────────────
+// ──────────────────── MAIN PHASE (PREPARAR + SUBIR MAIN + CREAR ASSET) ────────────────────
 
-async function processItem(item) {
+async function prepareItemForMain(item, updateItem) {
   const batchFolder = await prisma.batchImport.findUnique({ where: { id: item.batchId } })
   const folderPath = path.join(BATCH_DIR, batchFolder?.folderName || '', item.folderName)
-  const friendlyName = item.folderName
-  const baseSlug = slugify(friendlyName)
+  const friendlyName = item.title || item.folderName || `item-${item.id}`
+  const baseSlug = slugify(item.folderName || friendlyName)
   const slug = await uniqueSlug(baseSlug)
 
   console.log(`\n${'='.repeat(60)}`)
-  console.log(`[BATCH] Procesando item #${item.id}: ${friendlyName} → slug="${slug}"`)
+  console.log(`[BATCH][MAIN] Procesando item #${item.id}: ${friendlyName} → slug="${slug}"`)
   console.log(`${'='.repeat(60)}\n`)
 
   if (!fs.existsSync(folderPath)) throw new Error(`Carpeta no encontrada: ${folderPath}`)
@@ -395,90 +458,213 @@ async function processItem(item) {
 
   const mainAccount = await prisma.megaAccount.findUnique({
     where: { id: item.targetAccount },
-    include: { credentials: true, backups: { include: { backupAccount: { include: { credentials: true } } } } }
+    include: {
+      credentials: true,
+      backups: { include: { backupAccount: { include: { credentials: true } } } },
+    },
   })
   if (!mainAccount) throw new Error(`Cuenta MEGA id=${item.targetAccount} no encontrada`)
 
-  const updateItem = (data) => prisma.batchImportItem.update({ where: { id: item.id }, data })
+  const backupAccounts = (mainAccount.backups || [])
+    .map((b) => b.backupAccount)
+    .filter((b) => b && b.type === 'backup')
 
-  // ─── STEP 1: Extraer archivos internos ───
   await updateItem({ error: 'Extrayendo archivos internos...', mainStatus: 'EXTRACTING' })
   await extractInnerArchives(folderPath)
 
-  // ─── STEP 2: Extraer imágenes (WebP + thumbnails igual que el uploader) ───
   await updateItem({ error: 'Procesando imágenes...' })
   const imagePaths = await extractImages(folderPath, slug)
 
-  // ─── STEP 3: Recomprimir ───
-  await updateItem({ error: 'Comprimiendo RAR final...', mainStatus: 'COMPRESSING' })
-  const archivePath = await recompressFolder(folderPath, slug)
-  const archiveSizeBytes = fs.statSync(archivePath).size
+  await updateItem({ error: 'Comprimiendo archivo final...', mainStatus: 'COMPRESSING' })
+  const packed = await recompressFolder(folderPath, slug)
+  const stagingArchivePath = packed.outputPath
+  const archiveSizeBytes = fs.statSync(stagingArchivePath).size
 
-  // Copiar a archives/{slug}/ (misma estructura que el uploader)
   const archDir = path.join(ARCHIVES_DIR, slug)
   fs.mkdirSync(archDir, { recursive: true })
-  const finalArchive = path.join(archDir, `${slug}.rar`)
-  fs.copyFileSync(archivePath, finalArchive)
-  const archiveName = path.relative(UPLOADS_DIR, finalArchive).replace(/\\/g, '/')
+  const finalArchivePath = path.join(archDir, `${slug}.${packed.ext}`)
+  fs.copyFileSync(stagingArchivePath, finalArchivePath)
+  const archiveName = path.relative(UPLOADS_DIR, finalArchivePath).replace(/\\/g, '/')
 
-  // ─── STEP 4: Subir a MEGA MAIN ───
-  await updateItem({ error: 'Subiendo a MEGA (Main)...', mainStatus: 'UPLOADING', mainProgress: 0 })
-  const megaLink = await uploadToAccountWithRetry({
-    archivePath: finalArchive,
+  return {
+    folderPath,
+    friendlyName,
     slug,
-    account: mainAccount,
-    role: 'main',
-    onProgress: async (pct) => {
-      try { await updateItem({ mainProgress: Math.round(pct) }) } catch {}
-    }
+    imagePaths,
+    archiveSizeBytes,
+    archiveName,
+    stagingArchivePath,
+    finalArchivePath,
+    mainAccount,
+    backupAccounts,
+  }
+}
+
+async function processMainQueueItem(item) {
+  const updateItem = (data) => prisma.batchImportItem.update({ where: { id: item.id }, data })
+
+  await updateItem({
+    status: 'PROCESSING',
+    mainStatus: 'PENDING',
+    backupStatus: 'PENDING',
+    mainProgress: 0,
+    error: 'Iniciando fase MAIN...',
   })
-  await updateItem({ mainStatus: 'OK', mainProgress: 100 })
 
-  // ─── STEP 5: Replicar a Backups en serie ───
-  const backupAccounts = (mainAccount.backups || [])
-    .map(b => b.backupAccount)
-    .filter(b => b && b.type === 'backup')
+  let ctx = null
 
-  if (backupAccounts.length > 0) {
-    await updateItem({ error: 'Replicando a backups...', backupStatus: 'UPLOADING' })
+  try {
+    ctx = await prepareItemForMain(item, updateItem)
+
+    await updateItem({ error: 'Subiendo a MEGA (Main)...', mainStatus: 'UPLOADING', mainProgress: 0 })
+    const megaLink = await uploadToAccountWithRetry({
+      archivePath: ctx.finalArchivePath,
+      slug: ctx.slug,
+      account: ctx.mainAccount,
+      role: 'main',
+      onProgress: async (pct) => {
+        try { await updateItem({ mainProgress: Math.round(pct) }) } catch {}
+      },
+    })
+
+    await updateItem({ mainStatus: 'OK', mainProgress: 100, error: 'Guardando en base de datos...' })
+
+    const asset = await createAssetRecord({
+      slug: ctx.slug,
+      title: item.title || ctx.friendlyName,
+      archiveName: ctx.archiveName,
+      images: ctx.imagePaths,
+      account: ctx.mainAccount,
+      megaLink,
+      sizeBytes: ctx.archiveSizeBytes,
+      tags: item.tags,
+      categories: item.categories,
+    })
+
+    const hasBackups = ctx.backupAccounts.length > 0
+    await updateItem({
+      status: 'COMPLETED',
+      error: hasBackups ? 'Main completado. Pendiente fase BACKUP...' : null,
+      createdAssetId: asset.id,
+      archiveFile: path.basename(ctx.finalArchivePath),
+      backupStatus: hasBackups ? 'PENDING' : 'N/A',
+      mainStatus: 'OK',
+      mainProgress: 100,
+    })
+
+    try { if (fs.existsSync(ctx.stagingArchivePath)) fs.unlinkSync(ctx.stagingArchivePath) } catch {}
+    try { if (fs.existsSync(ctx.folderPath)) fs.rmSync(ctx.folderPath, { recursive: true, force: true }) } catch {}
+    console.log(`[BATCH][MAIN][OK] item=${item.id} asset=${asset.id}`)
+  } catch (err) {
+    const msg = String(err?.message || err).slice(0, 500)
+    console.error(`[BATCH][MAIN][FAIL] item=${item.id}:`, msg)
+    await updateItem({
+      status: 'FAILED',
+      mainStatus: 'ERROR',
+      backupStatus: 'ERROR',
+      error: msg,
+    })
+    await notifyAutomation({
+      title: `Batch MAIN falló (item #${item.id})`,
+      body: `folder=${item.folderName || '-'} acc=${item.targetAccount || '-'} err=${msg}`,
+      typeStatus: 'ERROR',
+    })
+  }
+}
+
+// ──────────────────── BACKUP PHASE (SOLO REPLICACIÓN) ────────────────────
+
+async function processBackupsForCompletedItem(item) {
+  const updateItem = (data) => prisma.batchImportItem.update({ where: { id: item.id }, data })
+
+  try {
+    if (!item.createdAssetId) throw new Error('createdAssetId faltante para fase backup')
+
+    const asset = await prisma.asset.findUnique({
+      where: { id: item.createdAssetId },
+      select: {
+        id: true,
+        slug: true,
+        title: true,
+        accountId: true,
+        archiveName: true,
+      },
+    })
+    if (!asset) throw new Error(`Asset id=${item.createdAssetId} no encontrado`)
+
+    const mainAccount = await prisma.megaAccount.findUnique({
+      where: { id: asset.accountId },
+      include: { backups: { include: { backupAccount: { include: { credentials: true } } } } },
+    })
+    if (!mainAccount) throw new Error(`Cuenta principal no encontrada para asset=${asset.id}`)
+
+    const backupAccounts = (mainAccount.backups || [])
+      .map((b) => b.backupAccount)
+      .filter((b) => b && b.type === 'backup')
+
+    if (!backupAccounts.length) {
+      await updateItem({ backupStatus: 'N/A', status: 'COMPLETED', error: null })
+      return
+    }
+
+    const archiveRel = String(asset.archiveName || '').replace(/^\/+/, '')
+    const archivePath = archiveRel ? path.join(UPLOADS_DIR, archiveRel) : ''
+    if (!archivePath || !fs.existsSync(archivePath)) {
+      throw new Error(`Archivo local no encontrado para backup: ${archiveRel || '(vacío)'}`)
+    }
+
+    await updateItem({ backupStatus: 'UPLOADING', error: 'Replicando a backups...' })
+
+    const failedBackups = []
     for (const backup of backupAccounts) {
       try {
         await uploadToAccountWithRetry({
-          archivePath: finalArchive,
-          slug,
+          archivePath,
+          slug: asset.slug,
           account: backup,
           role: 'backup',
         })
       } catch (e) {
-        console.error(`[BATCH][BACKUP][ERROR] accId=${backup.id}: ${e.message}`)
+        const msg = String(e?.message || e)
+        failedBackups.push({ id: backup.id, alias: backup.alias || backup.email || `acc-${backup.id}`, error: msg })
       }
     }
-    await updateItem({ backupStatus: 'OK' })
-  } else {
-    await updateItem({ backupStatus: 'N/A' })
+
+    if (failedBackups.length > 0) {
+      const summary = failedBackups
+        .map((f) => `${f.alias}(${f.id})`) 
+        .join(', ')
+
+      await updateItem({
+        status: 'FAILED',
+        backupStatus: 'ERROR',
+        error: truncateText(`Backups con fallo: ${summary}`, 500),
+      })
+
+      await notifyAutomation({
+        title: `Batch BACKUP con fallos (item #${item.id})`,
+        body: `asset=${asset.id} slug=${asset.slug} fallos=${failedBackups.length} cuentas=[${summary}]`,
+        typeStatus: 'ERROR',
+      })
+      return
+    }
+
+    await updateItem({ backupStatus: 'OK', status: 'COMPLETED', error: null })
+    console.log(`[BATCH][BACKUP][OK] item=${item.id} asset=${asset.id}`)
+  } catch (err) {
+    const msg = String(err?.message || err).slice(0, 500)
+    console.error(`[BATCH][BACKUP][FAIL] item=${item.id}:`, msg)
+    await updateItem({
+      status: 'FAILED',
+      backupStatus: 'ERROR',
+      error: msg,
+    })
+    await notifyAutomation({
+      title: `Batch BACKUP falló (item #${item.id})`,
+      body: `asset=${item.createdAssetId || '-'} err=${msg}`,
+      typeStatus: 'ERROR',
+    })
   }
-
-  // ─── STEP 6: Crear Asset en BD (idéntico al uploader) ───
-  await updateItem({ error: 'Guardando en base de datos...' })
-  const asset = await createAssetRecord({
-    slug,
-    title: item.title || friendlyName,
-    archiveName,
-    images: imagePaths,
-    account: mainAccount,
-    megaLink,
-    sizeBytes: archiveSizeBytes,
-    tags: item.tags,
-    categories: item.categories,
-  })
-
-  // ─── STEP 7: Cleanup ───
-  try { if (fs.existsSync(archivePath)) fs.unlinkSync(archivePath) } catch {}  // staging
-  try { if (fs.existsSync(finalArchive)) fs.unlinkSync(finalArchive) } catch {} // archives
-  try { if (fs.existsSync(folderPath)) fs.rmSync(folderPath, { recursive: true, force: true }) } catch {} // source folder
-  console.log(`[BATCH][CLEANUP] Archivos locales de "${slug}" eliminados`)
-
-  return asset.id
 }
 
 // ──────────────────── LOOP PRINCIPAL ────────────────────
@@ -491,44 +677,35 @@ export async function startBatchWorker() {
 
   while (true) {
     try {
-      const item = await prisma.batchImportItem.findFirst({
+      // Fase 1 prioritaria: terminar todos los MAIN antes de arrancar BACKUPS.
+      const nextMainItem = await prisma.batchImportItem.findFirst({
         where: { status: 'QUEUED' },
         orderBy: { createdAt: 'asc' },
-        include: { batch: true }
       })
 
-      if (!item) { await sleep(POLL_INTERVAL_MS); continue }
-
-      await prisma.batchImportItem.update({
-        where: { id: item.id },
-        data: { status: 'PROCESSING', mainStatus: 'PENDING', backupStatus: 'PENDING', mainProgress: 0 }
-      })
-
-      try {
-        const assetId = await processItem(item)
-        await prisma.batchImportItem.update({
-          where: { id: item.id },
-          data: {
-            status: 'COMPLETED',
-            error: null,
-            createdAssetId: assetId,
-            archiveFile: `${slugify(item.folderName)}.rar`
-          }
-        })
-        console.log(`[BatchWorker] ✅ Item #${item.id} completado → asset=${assetId}`)
-      } catch (err) {
-        console.error(`[BatchWorker] ❌ Item #${item.id} falló:`, err.message)
-        await prisma.batchImportItem.update({
-          where: { id: item.id },
-          data: {
-            status: 'FAILED',
-            error: String(err.message || err).slice(0, 500),
-            mainStatus: 'ERROR',
-          }
-        })
+      if (nextMainItem) {
+        await processMainQueueItem(nextMainItem)
+        await sleep(1500)
+        continue
       }
 
-      await sleep(2000)
+      // Fase 2: cuando no quedan MAIN pendientes, correr BACKUPS de los que ya completaron MAIN.
+      const nextBackupItem = await prisma.batchImportItem.findFirst({
+        where: {
+          status: 'COMPLETED',
+          backupStatus: 'PENDING',
+          createdAssetId: { not: null },
+        },
+        orderBy: { createdAt: 'asc' },
+      })
+
+      if (nextBackupItem) {
+        await processBackupsForCompletedItem(nextBackupItem)
+        await sleep(1500)
+        continue
+      }
+
+      await sleep(POLL_INTERVAL_MS)
     } catch (err) {
       console.error('[BatchWorker] Error no controlado:', err.message)
       await sleep(POLL_INTERVAL_MS)

@@ -7,6 +7,67 @@ const prisma = new PrismaClient();
 const UPLOADS_DIR = path.resolve('uploads');
 const BATCH_DIR = path.join(UPLOADS_DIR, 'batch_imports');
 const ARCHIVE_EXTS = ['.rar', '.zip', '.7z', '.tar', '.gz', '.tgz'];
+const TITLE_PREFIX_RE = /^\s*STL\s*-\s*/i;
+
+function normalizeBaseTitle(raw, fallback = 'Asset') {
+  const cleaned = String(raw || '').replace(TITLE_PREFIX_RE, '').trim();
+  return cleaned || fallback;
+}
+
+function normalizeTitleKey(raw) {
+  return normalizeBaseTitle(raw, '').toLowerCase();
+}
+
+function buildAssetTitle(baseTitle) {
+  return `STL - ${String(baseTitle || '').trim()}`;
+}
+
+async function assetTitleExists(baseTitle) {
+  const full = buildAssetTitle(baseTitle);
+  const existing = await prisma.asset.findFirst({
+    where: {
+      OR: [{ title: full }, { titleEn: full }],
+    },
+    select: { id: true },
+  });
+  return !!existing;
+}
+
+async function buildReservedBatchTitleSet(skipIds = []) {
+  const skip = Array.isArray(skipIds) ? skipIds.map(Number).filter((n) => Number.isFinite(n) && n > 0) : [];
+  const existingItems = await prisma.batchImportItem.findMany({
+    where: {
+      id: skip.length ? { notIn: skip } : undefined,
+      status: { in: ['DRAFT', 'QUEUED', 'PROCESSING', 'COMPLETED'] },
+    },
+    select: { title: true, folderName: true },
+  });
+
+  const used = new Set();
+  for (const row of existingItems) {
+    const key = normalizeTitleKey(row?.title || row?.folderName || '');
+    if (key) used.add(key);
+  }
+  return used;
+}
+
+async function ensureUniqueBatchTitle(rawTitle, reservedKeys) {
+  const base = normalizeBaseTitle(rawTitle);
+  let attempt = 1;
+  while (attempt <= 500) {
+    const candidate = attempt === 1 ? base : `${base}${attempt}`;
+    const key = normalizeTitleKey(candidate);
+    const usedByBatch = key && reservedKeys?.has(key);
+    const usedByAsset = await assetTitleExists(candidate);
+
+    if (!usedByBatch && !usedByAsset) {
+      if (key) reservedKeys?.add(key);
+      return candidate;
+    }
+    attempt += 1;
+  }
+  throw new Error('No se pudo generar un título único para batch');
+}
 
 // Resolver la ruta de 7z según el SO
 const SEVEN_ZIP = (() => {
@@ -72,6 +133,7 @@ export const scanLocalDirectory = async (req, res) => {
     }
 
     let newlyQueuedCount = 0;
+    const reservedKeys = await buildReservedBatchTitleSet();
 
     for (const folder of folders) {
       // Find or create the master BatchImport record
@@ -103,7 +165,40 @@ export const scanLocalDirectory = async (req, res) => {
           where: { batchId: batch.id, folderName: assetFolder }
         });
 
+        const rawBaseTitle = assetFolder ? assetFolder.replace(/_/g, ' ') : folder.replace(/_/g, ' ');
+
+        if (existingItem) {
+          // Si ya existe en DRAFT o FAILED, corregir nombre y dejarlo listo para reintento.
+          if (existingItem.status === 'DRAFT' || existingItem.status === 'FAILED') {
+            const ownTitle = String(existingItem.title || rawBaseTitle || '').trim();
+            const currentKey = normalizeTitleKey(ownTitle);
+            if (currentKey) reservedKeys.delete(currentKey);
+            const uniqueTitle = await ensureUniqueBatchTitle(ownTitle || rawBaseTitle, reservedKeys);
+
+            const updateData = {
+              title: uniqueTitle,
+            };
+
+            if (existingItem.status === 'FAILED') {
+              updateData.status = 'DRAFT';
+              updateData.error = null;
+              updateData.mainStatus = 'PENDING';
+              updateData.backupStatus = 'PENDING';
+              updateData.mainProgress = 0;
+            }
+
+            await prisma.batchImportItem.update({
+              where: { id: existingItem.id },
+              data: updateData,
+            });
+          }
+          itemsCount++;
+          continue;
+        }
+
         if (!existingItem) {
+          const uniqueTitle = await ensureUniqueBatchTitle(rawBaseTitle, reservedKeys);
+
           // Calculate size
           const assetPath = path.join(batchPath, assetFolder);
           let pesoMB = 0;
@@ -141,7 +236,7 @@ export const scanLocalDirectory = async (req, res) => {
             data: {
               batchId: batch.id,
               folderName: assetFolder, // Si es '', el worker apuntará directo al batchFolder
-              title: assetFolder ? assetFolder.replace(/_/g, ' ') : folder.replace(/_/g, ' '),
+              title: uniqueTitle,
               pesoMB,
               images: images.length > 0 ? images : [],
               // MOCK FASE 2: Sugerencias "IA" quemadas
@@ -227,21 +322,44 @@ export const confirmBatchItems = async (req, res) => {
       return res.status(400).json({ success: false, message: 'itemIds requerido' });
     }
 
-    const items = await prisma.batchImportItem.findMany({
-      where: { id: { in: itemIds.map(Number) } }
-    });
-
-    let confirmed = 0;
-    for (const item of items) {
-      if (!item.targetAccount) continue;
-      await prisma.batchImportItem.update({
-        where: { id: item.id },
-        data: { status: 'QUEUED', error: null, mainStatus: 'PENDING', backupStatus: 'PENDING', mainProgress: 0 }
-      });
-      confirmed++;
+    const normalizedIds = itemIds.map(Number).filter((n) => Number.isFinite(n) && n > 0);
+    if (!normalizedIds.length) {
+      return res.status(400).json({ success: false, message: 'itemIds inválido' });
     }
 
-    return res.json({ success: true, confirmed });
+    const items = await prisma.batchImportItem.findMany({
+      where: { id: { in: normalizedIds } },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const reservedKeys = await buildReservedBatchTitleSet(normalizedIds);
+
+    let confirmed = 0;
+    const renamed = [];
+    for (const item of items) {
+      if (!item.targetAccount) continue;
+
+      const desired = item.title || item.folderName || `Asset ${item.id}`;
+      const uniqueTitle = await ensureUniqueBatchTitle(desired, reservedKeys);
+
+      await prisma.batchImportItem.update({
+        where: { id: item.id },
+        data: {
+          title: uniqueTitle,
+          status: 'QUEUED',
+          error: null,
+          mainStatus: 'PENDING',
+          backupStatus: 'PENDING',
+          mainProgress: 0,
+        }
+      });
+      confirmed++;
+      if (uniqueTitle !== String(desired || '').trim()) {
+        renamed.push({ id: item.id, from: String(desired || '').trim(), to: uniqueTitle });
+      }
+    }
+
+    return res.json({ success: true, confirmed, renamed });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
