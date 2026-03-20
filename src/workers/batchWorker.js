@@ -834,7 +834,8 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
   const payload = decryptToJson(creds.encData, creds.encIv, creds.encTag)
   const remoteBase = (account.baseFolder || '/').replace(/\\/g, '/')
   const remotePath = path.posix.join(remoteBase, slug)
-  const ctx = `batch-${role} accId=${account.id} alias=${account.alias || '--'}`
+  const itemIdCtx = Number(account.__batchItemId || 0)
+  const ctx = `batch-${role} item=${itemIdCtx || '-'} accId=${account.id} alias=${account.alias || '--'}`
   const accountIdNum = Number(account.id) || 0
   if (!fs.existsSync(archivePath)) throw new Error('Local archive not found: ' + archivePath)
   const archiveSizeMb = fs.statSync(archivePath).size / (1024 * 1024)
@@ -1145,7 +1146,15 @@ async function processMainQueueItem(item) {
     console.log(`[BATCH][MAIN][OK] item=${item.id} asset=${asset.id}`)
   } catch (err) {
     const msg = String(err?.message || err).slice(0, 500)
-    console.error(`[BATCH][MAIN][FAIL] item=${item.id}:`, msg)
+    const accId = Number(ctx?.mainAccount?.id || item?.targetAccount || 0) || '-'
+    const folderName = String(item?.folderName || '').trim() || '-'
+    const slug = String(ctx?.slug || '').trim() || '-'
+    const stackTop = String(err?.stack || '').split('\n').slice(0, 3).join(' | ').slice(0, 500)
+
+    console.error(`[BATCH][MAIN][FAIL] item=${item.id} acc=${accId} folder=${folderName} slug=${slug} err=${msg}`)
+    if (stackTop) {
+      console.error(`[BATCH][MAIN][ERROR_STACK] item=${item.id} ${stackTop}`)
+    }
     await updateItem({
       status: 'FAILED',
       mainStatus: 'ERROR',
