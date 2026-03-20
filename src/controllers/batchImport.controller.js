@@ -532,6 +532,7 @@ export const scanLocalDirectory = async (req, res) => {
     console.info(`[BATCH SCAN][DISCOVERY] items preparados para IA=${aiScannedItems.length} nuevos=${newlyQueuedCount}`);
 
     let aiTimedOut = false;
+    let aiApplyDeferred = false;
     try {
       const [categoriesCatalog, tagsCatalog] = await Promise.all([
         prisma.category.findMany({
@@ -552,27 +553,16 @@ export const scanLocalDirectory = async (req, res) => {
         categories: categoriesCatalog,
         tags: tagsCatalog,
       });
-      const aiTimeoutMs = Math.max(10_000, Number(process.env.BATCH_SCAN_AI_TIMEOUT_MS) || 45_000);
+      const rawTimeout = Number(process.env.BATCH_SCAN_AI_TIMEOUT_MS || 45_000);
+      const aiTimeoutMs = Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 0;
       console.info(`[BATCH SCAN][AI] iniciando clasificación items=${aiScannedItems.length} timeoutMs=${aiTimeoutMs}`);
-      let aiResult = [];
-      try {
-        aiResult = await withTimeout(
-          callGoogleBatchScan(aiPayload),
-          aiTimeoutMs,
-          'BATCH_AI_SCAN_TIMEOUT'
-        );
-      } catch (aiErr) {
-        aiTimedOut = String(aiErr?.code || aiErr?.message || '').includes('BATCH_AI_SCAN_TIMEOUT');
-        if (aiTimedOut) {
-          console.warn(`[BATCH][AI][SCAN][TIMEOUT] timeoutMs=${aiTimeoutMs} items=${aiScannedItems.length}`);
-        } else {
-          console.error('[BATCH][AI][SCAN][WARN]', aiErr?.message || aiErr);
+      const applyAiSuggestions = async (rawSuggestions, { source = 'inline' } = {}) => {
+        const aiSuggestions = Array.isArray(rawSuggestions) ? rawSuggestions : [];
+        if (aiSuggestions.length <= 0) {
+          console.log(`[BATCH][AI][APPLY] source=${source} sugerencias=0`);
+          return { applied: 0, skipped: 0, failed: 0, total: 0 };
         }
-        aiResult = [];
-      }
 
-      const aiSuggestions = Array.isArray(aiResult) ? aiResult : [];
-      if (aiSuggestions.length > 0) {
         let applied = 0;
         let skipped = 0;
         let failed = 0;
@@ -635,7 +625,38 @@ export const scanLocalDirectory = async (req, res) => {
             });
           }
         }
-        console.log(`[BATCH][AI][APPLY] sugerencias aplicadas=${applied} skip=${skipped} fail=${failed} total=${aiSuggestions.length}`);
+        console.log(`[BATCH][AI][APPLY] source=${source} sugerencias aplicadas=${applied} skip=${skipped} fail=${failed} total=${aiSuggestions.length}`);
+        return { applied, skipped, failed, total: aiSuggestions.length };
+      };
+
+      const aiPromise = callGoogleBatchScan(aiPayload);
+      if (aiTimeoutMs > 0) {
+        try {
+          const aiResult = await withTimeout(
+            aiPromise,
+            aiTimeoutMs,
+            'BATCH_AI_SCAN_TIMEOUT'
+          );
+          await applyAiSuggestions(aiResult, { source: 'inline' });
+        } catch (aiErr) {
+          aiTimedOut = String(aiErr?.code || aiErr?.message || '').includes('BATCH_AI_SCAN_TIMEOUT');
+          if (aiTimedOut) {
+            aiApplyDeferred = true;
+            console.warn(`[BATCH][AI][SCAN][TIMEOUT] timeoutMs=${aiTimeoutMs} items=${aiScannedItems.length}`);
+
+            // Continuar en background y persistir cuando finalice, aunque la respuesta HTTP ya haya salido.
+            aiPromise
+              .then((lateResult) => applyAiSuggestions(lateResult, { source: 'deferred-timeout' }))
+              .catch((lateErr) => {
+                console.error('[BATCH][AI][DEFERRED][ERROR]', lateErr?.message || lateErr);
+              });
+          } else {
+            console.error('[BATCH][AI][SCAN][WARN]', aiErr?.message || aiErr);
+          }
+        }
+      } else {
+        const aiResult = await aiPromise;
+        await applyAiSuggestions(aiResult, { source: 'inline-no-timeout' });
       }
     } catch (e) {
       console.error('[BATCH][AI][SCAN][WARN]', e?.message || e);
@@ -662,7 +683,8 @@ export const scanLocalDirectory = async (req, res) => {
       newlyQueuedCount,
       deletedArchivesCount,
       processedArchivesCount: extractedArchivesThisRun.length,
-      aiTimedOut
+      aiTimedOut,
+      aiApplyDeferred
     });
 
   } catch (error) {
