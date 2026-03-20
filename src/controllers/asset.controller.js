@@ -10,7 +10,7 @@ import { startUploadsActive } from '../utils/uploadsActiveFlag.js';
 import { checkMegaLinkAlive } from '../utils/megaCheckFiles/megaLinkChecker.js';
 import { maybeCheckMegaOnVisit } from '../utils/megaCheckFiles/visitTriggeredMegaCheck.js';
 import { applyMegaProxy, listMegaProxies } from '../utils/megaProxy.js';
-import { GoogleGenAI } from '@google/genai';
+import { createPartFromBase64, GoogleGenAI, PartMediaResolutionLevel } from '@google/genai';
 
 const prisma = new PrismaClient();
 import { randomizeFreebies, getRandomizeFreebiesCountFromEnv } from '../utils/randomizeFreebies.js';
@@ -51,6 +51,25 @@ globalThis.__assetHashBackfillState = assetHashBackfillState;
 
 const ASSET_META_AI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
 const ASSET_DESCRIPTION_FALLBACK = 'No hay descripción de este producto.';
+const ASSET_DESCRIPTION_DB_SAFE_MAX = Math.max(90, Math.min(320, Number(process.env.ASSET_DESCRIPTION_MAX_CHARS) || 180));
+const ASSET_META_MAX_IMAGES_PER_ITEM = Math.max(1, Math.min(4, Number(process.env.ASSET_META_MAX_IMAGES_PER_ITEM) || 1));
+const ASSET_META_MAX_IMAGE_BYTES = Math.max(256 * 1024, (Number(process.env.ASSET_META_MAX_IMAGE_MB) || 4) * 1024 * 1024);
+const ASSET_META_MEDIA_RESOLUTION_RAW = String(process.env.ASSET_META_MEDIA_RESOLUTION || 'low').trim().toLowerCase();
+
+function resolveMetaMediaResolution(raw) {
+    if (raw === 'high') return PartMediaResolutionLevel.MEDIA_RESOLUTION_HIGH;
+    if (raw === 'medium') return PartMediaResolutionLevel.MEDIA_RESOLUTION_MEDIUM;
+    return PartMediaResolutionLevel.MEDIA_RESOLUTION_LOW;
+}
+
+const ASSET_META_MEDIA_RESOLUTION_LEVEL = resolveMetaMediaResolution(ASSET_META_MEDIA_RESOLUTION_RAW);
+const IMAGE_MIME_BY_EXT = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif',
+};
 
 function isMegaBatchQuietHoldActive(mainAccountId) {
     try {
@@ -681,6 +700,106 @@ function normalizeMetaText(value, maxLen = 380) {
     return `${txt.slice(0, Math.max(0, maxLen - 1)).trim()}…`;
 }
 
+function toUploadsRelativeImagePath(raw) {
+    let value = String(raw || '').trim();
+    if (!value) return '';
+
+    if (/^https?:\/\//i.test(value)) {
+        const marker = '/uploads/';
+        const idx = value.toLowerCase().indexOf(marker);
+        if (idx < 0) return '';
+        value = value.slice(idx + marker.length);
+    }
+
+    value = value.replace(/\\/g, '/').replace(/^\/+/, '');
+    if (value.toLowerCase().startsWith('uploads/')) {
+        value = value.slice('uploads/'.length);
+    }
+
+    if (!value || value.includes('..')) return '';
+    return value;
+}
+
+function collectAssetImageRelativePaths(asset) {
+    const rawImages = Array.isArray(asset?.images) ? asset.images : [];
+    const out = [];
+    const seen = new Set();
+
+    for (const entry of rawImages) {
+        const candidate = typeof entry === 'string'
+            ? entry
+            : (entry?.path || entry?.src || entry?.url || entry?.image || '');
+        const rel = toUploadsRelativeImagePath(candidate);
+        if (!rel || seen.has(rel)) continue;
+        seen.add(rel);
+        out.push(rel);
+        if (out.length >= ASSET_META_MAX_IMAGES_PER_ITEM) break;
+    }
+
+    return out;
+}
+
+function getImageMimeType(filePath) {
+    return IMAGE_MIME_BY_EXT[path.extname(String(filePath || '')).toLowerCase()] || null;
+}
+
+async function buildAssetImageParts(asset) {
+    const relPaths = collectAssetImageRelativePaths(asset);
+    const parts = [];
+    let attachedImages = 0;
+
+    for (const rel of relPaths) {
+        const abs = path.join(UPLOADS_DIR, rel);
+        const mimeType = getImageMimeType(abs);
+        if (!mimeType || !fs.existsSync(abs)) continue;
+
+        let stat = null;
+        try {
+            stat = fs.statSync(abs);
+        } catch {
+            stat = null;
+        }
+        if (!stat?.isFile() || stat.size <= 0 || stat.size > ASSET_META_MAX_IMAGE_BYTES) continue;
+
+        try {
+            const base64Data = fs.readFileSync(abs).toString('base64');
+            parts.push(createPartFromBase64(base64Data, mimeType, ASSET_META_MEDIA_RESOLUTION_LEVEL));
+            attachedImages += 1;
+        } catch (err) {
+            console.warn('[ASSETS][META][IMAGE_WARN]', rel, err?.message || err);
+        }
+    }
+
+    return { parts, attachedImages };
+}
+
+async function updateAssetDescriptionSafely(assetId, rawDescription) {
+    const base = String(rawDescription || '').trim() || ASSET_DESCRIPTION_FALLBACK;
+    const lengthCandidates = Array.from(new Set([
+        ASSET_DESCRIPTION_DB_SAFE_MAX,
+        Math.min(160, ASSET_DESCRIPTION_DB_SAFE_MAX),
+        120,
+        96,
+    ].filter((n) => Number.isFinite(n) && n > 20)));
+
+    let lastError = null;
+    for (const maxLen of lengthCandidates) {
+        const safe = normalizeMetaText(base, maxLen) || ASSET_DESCRIPTION_FALLBACK;
+        try {
+            await prisma.asset.update({
+                where: { id: Number(assetId) },
+                data: { description: safe },
+            });
+            return safe;
+        } catch (err) {
+            lastError = err;
+            if (err?.code !== 'P2000') throw err;
+        }
+    }
+
+    throw lastError || new Error('No se pudo guardar description en un tamaño permitido');
+}
+
 function parseJsonLoose(rawText) {
     const txt = String(rawText || '').trim();
     if (!txt) return null;
@@ -736,6 +855,7 @@ function buildAssetMetaInput(asset) {
         id: Number(asset?.id || 0) || null,
         titleEs: String(asset?.title || '').trim(),
         titleEn: String(asset?.titleEn || '').trim(),
+        imageHints: collectAssetImageRelativePaths(asset),
         categories,
         tags,
         currentDescription: String(asset?.description || '').trim(),
@@ -753,26 +873,31 @@ function getGeminiClient() {
     });
 }
 
-async function generateSeoDescriptionForAsset(assetInput) {
+async function generateSeoDescriptionForAsset(assetInput, assetRaw = null) {
     const fallback = ASSET_DESCRIPTION_FALLBACK;
     const ai = getGeminiClient();
     if (!ai) return fallback;
 
+    const { parts: imageParts, attachedImages } = await buildAssetImageParts(assetRaw);
+
     const prompt = [
         'Eres redactor SEO para tienda de modelos STL.',
-        'Genera una descripción corta en ESPAÑOL para ficha de producto.',
-        'Reglas: 2 a 3 frases, entre 120 y 260 caracteres, tono comercial natural, sin relleno, sin emojis, sin markdown.',
-        'Incluye intención de búsqueda y beneficio del modelo 3D, manteniendo texto claro y útil.',
+        'Genera una descripción SEO CORTA en ESPAÑOL para ficha de producto.',
+        'Debes analizar primero las imágenes adjuntas del asset (si existen).',
+        'Si no hay imágenes suficientes, usa título/categorías/tags como respaldo.',
+        `Reglas estrictas: 1 a 2 frases, entre 90 y ${ASSET_DESCRIPTION_DB_SAFE_MAX} caracteres, sin emojis, sin markdown, texto natural y útil.`,
+        'Debe ser breve, apta para SEO y para columna de base de datos limitada.',
         'Si falta contexto, escribe una descripción genérica breve y correcta.',
         'Responde SOLO JSON con forma: {"description":"..."}.',
         'Contexto:',
         JSON.stringify(assetInput, null, 2),
+        `Imágenes adjuntas: ${attachedImages}`,
     ].join('\n\n');
 
     try {
         const response = await ai.models.generateContent({
             model: ASSET_META_AI_MODEL,
-            contents: [prompt],
+            contents: [prompt, ...imageParts],
             config: {
                 responseMimeType: 'application/json',
                 responseJsonSchema: {
@@ -787,7 +912,7 @@ async function generateSeoDescriptionForAsset(assetInput) {
         });
 
         const parsed = parseJsonLoose(response?.text);
-        const desc = normalizeMetaText(parsed?.description || '', 420);
+        const desc = normalizeMetaText(parsed?.description || '', ASSET_DESCRIPTION_DB_SAFE_MAX);
         return desc || fallback;
     } catch (err) {
         console.warn('[ASSETS][META][DESCRIPTION_AI_WARN]', err?.message || err);
@@ -2310,7 +2435,7 @@ export const updateAsset = async (req, res) => {
         const data = {};
         if (title !== undefined) data.title = String(title);
         if (titleEn !== undefined) data.titleEn = String(titleEn);
-        if (description !== undefined) data.description = normalizeMetaText(String(description), 1200) || null;
+        if (description !== undefined) data.description = normalizeMetaText(String(description), ASSET_DESCRIPTION_DB_SAFE_MAX) || null;
         if (typeof isPremium !== 'undefined')
             data.isPremium = Boolean(isPremium);
 
@@ -2376,26 +2501,33 @@ export const generateAssetMetaDescriptions = async (req, res) => {
         }
 
         let updated = 0;
+        let failed = 0;
         const details = [];
 
         for (const asset of targets) {
-            const input = buildAssetMetaInput(asset);
-            const generated = await generateSeoDescriptionForAsset(input);
-            const finalDescription = normalizeMetaText(generated || ASSET_DESCRIPTION_FALLBACK, 1200) || ASSET_DESCRIPTION_FALLBACK;
+            try {
+                const input = buildAssetMetaInput(asset);
+                const generated = await generateSeoDescriptionForAsset(input, asset);
+                const finalDescription = await updateAssetDescriptionSafely(asset.id, generated || ASSET_DESCRIPTION_FALLBACK);
 
-            await prisma.asset.update({
-                where: { id: asset.id },
-                data: { description: finalDescription },
-            });
-
-            updated += 1;
-            details.push({ id: asset.id, description: finalDescription });
+                updated += 1;
+                details.push({ id: asset.id, description: finalDescription, updated: true });
+            } catch (itemErr) {
+                failed += 1;
+                details.push({
+                    id: asset.id,
+                    updated: false,
+                    error: String(itemErr?.message || itemErr || 'ERROR_GENERATING_DESCRIPTION'),
+                });
+                console.warn('[ASSETS][META][DESCRIPTION_ITEM_FAIL]', `asset=${asset.id}`, itemErr?.message || itemErr);
+            }
         }
 
         return res.json({
             success: true,
             processed: targets.length,
             updated,
+            failed,
             items: details,
         });
     } catch (e) {
@@ -5619,6 +5751,7 @@ export const latestAssets = async (req, res) => {
                 slug: true,
                 title: true,
                 titleEn: true,
+                description: true,
                 images: true,
                 isPremium: true,
                 createdAt: true,
@@ -6040,6 +6173,7 @@ export const searchAssets = async (req, res) => {
       slug: true,
       title: true,
       titleEn: true,
+            description: true,
       images: true,
       isPremium: true,
       downloads: true,

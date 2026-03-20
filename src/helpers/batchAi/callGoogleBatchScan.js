@@ -326,6 +326,59 @@ function ensureBilingualName(raw) {
   }
 }
 
+function toTitleCase(raw) {
+  return String(raw || '')
+    .split(' ')
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ')
+    .trim()
+}
+
+function cleanupAssetName(raw, fallback = 'asset') {
+  const cleaned = String(raw || '')
+    .replace(/\.(zip|rar|7z|7zs|tar|gz|tgz)(\d+)?$/i, '')
+    .replace(/[\[\](){}]/g, ' ')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b(v\d+|final|fix|stl|3d|model|modelo|pack|bundle|archivo|file)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  return toTitleCase(cleaned || String(fallback || 'asset'))
+}
+
+function seemsNoisyName(value) {
+  const txt = String(value || '').trim()
+  if (!txt) return true
+  if (/[_.\-]{2,}/.test(txt)) return true
+  if (/\.(zip|rar|7z|7zs|tar|gz|tgz)(\d+)?$/i.test(txt)) return true
+  if (/\b(v\d+|final|fix)\b/i.test(txt)) return true
+  return false
+}
+
+function refineSuggestedNamePair(namePair, item) {
+  const source = pickFirstNonEmpty(item?.sourceTitle, item?.assetName, item?.sourcePathHint, 'asset')
+  const sourceKey = normalizeText(source)
+
+  let es = pickFirstNonEmpty(namePair?.es, source)
+  let en = pickFirstNonEmpty(namePair?.en, es)
+
+  const esKey = normalizeText(es)
+  const enKey = normalizeText(en)
+  const reusesSource = esKey && enKey && esKey === sourceKey && enKey === sourceKey
+
+  if (reusesSource || seemsNoisyName(es) || seemsNoisyName(en)) {
+    const cleanSource = cleanupAssetName(source, 'Asset')
+    if (reusesSource || seemsNoisyName(es)) es = cleanSource
+    if (reusesSource || seemsNoisyName(en)) en = cleanSource
+  }
+
+  return {
+    es: pickFirstNonEmpty(es, 'Asset'),
+    en: pickFirstNonEmpty(en, es, 'Asset'),
+  }
+}
+
 function ensureBilingualDescription(raw, fallbackEs, fallbackEn) {
   if (raw && typeof raw === 'object') {
     const es = pickFirstNonEmpty(raw.es, raw.descriptionEs, raw.descripcionEs, raw.description)
@@ -626,6 +679,8 @@ async function classifySingleItem(ai, payload, item) {
     'Si un tag equivalente ya existe en el catalogo en espanol o en ingles, devuelve exactamente ese mismo par es/en del catalogo.',
     'Si realmente no existe equivalente en el catalogo, propone tag nuevo tambien en formato bilingue (es/en).',
     'El nombre del asset debe devolverse SIEMPRE bilingue en el objeto nombre: { es, en }.',
+    'IMPORTANTE PARA NOMBRE: no copies literalmente sourceTitle/sourcePathHint cuando vengan feos (guiones, underscores, versionado, extensiones, ruido tecnico).',
+    'Debes proponer un nombre limpio y comercial, corto (3-9 palabras), legible para tienda.',
     'La categoria debe devolverse SIEMPRE bilingue en el objeto categoria: { es, en }.',
     'La descripcion debe devolverse SIEMPRE bilingue en el objeto descripcion: { es, en }.',
     'Responde SOLO JSON valido, sin markdown ni texto extra, usando EXACTAMENTE esta forma:',
@@ -716,7 +771,7 @@ async function classifySingleItem(ai, payload, item) {
 
   return {
     results: normalized.map((entry) => {
-    const namePair = ensureBilingualName(entry?.nombre)
+    const namePair = refineSuggestedNamePair(ensureBilingualName(entry?.nombre), item)
     const category = normalizeCategory(entry?.categoria, payload, matchers)
     const tags = normalizeTags(entry?.tags, matchers)
     const descriptionPair = ensureBilingualDescription(

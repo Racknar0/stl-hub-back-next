@@ -48,6 +48,25 @@ function normalizeTitleKey(raw) {
   return normalizeBaseTitle(raw, '').toLowerCase();
 }
 
+function toTitleCase(raw) {
+  return String(raw || '')
+    .split(' ')
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ')
+    .trim();
+}
+
+function beautifySuggestedTitle(raw, fallback = 'Asset') {
+  const normalized = normalizeBaseTitle(raw, fallback)
+    .replace(/[\[\](){}]/g, ' ')
+    .replace(/\b(v\d+|final|fix|stl|3d|model|modelo|pack|bundle|archivo|file)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return toTitleCase(normalized || normalizeBaseTitle(fallback, 'Asset'));
+}
+
 function buildAssetTitle(baseTitle) {
   return `STL - ${String(baseTitle || '').trim()}`;
 }
@@ -327,6 +346,13 @@ async function applyAiSuggestionsToBatchItems(rawSuggestions, { source = 'manual
     return { applied: 0, skipped: 0, failed: 0, total: 0 };
   }
 
+  const suggestionItemIds = Array.from(new Set(
+    aiSuggestions
+      .map((s) => Number(s?.itemId || 0))
+      .filter((n) => Number.isFinite(n) && n > 0)
+  ));
+  const reservedKeys = await buildReservedBatchTitleSet(suggestionItemIds);
+
   let applied = 0;
   let skipped = 0;
   let failed = 0;
@@ -335,9 +361,33 @@ async function applyAiSuggestionsToBatchItems(rawSuggestions, { source = 'manual
     const itemId = Number(suggestion?.itemId || 0);
     if (!itemId) continue;
 
+    const current = await prisma.batchImportItem.findUnique({
+      where: { id: itemId },
+      select: { id: true, status: true, title: true, titleEn: true, folderName: true },
+    });
+
+    if (!current) {
+      skipped += 1;
+      continue;
+    }
+
+    const statusNow = String(current.status || '').toUpperCase();
+    if (!['DRAFT', 'FAILED', 'PENDING'].includes(statusNow)) {
+      skipped += 1;
+      continue;
+    }
+
     const nameEs = String(suggestion?.nombre?.es || '').trim();
     const nameEn = String(suggestion?.nombre?.en || '').trim();
-    const safeName = normalizeBilingualTitlePair(nameEs, nameEn, 'Asset');
+    const fallbackBase = current.title || current.folderName || 'Asset';
+    let safeName = normalizeBilingualTitlePair(nameEs, nameEn, fallbackBase);
+    if (normalizeTitleKey(safeName.es) === normalizeTitleKey(fallbackBase)) {
+      const pretty = beautifySuggestedTitle(fallbackBase, 'Asset');
+      safeName = normalizeBilingualTitlePair(pretty, safeName.en || pretty, pretty);
+    }
+
+    const uniqueEs = await ensureUniqueBatchTitle(safeName.es, reservedKeys);
+    safeName = normalizeBilingualTitlePair(uniqueEs, safeName.en || uniqueEs, uniqueEs);
 
     const tags = Array.isArray(suggestion?.tags)
       ? suggestion.tags.slice(0, 3)
@@ -364,22 +414,6 @@ async function applyAiSuggestionsToBatchItems(rawSuggestions, { source = 'manual
     }
 
     try {
-      const current = await prisma.batchImportItem.findUnique({
-        where: { id: itemId },
-        select: { id: true, status: true },
-      });
-
-      if (!current) {
-        skipped += 1;
-        continue;
-      }
-
-      const statusNow = String(current.status || '').toUpperCase();
-      if (!['DRAFT', 'FAILED', 'PENDING'].includes(statusNow)) {
-        skipped += 1;
-        continue;
-      }
-
       await prisma.batchImportItem.update({
         where: { id: itemId },
         data,
@@ -860,12 +894,47 @@ export const retryBatchAiFailedItems = async (req, res) => {
 export const updateBatchItem = async (req, res) => {
   try {
     const { id } = req.params;
+    const itemId = Number(id);
+    if (!Number.isFinite(itemId) || itemId <= 0) {
+      return res.status(400).json({ success: false, message: 'id invalido' });
+    }
+
     const { targetAccount, title, titleEn, description, descriptionEn, tags, categories, similarityApproved } = req.body;
+
+    const current = await prisma.batchImportItem.findUnique({
+      where: { id: itemId },
+      select: { id: true, status: true, title: true, titleEn: true, folderName: true },
+    });
+
+    if (!current) {
+      return res.status(404).json({ success: false, message: 'Item no encontrado' });
+    }
 
     const data = {};
     if (targetAccount !== undefined) data.targetAccount = Number(targetAccount) || null;
-    if (title !== undefined) data.title = title;
-    if (titleEn !== undefined) data.titleEn = titleEn;
+
+    const hasIncomingTitle = title !== undefined || titleEn !== undefined;
+    if (hasIncomingTitle) {
+      const statusNow = String(current.status || '').toUpperCase();
+      const shouldEnsureUnique = ['DRAFT', 'FAILED', 'PENDING', 'QUEUED'].includes(statusNow);
+      const requestedBase = String(
+        title !== undefined
+          ? title
+          : (titleEn !== undefined ? titleEn : (current.title || current.folderName || 'Asset'))
+      ).trim();
+
+      if (shouldEnsureUnique) {
+        const reservedKeys = await buildReservedBatchTitleSet([itemId]);
+        const uniqueEs = await ensureUniqueBatchTitle(requestedBase, reservedKeys);
+        const pair = normalizeBilingualTitlePair(uniqueEs, String(titleEn ?? current.titleEn ?? uniqueEs).trim(), uniqueEs);
+        data.title = pair.es;
+        data.titleEn = pair.en;
+      } else {
+        if (title !== undefined) data.title = title;
+        if (titleEn !== undefined) data.titleEn = titleEn;
+      }
+    }
+
     if (description !== undefined) data.description = String(description || '').trim() || null;
     if (descriptionEn !== undefined) data.descriptionEn = String(descriptionEn || '').trim() || null;
     if (tags !== undefined) data.tags = normalizeBatchTags(tags, 3);
@@ -873,7 +942,7 @@ export const updateBatchItem = async (req, res) => {
     if (similarityApproved !== undefined) data.similarityApproved = !!similarityApproved;
 
     const updated = await prisma.batchImportItem.update({
-      where: { id: Number(id) },
+      where: { id: itemId },
       data
     });
 
