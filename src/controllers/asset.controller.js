@@ -2860,6 +2860,9 @@ const buildUploaderScpCommands = ({ host, user, port, remoteBase, batchId }) => 
 
 const buildBatchScpCommands = ({ host, user, port, remoteBase, filename }) => {
     const remoteBatchImportsDir = `${remoteBase}/uploads/batch_imports`;
+    const wslBatchDir = String(process.env.SCP_WSL_BATCH_DIR || '/mnt/c/stl-hub/super-batch')
+        .trim()
+        .replace(/\\/g, '/');
     const safeFile = String(filename || '').trim().replace(/["\\]/g, '_').replace(/[\r\n]+/g, ' ')
     return {
         remoteBatchImportsDir,
@@ -2868,24 +2871,21 @@ const buildBatchScpCommands = ({ host, user, port, remoteBase, filename }) => {
             ? `cd C:\\stl-hub\\super-batch; scp -P ${port} "${safeFile}" ${user}@${host}:${remoteBatchImportsDir}/`
             : '',
         folderContentCmd: `cd C:\\stl-hub\\super-batch; scp -P ${port} -r .\\* ${user}@${host}:${remoteBatchImportsDir}/`,
+        rsyncWslFileCmd: safeFile
+            ? `rsync -avh --progress --partial --append-verify -e "ssh -p ${port}" "${wslBatchDir}/${safeFile}" ${user}@${host}:${remoteBatchImportsDir}/`
+            : '',
+        rsyncWslFolderCmd: `rsync -avh --progress --partial --append-verify -e "ssh -p ${port}" "${wslBatchDir}/" ${user}@${host}:${remoteBatchImportsDir}/`,
         winscpKeepupCmd: `Set-Location g:\\STLHUB; powershell -ExecutionPolicy Bypass -File .\\tools\\winscp-keepup.ps1 -BatchFolderName "super-batch" -LocalRoot "C:\\stl-hub" -HostName "${host}" -Port ${port} -UserName "${user}" -RemotePath "${remoteBatchImportsDir}"`,
     };
 };
 
 // POST /api/assets/scp-command (admin-only)
-// Devuelve comandos SCP calculados en backend y desbloqueados por PIN.
+// Devuelve comandos SCP/WSL-RSYNC calculados en backend.
 // Body:
-//  - pin: string (requerido)
 //  - mode: 'uploader' | 'batch' (default: 'uploader')
 //  - batchId?: string (solo uploader)
 export const getScpCommand = async (req, res) => {
     try {
-        const providedPin = String(req.body?.pin || '').trim();
-        const expectedPin = String(process.env.SCP_UNLOCK_PIN || process.env.SCP_PIN || '1991').trim();
-        if (!providedPin || providedPin !== expectedPin) {
-            return res.status(403).json({ message: 'PIN inválido' });
-        }
-
         const mode = String(req.body?.mode || 'uploader').toLowerCase();
         if (mode !== 'uploader' && mode !== 'batch') {
             return res.status(400).json({ message: 'mode inválido (uploader|batch)' });
