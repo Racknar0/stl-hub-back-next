@@ -629,14 +629,8 @@ export async function callGoogleBatchScan(payload) {
       }
     }
 
-    console.log('[BATCH][AI][RESULT]')
-    console.log(util.inspect(normalized, {
-      depth: null,
-      colors: false,
-      maxArrayLength: null,
-      maxStringLength: null,
-      compact: false,
-    }))
+    // Evento JSON para que el front lo pueda formatear de forma legible por item.
+    console.log('[BATCH][AI][RESULT_JSON]', JSON.stringify(normalized))
 
     console.info(`[BATCH][AI][DONE] itemsProcesados=${done}/${scannedItems.length || 0} sugerencias=${normalized.length}`)
 

@@ -14,7 +14,13 @@ const TITLE_PREFIX_RE = /^\s*STL\s*-\s*/i;
 const MAX_ACCOUNT_UPLOAD_MB = Number(process.env.BATCH_ACCOUNT_MAX_MB) || (19 * 1024);
 
 function normalizeBaseTitle(raw, fallback = 'Asset') {
-  const cleaned = String(raw || '').replace(TITLE_PREFIX_RE, '').trim();
+  const cleaned = String(raw || '')
+    .replace(TITLE_PREFIX_RE, '')
+    // Quitar extensiones típicas de archivos comprimidos al final del título.
+    .replace(/\.(zip|rar|7z|7zs|tar|gz|tgz)(\d+)?$/i, '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   return cleaned || fallback;
 }
 
@@ -144,7 +150,7 @@ async function ensureUniqueBatchTitle(rawTitle, reservedKeys) {
   const base = normalizeBaseTitle(rawTitle);
   let attempt = 1;
   while (attempt <= 500) {
-    const candidate = attempt === 1 ? base : `${base}${attempt}`;
+    const candidate = attempt === 1 ? base : `${base} ${attempt}`;
     const key = normalizeTitleKey(candidate);
     const usedByBatch = key && reservedKeys?.has(key);
     const usedByAsset = await assetTitleExists(candidate);
