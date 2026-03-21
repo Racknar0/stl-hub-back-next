@@ -52,7 +52,6 @@ globalThis.__assetHashBackfillState = assetHashBackfillState;
 const ASSET_META_AI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
 const ASSET_DESCRIPTION_FALLBACK = 'No hay descripción de este producto.';
 const ASSET_DESCRIPTION_EN_FALLBACK = 'No description available for this product.';
-const ASSET_DESCRIPTION_DB_SAFE_MAX = Math.max(90, Math.min(320, Number(process.env.ASSET_DESCRIPTION_MAX_CHARS) || 180));
 const ASSET_META_MAX_IMAGES_PER_ITEM = Math.max(1, Math.min(4, Number(process.env.ASSET_META_MAX_IMAGES_PER_ITEM) || 1));
 const ASSET_META_MAX_IMAGE_BYTES = Math.max(256 * 1024, (Number(process.env.ASSET_META_MAX_IMAGE_MB) || 4) * 1024 * 1024);
 const ASSET_META_MEDIA_RESOLUTION_RAW = String(process.env.ASSET_META_MEDIA_RESOLUTION || 'low').trim().toLowerCase();
@@ -701,6 +700,10 @@ function normalizeMetaText(value, maxLen = 380) {
     return `${txt.slice(0, Math.max(0, maxLen - 1)).trim()}…`;
 }
 
+function normalizeDescriptionText(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
 function toUploadsRelativeImagePath(raw) {
     let value = String(raw || '').trim();
     if (!value) return '';
@@ -775,62 +778,25 @@ async function buildAssetImageParts(asset) {
 }
 
 async function updateAssetDescriptionSafely(assetId, rawDescription) {
-    const base = String(rawDescription || '').trim() || ASSET_DESCRIPTION_FALLBACK;
-    const lengthCandidates = Array.from(new Set([
-        ASSET_DESCRIPTION_DB_SAFE_MAX,
-        Math.min(160, ASSET_DESCRIPTION_DB_SAFE_MAX),
-        120,
-        96,
-    ].filter((n) => Number.isFinite(n) && n > 20)));
-
-    let lastError = null;
-    for (const maxLen of lengthCandidates) {
-        const safe = normalizeMetaText(base, maxLen) || ASSET_DESCRIPTION_FALLBACK;
-        try {
-            await prisma.asset.update({
-                where: { id: Number(assetId) },
-                data: { description: safe },
-            });
-            return safe;
-        } catch (err) {
-            lastError = err;
-            if (err?.code !== 'P2000') throw err;
-        }
-    }
-
-    throw lastError || new Error('No se pudo guardar description en un tamaño permitido');
+    const safe = normalizeDescriptionText(rawDescription) || ASSET_DESCRIPTION_FALLBACK;
+    await prisma.asset.update({
+        where: { id: Number(assetId) },
+        data: { description: safe },
+    });
+    return safe;
 }
 
 async function updateAssetDescriptionsSafely(assetId, rawDescriptionEs, rawDescriptionEn) {
-    const baseEs = String(rawDescriptionEs || '').trim() || ASSET_DESCRIPTION_FALLBACK;
-    const baseEn = String(rawDescriptionEn || '').trim() || ASSET_DESCRIPTION_EN_FALLBACK;
-    const lengthCandidates = Array.from(new Set([
-        ASSET_DESCRIPTION_DB_SAFE_MAX,
-        Math.min(160, ASSET_DESCRIPTION_DB_SAFE_MAX),
-        120,
-        96,
-    ].filter((n) => Number.isFinite(n) && n > 20)));
-
-    let lastError = null;
-    for (const maxLen of lengthCandidates) {
-        const safeEs = normalizeMetaText(baseEs, maxLen) || ASSET_DESCRIPTION_FALLBACK;
-        const safeEn = normalizeMetaText(baseEn, maxLen) || ASSET_DESCRIPTION_EN_FALLBACK;
-        try {
-            await prisma.asset.update({
-                where: { id: Number(assetId) },
-                data: {
-                    description: safeEs,
-                    descriptionEn: safeEn,
-                },
-            });
-            return { description: safeEs, descriptionEn: safeEn };
-        } catch (err) {
-            lastError = err;
-            if (err?.code !== 'P2000') throw err;
-        }
-    }
-
-    throw lastError || new Error('No se pudo guardar description bilingue en un tamaño permitido');
+    const safeEs = normalizeDescriptionText(rawDescriptionEs) || ASSET_DESCRIPTION_FALLBACK;
+    const safeEn = normalizeDescriptionText(rawDescriptionEn) || ASSET_DESCRIPTION_EN_FALLBACK;
+    await prisma.asset.update({
+        where: { id: Number(assetId) },
+        data: {
+            description: safeEs,
+            descriptionEn: safeEn,
+        },
+    });
+    return { description: safeEs, descriptionEn: safeEn };
 }
 
 function parseJsonLoose(rawText) {
@@ -922,8 +888,8 @@ async function generateSeoDescriptionForAsset(assetInput, assetRaw = null) {
         'Genera descripción SEO CORTA bilingüe (ES + EN) para ficha de producto.',
         'Debes analizar primero las imágenes adjuntas del asset (si existen).',
         'Si no hay imágenes suficientes, usa título/categorías/tags como respaldo.',
-        `Reglas estrictas para cada idioma: 1 a 2 frases, entre 90 y ${ASSET_DESCRIPTION_DB_SAFE_MAX} caracteres, sin emojis, sin markdown, texto natural y útil.`,
-        'Debe ser breve, apta para SEO y para columna de base de datos limitada.',
+        'Reglas estrictas para cada idioma: 1 a 2 frases, sin emojis, sin markdown, texto natural y útil.',
+        'Debe ser breve y apta para SEO.',
         'Si falta contexto, escribe una descripción genérica breve y correcta.',
         'Responde SOLO JSON con forma: {"description":{"es":"...","en":"..."}}.',
         'Contexto:',
@@ -964,8 +930,8 @@ async function generateSeoDescriptionForAsset(assetInput, assetRaw = null) {
             ? parsed?.description?.en
             : '';
 
-        const descEs = normalizeMetaText(rawEs || '', ASSET_DESCRIPTION_DB_SAFE_MAX) || fallback.es;
-        const descEn = normalizeMetaText(rawEn || '', ASSET_DESCRIPTION_DB_SAFE_MAX) || fallback.en;
+        const descEs = normalizeDescriptionText(rawEs || '') || fallback.es;
+        const descEn = normalizeDescriptionText(rawEn || '') || fallback.en;
         return {
             es: descEs,
             en: descEn,
@@ -2491,8 +2457,8 @@ export const updateAsset = async (req, res) => {
         const data = {};
         if (title !== undefined) data.title = String(title);
         if (titleEn !== undefined) data.titleEn = String(titleEn);
-        if (description !== undefined) data.description = normalizeMetaText(String(description), ASSET_DESCRIPTION_DB_SAFE_MAX) || null;
-        if (descriptionEn !== undefined) data.descriptionEn = normalizeMetaText(String(descriptionEn), ASSET_DESCRIPTION_DB_SAFE_MAX) || null;
+        if (description !== undefined) data.description = normalizeDescriptionText(String(description)) || null;
+        if (descriptionEn !== undefined) data.descriptionEn = normalizeDescriptionText(String(descriptionEn)) || null;
         if (typeof isPremium !== 'undefined')
             data.isPremium = Boolean(isPremium);
 

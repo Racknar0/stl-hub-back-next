@@ -179,6 +179,12 @@ function truncateText(text, max = NOTIFICATION_BODY_MAX) {
   return `${s.slice(0, Math.max(0, max - 1))}…`
 }
 
+function normalizeMetaText(value) {
+  const plain = String(value || '').replace(/[\r\n\t]+/g, ' ')
+  const compact = plain.replace(/\s{2,}/g, ' ').trim()
+  return compact
+}
+
 async function notifyAutomation({ title, body, typeStatus = 'ERROR' }) {
   try {
     await prisma.notification.create({
@@ -981,8 +987,10 @@ async function createAssetRecord({ slug, title, titleEn, description, descriptio
   const fullTitle = await ensureUniqueAssetTitle(title)
   const fullTitleEn = ensurePrefixedTitle(titleEn || title)
   const archiveSizeB = BigInt(sizeBytes || 0)
-  const descriptionEs = String(description || '').trim()
-  const descriptionEnSafe = String(descriptionEn || '').trim()
+  const rawDescriptionEs = String(description || '').trim()
+  const rawDescriptionEn = String(descriptionEn || '').trim()
+  const descriptionEs = normalizeMetaText(rawDescriptionEs)
+  const descriptionEnSafe = normalizeMetaText(rawDescriptionEn)
 
   const data = {
     title: fullTitle,
