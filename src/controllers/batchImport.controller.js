@@ -314,12 +314,28 @@ const SEVEN_ZIP = (() => {
   return '7z';
 })();
 
-function run7z(args) {
+function run7z(args, options = {}) {
+  const onProgress = typeof options?.onProgress === 'function' ? options.onProgress : null;
   return new Promise((resolve, reject) => {
     // shell: false evita problemas de escape de rutas con espacios en Windows
     const child = spawn(SEVEN_ZIP, args, { shell: false });
     let out = '', err = '';
-    child.stdout.on('data', d => (out += d.toString()));
+    child.stdout.on('data', d => {
+      const txt = d.toString();
+      out += txt;
+      if (!onProgress) return;
+
+      const lines = txt.split(/\r?\n/).map((l) => String(l || '').trim()).filter(Boolean);
+      for (const ln of lines) {
+        const pctMatch = ln.match(/(\d{1,3})%/);
+        const pct = pctMatch ? Math.max(0, Math.min(100, Number(pctMatch[1] || 0))) : null;
+        const fileMatch = ln.match(/(?:extracting|extract)\s+(.+)$/i);
+        const file = fileMatch ? String(fileMatch[1] || '').trim() : '';
+        if (pct != null || file) {
+          try { onProgress({ percent: pct, file, line: ln, tool: '7z' }); } catch {}
+        }
+      }
+    });
     child.stderr.on('data', d => (err += d.toString()));
     child.on('error', (e) => reject(new Error(`Spawn error: ${e.message}`)));
     child.on('close', code => {
@@ -329,11 +345,25 @@ function run7z(args) {
   });
 }
 
-function runUnrar(args) {
+function runUnrar(args, options = {}) {
+  const onProgress = typeof options?.onProgress === 'function' ? options.onProgress : null;
   return new Promise((resolve, reject) => {
     const child = spawn('unrar', args, { shell: false });
     let out = '', err = '';
-    child.stdout.on('data', d => (out += d.toString()));
+    child.stdout.on('data', d => {
+      const txt = d.toString();
+      out += txt;
+      if (!onProgress) return;
+
+      const lines = txt.split(/\r?\n/).map((l) => String(l || '').trim()).filter(Boolean);
+      for (const ln of lines) {
+        const fileMatch = ln.match(/(?:extracting|extract)\s+(.+)$/i);
+        const file = fileMatch ? String(fileMatch[1] || '').trim() : '';
+        if (file) {
+          try { onProgress({ percent: null, file, line: ln, tool: 'unrar' }); } catch {}
+        }
+      }
+    });
     child.stderr.on('data', d => (err += d.toString()));
     child.on('error', (e) => reject(new Error(`Spawn error: ${e.message}`)));
     child.on('close', code => {
@@ -347,10 +377,10 @@ function isUnsupportedArchiveMethodError(msg = '') {
   return /unsupported method|no implementado|not implemented/i.test(String(msg || ''));
 }
 
-async function extractArchiveWithFallback(archivePath, extractDir) {
+async function extractArchiveWithFallback(archivePath, extractDir, options = {}) {
   const args7z = ['x', archivePath, `-o${extractDir}`, '-y', '-aoa'];
   try {
-    await run7z(args7z);
+    await run7z(args7z, options);
     return { tool: '7z' };
   } catch (e) {
     const firstErr = String(e?.message || e);
@@ -361,7 +391,7 @@ async function extractArchiveWithFallback(archivePath, extractDir) {
 
     // Fallback para VPS con p7zip sin soporte completo de RAR.
     try {
-      await runUnrar(['x', '-o+', '-y', archivePath, `${extractDir}${path.sep}`]);
+      await runUnrar(['x', '-o+', '-y', archivePath, `${extractDir}${path.sep}`], options);
       return { tool: 'unrar' };
     } catch (e2) {
       const secondErr = String(e2?.message || e2);
@@ -733,9 +763,55 @@ export const scanLocalDirectory = async (req, res) => {
         }, 5000);
 
         let extraction;
+        let lastExtractPercent = -1;
+        let lastProgressLogAt = 0;
+        let lastProgressFile = '';
         try {
           extraction = await withTimeout(
-            extractArchiveWithFallback(arcPath, extractDir),
+            extractArchiveWithFallback(arcPath, extractDir, {
+              onProgress: (progress) => {
+                const now = Date.now();
+                const pctRaw = Number(progress?.percent);
+                const pct = Number.isFinite(pctRaw) ? Math.max(0, Math.min(100, Math.floor(pctRaw))) : null;
+                const file = String(progress?.file || '').trim();
+
+                const shouldUpdateByPct = pct != null && pct !== lastExtractPercent;
+                const shouldUpdateByTime = now - lastProgressLogAt >= 8000;
+                const shouldUpdateByFile = !!file && file !== lastProgressFile;
+                if (!shouldUpdateByPct && !shouldUpdateByTime && !shouldUpdateByFile) return;
+
+                if (pct != null) lastExtractPercent = pct;
+                if (file) lastProgressFile = file;
+                lastProgressLogAt = now;
+
+                const elapsedSec = Math.max(1, Math.floor((now - decompressStartAt) / 1000));
+                const globalPercent = topArchives.length > 0
+                  ? Math.max(0, Math.min(100, Math.round(((archivesDone + ((pct ?? 0) / 100)) / topArchives.length) * 100)))
+                  : (pct ?? 0);
+
+                const fileHint = file ? ` · file=${file}` : '';
+                setBatchScanStatus(
+                  {
+                    phase: 'decompress',
+                    message: `Descomprimiendo ${arc.name} (${nextArchiveNumber}/${topArchives.length}) · ${pct != null ? `${pct}%` : 'trabajando'}${fileHint} · ${elapsedSec}s`,
+                    current: archivesDone,
+                    total: Math.max(topArchives.length, 1),
+                    percent: globalPercent,
+                    counters: {
+                      archives: { done: archivesDone, total: topArchives.length },
+                    },
+                  },
+                  { log: pct != null ? (pct % 10 === 0) : shouldUpdateByTime }
+                );
+
+                if (shouldUpdateByPct || shouldUpdateByFile) {
+                  console.info(
+                    `[BATCH SCAN][DECOMPRESS][PROGRESS] arc=${arc.name} ` +
+                    `pct=${pct != null ? `${pct}%` : '-'} elapsed=${elapsedSec}s file=${file || '-'}`
+                  );
+                }
+              }
+            }),
             extractTimeoutMs,
             'BATCH_SCAN_EXTRACT_TIMEOUT'
           );
