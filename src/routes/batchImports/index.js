@@ -1,10 +1,11 @@
 import express from 'express';
-import { scanLocalDirectory, getBatchQueue, retryBatchAiFailedItems, updateBatchItem, confirmBatchItems, deleteBatchItem, purgeAll, purgeCompleted, retryBatchItemWithAnotherProxy } from '../../controllers/batchImport.controller.js';
+import { scanLocalDirectory, getScanStatus, getBatchQueue, retryBatchAiFailedItems, updateBatchItem, confirmBatchItems, deleteBatchItem, purgeAll, purgeCompleted, retryBatchItemWithAnotherProxy } from '../../controllers/batchImport.controller.js';
 import { requireAuth } from '../../middlewares/auth.js';
 
 const router = express.Router();
 
 router.post('/scan', requireAuth, scanLocalDirectory);
+router.get('/scan-status', requireAuth, getScanStatus);
 router.post('/retry-ai', requireAuth, retryBatchAiFailedItems);
 router.post('/ai-metadata', requireAuth, retryBatchAiFailedItems);
 router.get('/', requireAuth, getBatchQueue);
