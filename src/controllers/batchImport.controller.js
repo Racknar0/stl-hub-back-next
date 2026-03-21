@@ -824,12 +824,17 @@ export const scanLocalDirectory = async (req, res) => {
           const elapsedSec = Math.max(1, Math.floor((Date.now() - decompressStartAt) / 1000));
           const shouldLogHeartbeat = elapsedSec % 30 === 0;
           const partial = getShallowDirSnapshot(extractDir);
+          const currentPercentRaw = Number(batchScanStatus?.percent);
+          const currentPercent = Number.isFinite(currentPercentRaw)
+            ? Math.max(0, Math.min(100, Math.floor(currentPercentRaw)))
+            : 0;
           setBatchScanStatus(
             {
               phase: 'decompress',
               message: `Descomprimiendo ${arc.name} (${nextArchiveNumber}/${topArchives.length}) · ${elapsedSec}s · outDirs=${partial.dirs} outFiles=${partial.files}`,
               current: archivesDone,
               total: Math.max(topArchives.length, 1),
+              percent: currentPercent,
               counters: {
                 archives: { done: archivesDone, total: topArchives.length },
               },
