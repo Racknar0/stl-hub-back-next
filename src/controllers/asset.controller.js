@@ -51,6 +51,7 @@ globalThis.__assetHashBackfillState = assetHashBackfillState;
 
 const ASSET_META_AI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
 const ASSET_DESCRIPTION_FALLBACK = 'No hay descripción de este producto.';
+const ASSET_DESCRIPTION_EN_FALLBACK = 'No description available for this product.';
 const ASSET_DESCRIPTION_DB_SAFE_MAX = Math.max(90, Math.min(320, Number(process.env.ASSET_DESCRIPTION_MAX_CHARS) || 180));
 const ASSET_META_MAX_IMAGES_PER_ITEM = Math.max(1, Math.min(4, Number(process.env.ASSET_META_MAX_IMAGES_PER_ITEM) || 1));
 const ASSET_META_MAX_IMAGE_BYTES = Math.max(256 * 1024, (Number(process.env.ASSET_META_MAX_IMAGE_MB) || 4) * 1024 * 1024);
@@ -800,6 +801,38 @@ async function updateAssetDescriptionSafely(assetId, rawDescription) {
     throw lastError || new Error('No se pudo guardar description en un tamaño permitido');
 }
 
+async function updateAssetDescriptionsSafely(assetId, rawDescriptionEs, rawDescriptionEn) {
+    const baseEs = String(rawDescriptionEs || '').trim() || ASSET_DESCRIPTION_FALLBACK;
+    const baseEn = String(rawDescriptionEn || '').trim() || ASSET_DESCRIPTION_EN_FALLBACK;
+    const lengthCandidates = Array.from(new Set([
+        ASSET_DESCRIPTION_DB_SAFE_MAX,
+        Math.min(160, ASSET_DESCRIPTION_DB_SAFE_MAX),
+        120,
+        96,
+    ].filter((n) => Number.isFinite(n) && n > 20)));
+
+    let lastError = null;
+    for (const maxLen of lengthCandidates) {
+        const safeEs = normalizeMetaText(baseEs, maxLen) || ASSET_DESCRIPTION_FALLBACK;
+        const safeEn = normalizeMetaText(baseEn, maxLen) || ASSET_DESCRIPTION_EN_FALLBACK;
+        try {
+            await prisma.asset.update({
+                where: { id: Number(assetId) },
+                data: {
+                    description: safeEs,
+                    descriptionEn: safeEn,
+                },
+            });
+            return { description: safeEs, descriptionEn: safeEn };
+        } catch (err) {
+            lastError = err;
+            if (err?.code !== 'P2000') throw err;
+        }
+    }
+
+    throw lastError || new Error('No se pudo guardar description bilingue en un tamaño permitido');
+}
+
 function parseJsonLoose(rawText) {
     const txt = String(rawText || '').trim();
     if (!txt) return null;
@@ -859,6 +892,7 @@ function buildAssetMetaInput(asset) {
         categories,
         tags,
         currentDescription: String(asset?.description || '').trim(),
+        currentDescriptionEn: String(asset?.descriptionEn || '').trim(),
     };
 }
 
@@ -874,7 +908,10 @@ function getGeminiClient() {
 }
 
 async function generateSeoDescriptionForAsset(assetInput, assetRaw = null) {
-    const fallback = ASSET_DESCRIPTION_FALLBACK;
+    const fallback = {
+        es: ASSET_DESCRIPTION_FALLBACK,
+        en: ASSET_DESCRIPTION_EN_FALLBACK,
+    };
     const ai = getGeminiClient();
     if (!ai) return fallback;
 
@@ -882,13 +919,13 @@ async function generateSeoDescriptionForAsset(assetInput, assetRaw = null) {
 
     const prompt = [
         'Eres redactor SEO para tienda de modelos STL.',
-        'Genera una descripción SEO CORTA en ESPAÑOL para ficha de producto.',
+        'Genera descripción SEO CORTA bilingüe (ES + EN) para ficha de producto.',
         'Debes analizar primero las imágenes adjuntas del asset (si existen).',
         'Si no hay imágenes suficientes, usa título/categorías/tags como respaldo.',
-        `Reglas estrictas: 1 a 2 frases, entre 90 y ${ASSET_DESCRIPTION_DB_SAFE_MAX} caracteres, sin emojis, sin markdown, texto natural y útil.`,
+        `Reglas estrictas para cada idioma: 1 a 2 frases, entre 90 y ${ASSET_DESCRIPTION_DB_SAFE_MAX} caracteres, sin emojis, sin markdown, texto natural y útil.`,
         'Debe ser breve, apta para SEO y para columna de base de datos limitada.',
         'Si falta contexto, escribe una descripción genérica breve y correcta.',
-        'Responde SOLO JSON con forma: {"description":"..."}.',
+        'Responde SOLO JSON con forma: {"description":{"es":"...","en":"..."}}.',
         'Contexto:',
         JSON.stringify(assetInput, null, 2),
         `Imágenes adjuntas: ${attachedImages}`,
@@ -905,15 +942,34 @@ async function generateSeoDescriptionForAsset(assetInput, assetRaw = null) {
                     additionalProperties: false,
                     required: ['description'],
                     properties: {
-                        description: { type: 'string' },
+                        description: {
+                            type: 'object',
+                            additionalProperties: false,
+                            required: ['es', 'en'],
+                            properties: {
+                                es: { type: 'string' },
+                                en: { type: 'string' },
+                            },
+                        },
                     },
                 },
             },
         });
 
         const parsed = parseJsonLoose(response?.text);
-        const desc = normalizeMetaText(parsed?.description || '', ASSET_DESCRIPTION_DB_SAFE_MAX);
-        return desc || fallback;
+        const rawEs = typeof parsed?.description === 'object'
+            ? parsed?.description?.es
+            : parsed?.description;
+        const rawEn = typeof parsed?.description === 'object'
+            ? parsed?.description?.en
+            : '';
+
+        const descEs = normalizeMetaText(rawEs || '', ASSET_DESCRIPTION_DB_SAFE_MAX) || fallback.es;
+        const descEn = normalizeMetaText(rawEn || '', ASSET_DESCRIPTION_DB_SAFE_MAX) || fallback.en;
+        return {
+            es: descEs,
+            en: descEn,
+        };
     } catch (err) {
         console.warn('[ASSETS][META][DESCRIPTION_AI_WARN]', err?.message || err);
         return fallback;
@@ -2431,11 +2487,12 @@ export const updateAsset = async (req, res) => {
         if (!existing)
             return res.status(404).json({ message: 'Asset not found' });
 
-        const { title, titleEn, description, categories, tags, isPremium } = req.body;
+        const { title, titleEn, description, descriptionEn, categories, tags, isPremium } = req.body;
         const data = {};
         if (title !== undefined) data.title = String(title);
         if (titleEn !== undefined) data.titleEn = String(titleEn);
         if (description !== undefined) data.description = normalizeMetaText(String(description), ASSET_DESCRIPTION_DB_SAFE_MAX) || null;
+        if (descriptionEn !== undefined) data.descriptionEn = normalizeMetaText(String(descriptionEn), ASSET_DESCRIPTION_DB_SAFE_MAX) || null;
         if (typeof isPremium !== 'undefined')
             data.isPremium = Boolean(isPremium);
 
@@ -2471,6 +2528,12 @@ export const generateAssetMetaDescriptions = async (req, res) => {
             ? req.body.assetIds.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0)
             : [];
 
+        console.info('[ASSETS][META][DESCRIPTION][START]', {
+            mode,
+            requestedIds: ids.length,
+            maxAssets,
+        });
+
         const where = {};
         if (mode === 'selected') {
             if (!ids.length) {
@@ -2478,7 +2541,7 @@ export const generateAssetMetaDescriptions = async (req, res) => {
             }
             where.id = { in: ids };
         } else if (mode === 'missing') {
-            where.OR = [{ description: null }, { description: '' }];
+            where.OR = [{ description: null }, { description: '' }, { descriptionEn: null }, { descriptionEn: '' }];
             if (ids.length) where.id = { in: ids };
         } else if (mode === 'all') {
             if (ids.length) where.id = { in: ids };
@@ -2497,21 +2560,46 @@ export const generateAssetMetaDescriptions = async (req, res) => {
         });
 
         if (!targets.length) {
+            console.info('[ASSETS][META][DESCRIPTION][DONE]', {
+                mode,
+                processed: 0,
+                updated: 0,
+                failed: 0,
+            });
             return res.json({ success: true, processed: 0, updated: 0, items: [] });
         }
 
         let updated = 0;
         let failed = 0;
         const details = [];
+        const totalTargets = targets.length;
 
-        for (const asset of targets) {
+        for (let i = 0; i < targets.length; i += 1) {
+            const asset = targets[i];
+            const startPct = Math.round((i / totalTargets) * 100);
+            console.info(`[ASSETS][META][DESCRIPTION][PROGRESS] ${startPct}% (${i}/${totalTargets}) asset=${asset.id} start`);
+
             try {
                 const input = buildAssetMetaInput(asset);
                 const generated = await generateSeoDescriptionForAsset(input, asset);
-                const finalDescription = await updateAssetDescriptionSafely(asset.id, generated || ASSET_DESCRIPTION_FALLBACK);
+                const finalPair = await updateAssetDescriptionsSafely(
+                    asset.id,
+                    generated?.es || ASSET_DESCRIPTION_FALLBACK,
+                    generated?.en || ASSET_DESCRIPTION_EN_FALLBACK,
+                );
 
                 updated += 1;
-                details.push({ id: asset.id, description: finalDescription, updated: true });
+                details.push({
+                    id: asset.id,
+                    description: finalPair.description,
+                    descriptionEn: finalPair.descriptionEn,
+                    updated: true,
+                });
+                console.info('[ASSETS][META][DESCRIPTION][ITEM_OK]', {
+                    assetId: asset.id,
+                    descriptionLenEs: String(finalPair.description || '').length,
+                    descriptionLenEn: String(finalPair.descriptionEn || '').length,
+                });
             } catch (itemErr) {
                 failed += 1;
                 details.push({
@@ -2520,8 +2608,18 @@ export const generateAssetMetaDescriptions = async (req, res) => {
                     error: String(itemErr?.message || itemErr || 'ERROR_GENERATING_DESCRIPTION'),
                 });
                 console.warn('[ASSETS][META][DESCRIPTION_ITEM_FAIL]', `asset=${asset.id}`, itemErr?.message || itemErr);
+            } finally {
+                const endPct = Math.round(((i + 1) / totalTargets) * 100);
+                console.info(`[ASSETS][META][DESCRIPTION][PROGRESS] ${endPct}% (${i + 1}/${totalTargets})`);
             }
         }
+
+        console.info('[ASSETS][META][DESCRIPTION][DONE]', {
+            mode,
+            processed: targets.length,
+            updated,
+            failed,
+        });
 
         return res.json({
             success: true,
@@ -5752,6 +5850,7 @@ export const latestAssets = async (req, res) => {
                 title: true,
                 titleEn: true,
                 description: true,
+                descriptionEn: true,
                 images: true,
                 isPremium: true,
                 createdAt: true,
@@ -6174,6 +6273,7 @@ export const searchAssets = async (req, res) => {
       title: true,
       titleEn: true,
             description: true,
+            descriptionEn: true,
       images: true,
       isPremium: true,
       downloads: true,
