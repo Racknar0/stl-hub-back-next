@@ -11,6 +11,7 @@ import { spawn } from 'child_process'
 const prisma = new PrismaClient()
 const UPLOADS_DIR = path.resolve('uploads')
 const TEMP_DIR = path.join(UPLOADS_DIR, 'tmp')
+const DEFAULT_FREE_QUOTA_MB = Number(process.env.MEGA_FREE_QUOTA_MB) || 20480
 
 function ensureDir(p){ if(!fs.existsSync(p)) fs.mkdirSync(p,{recursive:true}) }
 ensureDir(TEMP_DIR)
@@ -171,6 +172,99 @@ function pickFirstFileFromLs(lsOut){
   return (withExt[0] || lines[0]) || null
 }
 
+function parseSizeToMB(str) {
+  if (!str) return 0
+  const s = String(str).trim().toUpperCase()
+  const m = s.match(/[\d.,]+\s*[KMGT]?B/)
+  if (!m) return 0
+  const num = parseFloat((m[0].match(/[\d.,]+/) || ['0'])[0].replace(',', '.'))
+  const unit = (m[0].match(/[KMGT]?B/) || ['MB'])[0]
+  const factor = unit === 'KB' ? 1 / 1024 : unit === 'MB' ? 1 : unit === 'GB' ? 1024 : unit === 'TB' ? 1024 * 1024 : 1 / (1024 * 1024)
+  return Math.round(num * factor)
+}
+
+function parseDfText(txtRaw) {
+  const txt = String(txtRaw || '')
+  let storageUsedMB = 0
+  let storageTotalMB = 0
+
+  let m =
+    txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i) ||
+    txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i) ||
+    txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i) ||
+    txt.match(/almacenamiento\s+de\s+la\s+cuenta\s*:\s*([^\n]+?)\s*de\s*([^\n]+)/i) ||
+    txt.match(/almacenamiento\s*:\s*([\d.,]+\s*[KMGT]?B)\s*de\s*([\d.,]+\s*[KMGT]?B)/i)
+
+  if (m) {
+    storageUsedMB = parseSizeToMB(m[1])
+    storageTotalMB = parseSizeToMB(m[2])
+  }
+
+  if (!storageTotalMB) {
+    const p =
+      txt.match(/storage[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:of|de)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:used|usado)?/i) ||
+      txt.match(/almacenamiento[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:de|of)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:usado|used)?/i)
+    if (p) {
+      storageTotalMB = parseSizeToMB(p[2])
+      const pct = parseFloat(String(p[1]).replace(',', '.'))
+      if (!Number.isNaN(pct) && Number.isFinite(pct) && storageTotalMB > 0) {
+        storageUsedMB = Math.round((pct / 100) * storageTotalMB)
+      }
+    }
+  }
+
+  if (!storageTotalMB || storageTotalMB <= 0) storageTotalMB = DEFAULT_FREE_QUOTA_MB
+  if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB
+
+  return { storageUsedMB, storageTotalMB }
+}
+
+async function refreshAccountStorageInCurrentSession(accountId, ctx = '') {
+  const id = Number(accountId)
+  if (!Number.isFinite(id) || id <= 0) return null
+
+  const suffix = ctx ? ` ${ctx}` : ''
+
+  try {
+    const out = await runCmd('mega-df', ['-h'], { quiet: true })
+    const txt = (out.out || out.err || '').toString()
+    const parsed = parseDfText(txt)
+    const updated = await prisma.megaAccount.update({
+      where: { id },
+      data: {
+        storageUsedMB: parsed.storageUsedMB,
+        storageTotalMB: parsed.storageTotalMB,
+        lastCheckAt: new Date(),
+      },
+      select: { id: true, storageUsedMB: true, storageTotalMB: true },
+    })
+    log.info(`[RESTORE][METRICS][OK] accId=${id} used=${updated.storageUsedMB}MB total=${updated.storageTotalMB}MB${suffix}`)
+    return updated
+  } catch (e) {
+    log.warn(`[RESTORE][METRICS][WARN] mega-df -h accId=${id}${suffix}: ${String(e.message || e).slice(0, 200)}`)
+  }
+
+  try {
+    const out = await runCmd('mega-df', [], { quiet: true })
+    const txt = (out.out || out.err || '').toString()
+    const parsed = parseDfText(txt)
+    const updated = await prisma.megaAccount.update({
+      where: { id },
+      data: {
+        storageUsedMB: parsed.storageUsedMB,
+        storageTotalMB: parsed.storageTotalMB,
+        lastCheckAt: new Date(),
+      },
+      select: { id: true, storageUsedMB: true, storageTotalMB: true },
+    })
+    log.info(`[RESTORE][METRICS][OK] fallback accId=${id} used=${updated.storageUsedMB}MB total=${updated.storageTotalMB}MB${suffix}`)
+    return updated
+  } catch (e) {
+    log.warn(`[RESTORE][METRICS][WARN] mega-df fallback accId=${id}${suffix}: ${String(e.message || e).slice(0, 200)}`)
+    return null
+  }
+}
+
 
 export const syncBackupsToMain = async (req, res) => {
   const id = Number(req.params.id)
@@ -307,6 +401,11 @@ export const syncBackupsToMain = async (req, res) => {
               }
             } catch(e){ log.warn(`[RESTORE][DL] fallo asset=${asset.id} backup=${b.id} msg=${e.message}`) }
           }
+          try {
+            await refreshAccountStorageInCurrentSession(b.id, `restore phase=download backup=${b.id}`)
+          } catch (e) {
+            log.warn(`[RESTORE][METRICS][WARN] backup=${b.id} no actualizado: ${String(e?.message || e).slice(0, 200)}`)
+          }
           await megaLogout(buildCtx(b))
         }, `RESTORE-DL-${b.id}`)
       }
@@ -362,6 +461,11 @@ export const syncBackupsToMain = async (req, res) => {
           } finally {
             try { if (fs.existsSync(info.localTemp)) fs.unlinkSync(info.localTemp) } catch {}
           }
+        }
+        try {
+          await refreshAccountStorageInCurrentSession(main.id, `restore phase=upload main=${main.id}`)
+        } catch (e) {
+          log.warn(`[RESTORE][METRICS][WARN] main=${main.id} no actualizada: ${String(e?.message || e).slice(0, 200)}`)
         }
         await megaLogout(mainCtx)
       }
