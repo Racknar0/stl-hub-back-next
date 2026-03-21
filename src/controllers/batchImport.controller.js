@@ -853,6 +853,13 @@ export const scanLocalDirectory = async (req, res) => {
 
     let newlyQueuedCount = 0;
     const reservedStartedAt = Date.now();
+    setBatchScanStatus(
+      {
+        phase: 'discovery',
+        message: 'Discovery · DB: cargando títulos reservados del batch...',
+      },
+      { log: true }
+    );
     const reservedKeys = await buildReservedBatchTitleSet();
     console.info(`[BATCH SCAN][DISCOVERY] reservedTitles=${reservedKeys.size} ms=${Date.now() - reservedStartedAt}`);
     const aiScannedItems = [];
@@ -862,6 +869,18 @@ export const scanLocalDirectory = async (req, res) => {
       const folderStartedAt = Date.now();
       const { folder, batchPath, foldersToProcess } = folderPlans[folderIdx];
       console.info(`[BATCH SCAN][FOLDER][START] (${folderIdx + 1}/${folderPlans.length}) folder=${folder} items=${foldersToProcess.length}`);
+      setBatchScanStatus(
+        {
+          phase: 'discovery',
+          message: `Batch ${folder} · DB: buscando/creando cabecera de lote`,
+          counters: {
+            folders: { done: folderIdx, total: folderPlans.length },
+            items: { done: processedDiscoveryItems, total: totalDiscoveryItems },
+            archives: { done: archivesDone, total: topArchives.length },
+          },
+        },
+        { log: false }
+      );
       // Find or create the master BatchImport record
       let batch = await prisma.batchImport.findUnique({
         where: { folderName: folder }
@@ -890,7 +909,7 @@ export const scanLocalDirectory = async (req, res) => {
         setBatchScanStatus(
           {
             phase: 'discovery',
-            message: `Procesando ${phaseItemLabel}`,
+            message: `Procesando ${phaseItemLabel} · FS: leyendo contenido de carpeta`,
             current: processedDiscoveryItems,
             total: Math.max(totalDiscoveryItems, 1),
             counters: {
@@ -904,11 +923,25 @@ export const scanLocalDirectory = async (req, res) => {
 
         const assetPath = path.join(batchPath, assetFolder);
         const stats = collectFolderStats(assetPath);
-  const statsMB = Number((Number(stats.totalBytes || 0) / (1024 * 1024)).toFixed(2));
-  console.info(`[BATCH SCAN][ITEM][STATS] path=${phaseItemLabel} files=${Number(stats.fileCount || 0)} sizeMB=${statsMB}`);
+        const statsMB = Number((Number(stats.totalBytes || 0) / (1024 * 1024)).toFixed(2));
+        console.info(`[BATCH SCAN][ITEM][STATS] path=${phaseItemLabel} files=${Number(stats.fileCount || 0)} sizeMB=${statsMB}`);
         const isEmptyAssetFolder = Number(stats.fileCount || 0) <= 0;
 
         // Create an item if it doesn't exist
+        setBatchScanStatus(
+          {
+            phase: 'discovery',
+            message: `Procesando ${phaseItemLabel} · DB: buscando item existente`,
+            current: processedDiscoveryItems,
+            total: Math.max(totalDiscoveryItems, 1),
+            counters: {
+              folders: { done: folderIdx, total: folderPlans.length },
+              items: { done: processedDiscoveryItems, total: totalDiscoveryItems },
+              archives: { done: archivesDone, total: topArchives.length },
+            },
+          },
+          { log: false }
+        );
         const existingItem = await prisma.batchImportItem.findFirst({
           where: { batchId: batch.id, folderName: assetFolder }
         });
@@ -916,7 +949,15 @@ export const scanLocalDirectory = async (req, res) => {
         if (isEmptyAssetFolder) {
           // Evitar basura en cola: carpeta vacía no se procesa.
           if (existingItem && ['DRAFT', 'FAILED', 'PENDING'].includes(String(existingItem.status || '').toUpperCase())) {
+            setBatchScanStatus(
+              {
+                phase: 'discovery',
+                message: `Procesando ${phaseItemLabel} · DB: eliminando item vacío id=${existingItem.id}`,
+              },
+              { log: false }
+            );
             await prisma.batchImportItem.delete({ where: { id: existingItem.id } }).catch(() => {});
+            console.info(`[BATCH SCAN][DB][DELETE_EMPTY] id=${existingItem.id} path=${phaseItemLabel}`);
           }
 
           if (assetFolder) {
@@ -955,6 +996,13 @@ export const scanLocalDirectory = async (req, res) => {
               updateData.mainProgress = 0;
             }
 
+            setBatchScanStatus(
+              {
+                phase: 'discovery',
+                message: `Procesando ${phaseItemLabel} · DB: actualizando item existente id=${existingItem.id}`,
+              },
+              { log: false }
+            );
             await prisma.batchImportItem.update({
               where: { id: existingItem.id },
               data: updateData,
@@ -1015,6 +1063,13 @@ export const scanLocalDirectory = async (req, res) => {
             findImages(assetPath);
           } catch {}
 
+          setBatchScanStatus(
+            {
+              phase: 'discovery',
+              message: `Procesando ${phaseItemLabel} · DB: creando item nuevo`,
+            },
+            { log: false }
+          );
           const createdItem = await prisma.batchImportItem.create({
             data: {
               batchId: batch.id,
@@ -1064,6 +1119,7 @@ export const scanLocalDirectory = async (req, res) => {
         where: { id: batch.id },
         data: { totalItems: itemsCount }
       });
+      console.info(`[BATCH SCAN][DB][BATCH_TOTAL] batchId=${batch.id} folder=${folder} totalItems=${itemsCount}`);
 
       setBatchScanStatus(
         {
