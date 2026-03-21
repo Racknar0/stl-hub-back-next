@@ -490,10 +490,15 @@ function megaPutWithStall({
     const child = spawn('mega-put', [srcPath, remotePath], { shell: true })
     attachAutoAcceptTerms(child, logPrefix || 'BATCH PUT')
 
-    let settled = false, lastPct = -1, lastProgressAt = Date.now(), stallTimer = null, lastHeartbeatAt = 0
+    let settled = false, lastPct = -1, lastProgressAt = Date.now(), stallTimer = null
+    let nextNoProgressLogSec = 10
 
     const noteProgress = (pct) => {
-      if (pct > lastPct) { lastPct = pct; lastProgressAt = Date.now() }
+      if (pct > lastPct) {
+        lastPct = pct
+        lastProgressAt = Date.now()
+        nextNoProgressLogSec = 10
+      }
       try { onProgress && onProgress(pct) } catch {}
     }
 
@@ -532,11 +537,11 @@ function megaPutWithStall({
           return
         }
         const idle = Date.now() - lastProgressAt
-        const now = Date.now()
-        if (now - lastHeartbeatAt >= UPLOAD_PROGRESS_HEARTBEAT_MS) {
-          const pctText = lastPct >= 0 ? `${Math.round(lastPct)}%` : 'en curso'
-          console.log(`[BATCH][PROGRESS] ${logPrefix} ${pctText} idle=${Math.round(idle / 1000)}s`)
-          lastHeartbeatAt = now
+        const idleSec = Math.round(idle / 1000)
+        while (idleSec >= nextNoProgressLogSec) {
+          const pctText = lastPct >= 0 ? `${Math.round(lastPct)}%` : 'sin % aún'
+          console.warn(`[BATCH][NO_PROGRESS] ${logPrefix} sin progreso hace ${nextNoProgressLogSec}s (pct=${pctText})`)
+          nextNoProgressLogSec += 10
         }
         if (idle < stallTimeoutMs) return
         console.warn(`[BATCH][STALL] mega-put sin progreso ${Math.round(idle/1000)}s lastPct=${lastPct} ${logPrefix}`)
@@ -988,7 +993,7 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
         await megaPutWithStall({
           srcPath: archivePath,
           remotePath,
-          logPrefix: `batch-${role} accId=${account.id}`,
+          logPrefix: `batch-${role} item=${itemIdCtx || '-'} accId=${account.id} attempt=${attempt}`,
           stallTimeoutMs: STALL_TIMEOUT_MS,
           onProgress,
           shouldAbort: () => hasBatchProxySwitchRequest(account.__batchItemId),

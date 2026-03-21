@@ -42,6 +42,11 @@ function rotateIndex(i, len){
   return (Number(i || 0) + 1) % len;
 }
 
+function getArchiveFileName(archiveName) {
+  const normalized = String(archiveName || '').replaceAll('\\', '/').trim();
+  return path.posix.basename(normalized);
+}
+
 async function applyProxyByIndexOrThrow(proxies, idx, ctx){
   if (!proxies?.length) throw new Error(`[SYNC][PROXY] Sin proxies válidos (no se permite IP directa)${ctx ? ` ${ctx}` : ''}`);
   const p = proxies[idx % proxies.length];
@@ -983,8 +988,8 @@ function buildExpectedRemoteFilesSet(baseB, assets) {
   const set = new Set();
   for (const a of assets || []) {
     if (!a?.archiveName) continue;
-    const fileName = path.basename(a.archiveName);
-    const remoteFolder = path.posix.join(baseB, a.slug);
+    const fileName = getArchiveFileName(a.archiveName);
+          const fileName = getArchiveFileName(a.archiveName);
     const remoteFile = path.posix.join(remoteFolder, fileName);
     const norm = normalizeRemotePathForCompare(remoteFile);
     if (norm) set.add(norm);
@@ -1245,7 +1250,7 @@ export const syncMainToBackups = async (req, res) => {
         for (const a of assets) {
           if (!a.archiveName) continue;
             // Comprobación remota directa
-          const fileName = path.basename(a.archiveName);
+          const fileName = getArchiveFileName(a.archiveName);
           const remoteFolder = path.posix.join(baseB, a.slug);
           const remoteFile = path.posix.join(remoteFolder, fileName);
           let exists = false;
@@ -1369,7 +1374,7 @@ export const syncMainToBackups = async (req, res) => {
       for (const a of uniqueMissingAssets) {
         idx++;
         if (!a.archiveName) continue;
-        const fileName = path.basename(a.archiveName);
+        const fileName = getArchiveFileName(a.archiveName);
         const remoteFolder = path.posix.join(baseMain, a.slug);
         const remoteFile = path.posix.join(remoteFolder, fileName);
         const slugDir = path.join(SYNC_DIR, a.slug);
@@ -1436,7 +1441,7 @@ export const syncMainToBackups = async (req, res) => {
         for (const a of list) {
           idx++;
           if (!a.archiveName) { fail++; continue; }
-          const fileName = path.basename(a.archiveName);
+          const fileName = getArchiveFileName(a.archiveName);
           const remoteFolder = path.posix.join(baseB, a.slug);
           await safeMkdir(remoteFolder);
           const localPath = path.join(SYNC_DIR, a.slug, fileName); // siempre usamos el descargado recién
