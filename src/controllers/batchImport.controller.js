@@ -107,6 +107,7 @@ function beginBatchScanStatus() {
     result: null,
   };
   console.info(`[BATCH SCAN][STATUS] run=${batchScanStatus.runId} status=running phase=initializing`);
+  return batchScanStatus;
 }
 
 function completeBatchScanStatus(patch = {}, status = 'done') {
@@ -391,6 +392,15 @@ async function withTimeout(promise, timeoutMs, timeoutCode = 'OP_TIMEOUT') {
   }
 }
 
+function directoryHasEntries(dirPath) {
+  try {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    return Array.isArray(entries) && entries.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 function collectFolderStats(dirPath) {
   let fileCount = 0;
   let totalBytes = 0;
@@ -575,6 +585,7 @@ function buildAiScanItemFromBatchItem(item) {
 // POST /api/batch-imports/scan
 export const scanLocalDirectory = async (req, res) => {
   const extractedArchivesThisRun = [];
+  let stopScanWatchdog = () => {};
   try {
     if (String(batchScanStatus?.status || '').toLowerCase() === 'running') {
       return res.status(409).json({
@@ -584,7 +595,43 @@ export const scanLocalDirectory = async (req, res) => {
       });
     }
 
-    beginBatchScanStatus();
+    const startedStatus = beginBatchScanStatus();
+    const activeRunId = Number(startedStatus?.runId || 0);
+    const scanStartedAt = Number(startedStatus?.startedAt || Date.now());
+    const warnAfterSecRaw = Number(process.env.BATCH_SCAN_STALL_WARN_S || 40);
+    const errorAfterSecRaw = Number(process.env.BATCH_SCAN_STALL_ERROR_S || 120);
+    const watchdogEveryMsRaw = Number(process.env.BATCH_SCAN_WATCHDOG_MS || 10000);
+    const warnAfterSec = Number.isFinite(warnAfterSecRaw) && warnAfterSecRaw > 0 ? Math.floor(warnAfterSecRaw) : 40;
+    const errorAfterSec = Number.isFinite(errorAfterSecRaw) && errorAfterSecRaw > warnAfterSec ? Math.floor(errorAfterSecRaw) : 120;
+    const watchdogEveryMs = Number.isFinite(watchdogEveryMsRaw) && watchdogEveryMsRaw >= 2000 ? Math.floor(watchdogEveryMsRaw) : 10000;
+
+    const watchdogId = setInterval(() => {
+      const snap = batchScanStatus;
+      if (Number(snap?.runId || 0) !== activeRunId) return;
+
+      const now = Date.now();
+      const staleSec = Math.max(0, Math.floor((now - Number(snap?.updatedAt || now)) / 1000));
+      const elapsedSec = Math.max(0, Math.floor((now - scanStartedAt) / 1000));
+      const line =
+        `[BATCH SCAN][HEARTBEAT] run=${snap.runId} phase=${snap.phase} status=${snap.status} ` +
+        `step=${snap.current}/${snap.total} pct=${snap.percent}% ` +
+        `archives=${snap?.counters?.archives?.done || 0}/${snap?.counters?.archives?.total || 0} ` +
+        `folders=${snap?.counters?.folders?.done || 0}/${snap?.counters?.folders?.total || 0} ` +
+        `items=${snap?.counters?.items?.done || 0}/${snap?.counters?.items?.total || 0} ` +
+        `lastUpdate=${staleSec}s elapsed=${elapsedSec}s msg=${snap.message}`;
+
+      if (staleSec >= errorAfterSec) {
+        console.error(line.replace('[HEARTBEAT]', '[STALL]'));
+      } else if (staleSec >= warnAfterSec) {
+        console.warn(line.replace('[HEARTBEAT]', '[SLOW]'));
+      } else {
+        console.info(line);
+      }
+    }, watchdogEveryMs);
+
+    stopScanWatchdog = () => {
+      try { clearInterval(watchdogId); } catch {}
+    };
 
     if (!fs.existsSync(BATCH_DIR)) {
       fs.mkdirSync(BATCH_DIR, { recursive: true });
@@ -623,20 +670,79 @@ export const scanLocalDirectory = async (req, res) => {
     console.info(`[BATCH SCAN][START] batchDir=${BATCH_DIR} archives=${topArchives.length}`);
 
     let archivesDone = 0;
+    const rawExtractTimeout = Number(process.env.BATCH_SCAN_EXTRACT_TIMEOUT_MS || 0);
+    const extractTimeoutMs = Number.isFinite(rawExtractTimeout) && rawExtractTimeout > 0 ? rawExtractTimeout : 0;
 
     for (const arc of topArchives) {
+      const arcStartedAt = Date.now();
       const arcPath = path.join(BATCH_DIR, arc.name);
       const extractDir = path.join(BATCH_DIR, path.parse(arc.name).name);
       const extractDirExistedBefore = fs.existsSync(extractDir);
+      const extractDirHasEntries = extractDirExistedBefore && directoryHasEntries(extractDir);
+      let arcSizeMB = 0;
+      try {
+        arcSizeMB = Number((Number(fs.statSync(arcPath).size || 0) / (1024 * 1024)).toFixed(2));
+      } catch {}
       const nextArchiveNumber = archivesDone + 1;
       const startPct = topArchives.length > 0
         ? Math.round((archivesDone / topArchives.length) * 100)
         : 100;
-      console.info(`[BATCH SCAN][DECOMPRESS] ${startPct}% (${nextArchiveNumber}/${topArchives.length}) iniciando ${arc.name}`);
+      console.info(`[BATCH SCAN][DECOMPRESS] ${startPct}% (${nextArchiveNumber}/${topArchives.length}) iniciando ${arc.name} sizeMB=${arcSizeMB}`);
+
+      if (extractDirHasEntries) {
+        archivesDone += 1;
+        const elapsedMs = Date.now() - arcStartedAt;
+        const donePct = topArchives.length > 0
+          ? Math.round((archivesDone / topArchives.length) * 100)
+          : 100;
+        console.info(`[BATCH SCAN][DECOMPRESS] ${donePct}% (${archivesDone}/${topArchives.length}) skip ${arc.name} (destino ya extraído) ms=${elapsedMs}`);
+        setBatchScanStatus(
+          {
+            phase: 'decompress',
+            message: `Saltando ${arc.name}: carpeta destino ya contiene archivos`,
+            current: archivesDone,
+            total: Math.max(topArchives.length, 1),
+            counters: {
+              archives: { done: archivesDone, total: topArchives.length },
+            },
+          },
+          { log: true }
+        );
+        continue;
+      }
+
       console.log(`[BATCH SCAN] Descomprimiendo ${arc.name} → ${extractDir}`);
       try {
         fs.mkdirSync(extractDir, { recursive: true });
-        const extraction = await extractArchiveWithFallback(arcPath, extractDir);
+        const decompressStartAt = Date.now();
+        const heartbeat = setInterval(() => {
+          const elapsedSec = Math.max(1, Math.floor((Date.now() - decompressStartAt) / 1000));
+          const shouldLogHeartbeat = elapsedSec % 30 === 0;
+          setBatchScanStatus(
+            {
+              phase: 'decompress',
+              message: `Descomprimiendo ${arc.name} (${nextArchiveNumber}/${topArchives.length}) · ${elapsedSec}s`,
+              current: archivesDone,
+              total: Math.max(topArchives.length, 1),
+              counters: {
+                archives: { done: archivesDone, total: topArchives.length },
+              },
+            },
+            { log: shouldLogHeartbeat }
+          );
+        }, 5000);
+
+        let extraction;
+        try {
+          extraction = await withTimeout(
+            extractArchiveWithFallback(arcPath, extractDir),
+            extractTimeoutMs,
+            'BATCH_SCAN_EXTRACT_TIMEOUT'
+          );
+        } finally {
+          clearInterval(heartbeat);
+        }
+
         extractedArchivesThisRun.push({
           archiveName: arc.name,
           arcPath,
@@ -644,10 +750,11 @@ export const scanLocalDirectory = async (req, res) => {
           extractDirExistedBefore,
         });
         archivesDone += 1;
+        const elapsedMs = Date.now() - arcStartedAt;
         const donePct = topArchives.length > 0
           ? Math.round((archivesDone / topArchives.length) * 100)
           : 100;
-        console.info(`[BATCH SCAN][DECOMPRESS] ${donePct}% (${archivesDone}/${topArchives.length}) completado ${arc.name}`);
+        console.info(`[BATCH SCAN][DECOMPRESS] ${donePct}% (${archivesDone}/${topArchives.length}) completado ${arc.name} tool=${extraction.tool} ms=${elapsedMs}`);
         console.log(`[BATCH SCAN] OK ${arc.name} (tool=${extraction.tool})`);
         setBatchScanStatus(
           {
@@ -663,15 +770,20 @@ export const scanLocalDirectory = async (req, res) => {
         );
       } catch (e) {
         archivesDone += 1;
+        const elapsedMs = Date.now() - arcStartedAt;
         const donePct = topArchives.length > 0
           ? Math.round((archivesDone / topArchives.length) * 100)
           : 100;
-        console.warn(`[BATCH SCAN][DECOMPRESS] ${donePct}% (${archivesDone}/${topArchives.length}) fallo ${arc.name}`);
-        console.error(`[BATCH SCAN] Error descomprimiendo ${arc.name}: ${e.message}`);
+        console.warn(`[BATCH SCAN][DECOMPRESS] ${donePct}% (${archivesDone}/${topArchives.length}) fallo ${arc.name} ms=${elapsedMs}`);
+        const isExtractTimeout = String(e?.code || e?.message || '').includes('BATCH_SCAN_EXTRACT_TIMEOUT');
+        const errMsg = isExtractTimeout
+          ? `Timeout descomprimiendo ${arc.name}. Ajusta BATCH_SCAN_EXTRACT_TIMEOUT_MS si necesitas más tiempo.`
+          : `Error descomprimiendo ${arc.name}: ${e.message}`;
+        console.error(`[BATCH SCAN] ${errMsg}`);
         setBatchScanStatus(
           {
             phase: 'decompress',
-            message: `Fallo al descomprimir ${arc.name} (${archivesDone}/${topArchives.length})`,
+            message: `${isExtractTimeout ? 'Timeout' : 'Fallo'} al descomprimir ${arc.name} (${archivesDone}/${topArchives.length})`,
             current: archivesDone,
             total: Math.max(topArchives.length, 1),
             counters: {
@@ -740,12 +852,16 @@ export const scanLocalDirectory = async (req, res) => {
     }
 
     let newlyQueuedCount = 0;
+    const reservedStartedAt = Date.now();
     const reservedKeys = await buildReservedBatchTitleSet();
+    console.info(`[BATCH SCAN][DISCOVERY] reservedTitles=${reservedKeys.size} ms=${Date.now() - reservedStartedAt}`);
     const aiScannedItems = [];
 
     let processedDiscoveryItems = 0;
     for (let folderIdx = 0; folderIdx < folderPlans.length; folderIdx += 1) {
+      const folderStartedAt = Date.now();
       const { folder, batchPath, foldersToProcess } = folderPlans[folderIdx];
+      console.info(`[BATCH SCAN][FOLDER][START] (${folderIdx + 1}/${folderPlans.length}) folder=${folder} items=${foldersToProcess.length}`);
       // Find or create the master BatchImport record
       let batch = await prisma.batchImport.findUnique({
         where: { folderName: folder }
@@ -763,8 +879,10 @@ export const scanLocalDirectory = async (req, res) => {
       let itemsCount = 0;
 
       for (const assetFolder of foldersToProcess) {
+        const itemStartedAt = Date.now();
         processedDiscoveryItems += 1;
         const phaseItemLabel = assetFolder ? `${folder}/${assetFolder}` : `${folder}/(root)`;
+        console.info(`[BATCH SCAN][ITEM][START] step=${processedDiscoveryItems}/${Math.max(totalDiscoveryItems, 1)} path=${phaseItemLabel}`);
         const shouldLogProgress =
           processedDiscoveryItems === 1 ||
           processedDiscoveryItems === totalDiscoveryItems ||
@@ -786,6 +904,8 @@ export const scanLocalDirectory = async (req, res) => {
 
         const assetPath = path.join(batchPath, assetFolder);
         const stats = collectFolderStats(assetPath);
+  const statsMB = Number((Number(stats.totalBytes || 0) / (1024 * 1024)).toFixed(2));
+  console.info(`[BATCH SCAN][ITEM][STATS] path=${phaseItemLabel} files=${Number(stats.fileCount || 0)} sizeMB=${statsMB}`);
         const isEmptyAssetFolder = Number(stats.fileCount || 0) <= 0;
 
         // Create an item if it doesn't exist
@@ -805,7 +925,7 @@ export const scanLocalDirectory = async (req, res) => {
             removeDirIfEmpty(batchPath);
           }
 
-          console.info(`[BATCH SCAN][SKIP_EMPTY] batch=${folder} assetFolder=${assetFolder || '(root)'}`);
+          console.info(`[BATCH SCAN][ITEM][SKIP_EMPTY] path=${phaseItemLabel} ms=${Date.now() - itemStartedAt}`);
           continue;
         }
 
@@ -839,6 +959,7 @@ export const scanLocalDirectory = async (req, res) => {
               where: { id: existingItem.id },
               data: updateData,
             });
+            console.info(`[BATCH SCAN][ITEM][EXISTING_UPDATE] id=${existingItem.id} statusPrev=${existingItem.status} path=${phaseItemLabel}`);
           }
 
           aiScannedItems.push({
@@ -859,6 +980,11 @@ export const scanLocalDirectory = async (req, res) => {
               : [],
             existingStatus: existingItem.status,
           });
+          console.info(
+            `[BATCH SCAN][ITEM][EXISTING] id=${existingItem.id} status=${existingItem.status} ` +
+            `imgs=${Array.isArray(existingItem.images) ? existingItem.images.length : 0} sizeMB=${Number(existingItem.pesoMB || 0)} ` +
+            `path=${phaseItemLabel} ms=${Date.now() - itemStartedAt}`
+          );
           itemsCount++;
           continue;
         }
@@ -925,6 +1051,10 @@ export const scanLocalDirectory = async (req, res) => {
               : [],
             existingStatus: 'NEW',
           });
+          console.info(
+            `[BATCH SCAN][ITEM][NEW] id=${createdItem.id} title="${bilingualTitle.es}" ` +
+            `imgs=${images.length} sizeMB=${pesoMB} path=${phaseItemLabel} ms=${Date.now() - itemStartedAt}`
+          );
           newlyQueuedCount++;
         }
         itemsCount++;
@@ -947,6 +1077,7 @@ export const scanLocalDirectory = async (req, res) => {
         },
         { log: true }
       );
+      console.info(`[BATCH SCAN][FOLDER][DONE] (${folderIdx + 1}/${folderPlans.length}) folder=${folder} items=${itemsCount} ms=${Date.now() - folderStartedAt}`);
     }
 
     console.info(`[BATCH SCAN][DISCOVERY] items detectados=${aiScannedItems.length} nuevos=${newlyQueuedCount}`);
@@ -1036,6 +1167,10 @@ export const scanLocalDirectory = async (req, res) => {
     }
 
     console.error('[BATCH IMPORT SCAN ERROR]', error);
+    try {
+      const stackHead = String(error?.stack || '').split('\n').slice(0, 8).join(' | ');
+      if (stackHead) console.error('[BATCH IMPORT SCAN ERROR][STACK]', stackHead);
+    } catch {}
     completeBatchScanStatus(
       {
         message: `Escaneo falló: ${error?.message || error}`,
@@ -1044,6 +1179,8 @@ export const scanLocalDirectory = async (req, res) => {
       'error'
     );
     return res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
+  } finally {
+    stopScanWatchdog();
   }
 };
 
