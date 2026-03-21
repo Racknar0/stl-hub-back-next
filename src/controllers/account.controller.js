@@ -32,7 +32,6 @@ const ROTATE_AFTER_DOWNLOAD_BYTES = Number(process.env.MEGA_ROTATE_AFTER_DOWNLOA
 const MEGA_TRANSFER_STALL_TIMEOUT_MS = Number(process.env.MEGA_TRANSFER_STALL_TIMEOUT_MS || (5 * 60 * 1000));
 const MEGA_TRANSFER_STALL_MAX_RETRIES = Number(process.env.MEGA_TRANSFER_STALL_MAX_RETRIES || 2);
 const MEGA_TRANSFER_STALL_BACKOFF_MS = Number(process.env.MEGA_TRANSFER_STALL_BACKOFF_MS || 30000);
-const BATCH_MIN_USED_MB = Number(process.env.BATCH_MIN_USED_MB) || (16 * 1024);
 
 function isTruthyFlag(value) {
   return ['1', 'true', 'yes', 'y', 'on'].includes(String(value ?? '').trim().toLowerCase());
@@ -410,7 +409,7 @@ export const listAccounts = async (req, res) => {
 
     const onlyBatchUploadEligible = isTruthyFlag(req?.query?.batchUpload);
     const filtered = onlyBatchUploadEligible
-      ? mapped.filter((a) => String(a.type || '').toLowerCase() === 'main' && Number(a.storageUsedMB || 0) >= BATCH_MIN_USED_MB)
+      ? mapped.filter((a) => String(a.type || '').toLowerCase() === 'main')
       : mapped;
 
     return res.json(filtered);
