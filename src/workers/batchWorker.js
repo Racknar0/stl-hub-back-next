@@ -37,8 +37,9 @@ const IMAGES_DIR   = path.join(UPLOADS_DIR, 'images')
 const STAGING_DIR  = path.join(UPLOADS_DIR, 'batch_staging')
 
 const POLL_INTERVAL_MS = 5_000
-const STALL_TIMEOUT_MS = Number(process.env.MEGA_STALL_TIMEOUT_MS) || 3 * 60 * 1000  // 3 min
+const STALL_TIMEOUT_MS = Number(process.env.MEGA_STALL_TIMEOUT_MS) || 5 * 60 * 1000  // 5 min
 const MAX_STALL_RETRIES = 3
+const MEGA_CMD_TIMEOUT_MS = Number(process.env.MEGA_CMD_TIMEOUT_MS) || 90_000
 const UPLOAD_PROGRESS_HEARTBEAT_MS = Number(process.env.BATCH_PROGRESS_HEARTBEAT_MS) || 10_000
 const ARCHIVE_EXTS = ['.rar', '.zip', '.7z', '.tar', '.gz', '.tgz']
 const IMAGE_EXTS   = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff']
@@ -290,14 +291,46 @@ async function refreshMainAccountStorageMetrics(mainAccount, extraCtx = '') {
   }
 }
 
-function runCmd(cmd, args = []) {
+function runCmd(cmd, args = [], opts = {}) {
   return new Promise((resolve, reject) => {
+    const timeoutMs = Number(opts?.timeoutMs || MEGA_CMD_TIMEOUT_MS)
     const child = spawn(cmd, args, { shell: true })
     let out = '', err = ''
+    let settled = false
+    let timer = null
+
+    const cleanup = () => {
+      if (timer) clearTimeout(timer)
+      timer = null
+    }
+
+    const fail = (error) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(error)
+    }
+
+    const ok = (value) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve(value)
+    }
+
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        const toKill = Number(child?.pid || 0)
+        try { if (toKill) killProcessTreeBestEffort(child, `RUN-CMD ${cmd}`) } catch {}
+        fail(new Error(`${cmd} timeout after ${timeoutMs}ms`))
+      }, timeoutMs)
+    }
+
     child.stdout.on('data', d => (out += d.toString()))
     child.stderr.on('data', d => (err += d.toString()))
+    child.on('error', (e) => fail(new Error(`${cmd} spawn error: ${e.message}`)))
     child.on('close', code =>
-      code === 0 ? resolve(out) : reject(new Error(`${cmd} exited ${code}: ${(err || out).slice(0, 300)}`))
+      code === 0 ? ok(out) : fail(new Error(`${cmd} exited ${code}: ${(err || out).slice(0, 300)}`))
     )
   })
 }
@@ -402,28 +435,35 @@ async function safeMkdir(remotePath) {
 }
 
 async function megaLogout(ctx) {
-  try { await runCmd('mega-logout', []); console.log(`[BATCH][LOGOUT][OK] ${ctx}`) }
+  try { await runCmd('mega-logout', [], { timeoutMs: MEGA_CMD_TIMEOUT_MS }); console.log(`[BATCH][LOGOUT][OK] ${ctx}`) }
   catch { console.log(`[BATCH][LOGOUT][WARN] ${ctx}`) }
 }
 
 async function megaLogin(payload, ctx) {
   if (payload?.type === 'session' && payload.session) {
-    await runCmd('mega-login', [payload.session])
+    await runCmd('mega-login', [payload.session], { timeoutMs: MEGA_CMD_TIMEOUT_MS })
   } else if (payload?.username && payload?.password) {
-    await runCmd('mega-login', [payload.username, payload.password])
+    await runCmd('mega-login', [payload.username, payload.password], { timeoutMs: MEGA_CMD_TIMEOUT_MS })
   } else throw new Error('Invalid credentials payload')
   console.log(`[BATCH][LOGIN][OK] ${ctx}`)
 }
 
-async function ensureMegaSessionForAccount(payload, accountId, ctx) {
-  if (activeMegaSessionAccountId === Number(accountId)) {
+async function ensureMegaSessionForAccount(payload, accountId, ctx, opts = {}) {
+  const forceRelogin = !!opts?.forceRelogin
+
+  if (!forceRelogin && activeMegaSessionAccountId === Number(accountId)) {
     try {
-      await runCmd('mega-whoami', [])
+      await runCmd('mega-whoami', [], { timeoutMs: Math.min(MEGA_CMD_TIMEOUT_MS, 20_000) })
       console.log(`[BATCH][LOGIN][SKIP] sesión reutilizada accId=${accountId} ${ctx}`)
       return
     } catch {
       activeMegaSessionAccountId = 0
     }
+  }
+
+  if (forceRelogin && activeMegaSessionAccountId === Number(accountId)) {
+    try { await megaLogout(`FORCE_RELOGIN acc ${accountId} ${ctx}`) } catch {}
+    activeMegaSessionAccountId = 0
   }
 
   if (activeMegaSessionAccountId > 0 && activeMegaSessionAccountId !== Number(accountId)) {
@@ -849,6 +889,8 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
   const triedProxyUrls = new Set()
   let lastProxyUrl = preferredProxyByAccountId.get(accountIdNum) || ''
   const accountSwitching = activeMegaSessionAccountId > 0 && activeMegaSessionAccountId !== accountIdNum
+  let forceReloginNextAttempt = false
+  let forceSkipLastProxy = false
 
   for (let attempt = 1; attempt <= MAX_STALL_RETRIES; attempt++) {
     try {
@@ -876,6 +918,7 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
         const shouldReuseLastProxy = Boolean(
           lastProxyUrl
           && attempt === 1
+          && !forceSkipLastProxy
           && !manualSwitchRequested
           && !(accountSwitching && activeMegaProxyUrl && lastProxyUrl === activeMegaProxyUrl)
         )
@@ -930,8 +973,15 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
         })
         updateActiveBatchUpload(account.__batchItemId, { proxyUrl: picked.proxyUrl })
 
-        await ensureMegaSessionForAccount(payload, account.id, ctx)
+        if (forceReloginNextAttempt) {
+          try { await megaLogout(`STALL_RECOVERY acc ${account.id} ${ctx}`) } catch {}
+          activeMegaSessionAccountId = 0
+        }
+
+        await ensureMegaSessionForAccount(payload, account.id, ctx, { forceRelogin: forceReloginNextAttempt })
         await safeMkdir(remotePath)
+        forceReloginNextAttempt = false
+        forceSkipLastProxy = false
 
         console.log(`[BATCH][UPLOAD][${role.toUpperCase()}] attempt=${attempt} ${path.basename(archivePath)} → ${remotePath}`)
 
@@ -968,9 +1018,20 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
       if (/FORCE_PROXY_SWITCH_REQUESTED/i.test(msg)) {
         // Reintento inmediato, sin consumir cupo por acción manual de "otro proxy".
         attempt -= 1
+        forceSkipLastProxy = true
+        forceReloginNextAttempt = true
         await sleep(350)
         continue
       }
+
+      const looksLikeStall = /MEGA_PUT_STALL_TIMEOUT|timeout after|mega-put exited/i.test(msg)
+      if (looksLikeStall && lastProxyUrl) {
+        triedProxyUrls.add(lastProxyUrl)
+        forceSkipLastProxy = true
+        forceReloginNextAttempt = true
+        console.warn(`[BATCH][${role.toUpperCase()}][RECOVERY] stall/timeout detectado, forzando logout+relogin+proxy-rotate accId=${account.id}`)
+      }
+
       if (attempt >= MAX_STALL_RETRIES) {
         preferredProxyByAccountId.delete(accountIdNum)
         throw e
