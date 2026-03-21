@@ -989,7 +989,7 @@ function buildExpectedRemoteFilesSet(baseB, assets) {
   for (const a of assets || []) {
     if (!a?.archiveName) continue;
     const fileName = getArchiveFileName(a.archiveName);
-          const fileName = getArchiveFileName(a.archiveName);
+    const remoteFolder = path.posix.join(baseB, a.slug);
     const remoteFile = path.posix.join(remoteFolder, fileName);
     const norm = normalizeRemotePathForCompare(remoteFile);
     if (norm) set.add(norm);
