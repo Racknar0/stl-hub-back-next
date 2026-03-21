@@ -981,11 +981,14 @@ async function createAssetRecord({ slug, title, titleEn, description, descriptio
   const fullTitle = await ensureUniqueAssetTitle(title)
   const fullTitleEn = ensurePrefixedTitle(titleEn || title)
   const archiveSizeB = BigInt(sizeBytes || 0)
+  const descriptionEs = String(description || '').trim()
+  const descriptionEnSafe = String(descriptionEn || '').trim()
 
   const data = {
     title: fullTitle,
     titleEn: fullTitleEn,
-    description: String(description || descriptionEn || '').trim() || null,
+    description: descriptionEs || descriptionEnSafe || null,
+    descriptionEn: descriptionEnSafe || descriptionEs || null,
     slug,
     archiveName,
     archiveSizeB,
