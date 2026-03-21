@@ -320,25 +320,53 @@ function run7z(args, options = {}) {
     // shell: false evita problemas de escape de rutas con espacios en Windows
     const child = spawn(SEVEN_ZIP, args, { shell: false });
     let out = '', err = '';
+    let stdoutCarry = '';
+    let stderrCarry = '';
+
+    const emitProgressFromChunk = (chunkText, source) => {
+      if (!onProgress) return;
+      const lines = String(chunkText || '').split(/[\r\n]+/).map((l) => String(l || '').trim()).filter(Boolean);
+      for (const ln of lines) {
+        const pctMatch = ln.match(/(?:^|\s)(\d{1,3})%/);
+        const pct = pctMatch ? Math.max(0, Math.min(100, Number(pctMatch[1] || 0))) : null;
+
+        let file = '';
+        const fileMatch = ln.match(/(?:extracting|extract)\s+(.+)$/i);
+        if (fileMatch) {
+          const candidate = String(fileMatch[1] || '').trim();
+          if (candidate && !/^archive\s*:/i.test(candidate) && !/^path\s*=\s*/i.test(candidate)) {
+            file = candidate;
+          }
+        }
+
+        if (pct != null || file) {
+          try { onProgress({ percent: pct, file, line: ln, tool: '7z', source }); } catch {}
+        }
+      }
+    };
+
     child.stdout.on('data', d => {
       const txt = d.toString();
       out += txt;
-      if (!onProgress) return;
-
-      const lines = txt.split(/\r?\n/).map((l) => String(l || '').trim()).filter(Boolean);
-      for (const ln of lines) {
-        const pctMatch = ln.match(/(\d{1,3})%/);
-        const pct = pctMatch ? Math.max(0, Math.min(100, Number(pctMatch[1] || 0))) : null;
-        const fileMatch = ln.match(/(?:extracting|extract)\s+(.+)$/i);
-        const file = fileMatch ? String(fileMatch[1] || '').trim() : '';
-        if (pct != null || file) {
-          try { onProgress({ percent: pct, file, line: ln, tool: '7z' }); } catch {}
-        }
-      }
+      stdoutCarry += txt;
+      const parts = stdoutCarry.split(/[\r\n]+/);
+      stdoutCarry = parts.pop() || '';
+      emitProgressFromChunk(parts.join('\n'), 'stdout');
     });
-    child.stderr.on('data', d => (err += d.toString()));
+
+    child.stderr.on('data', d => {
+      const txt = d.toString();
+      err += txt;
+      stderrCarry += txt;
+      const parts = stderrCarry.split(/[\r\n]+/);
+      stderrCarry = parts.pop() || '';
+      emitProgressFromChunk(parts.join('\n'), 'stderr');
+    });
+
     child.on('error', (e) => reject(new Error(`Spawn error: ${e.message}`)));
     child.on('close', code => {
+      emitProgressFromChunk(stdoutCarry, 'stdout-tail');
+      emitProgressFromChunk(stderrCarry, 'stderr-tail');
       if (code === 0) resolve(out);
       else reject(new Error(`7z exited ${code}: ${(err || out).slice(0, 300)}`));
     });
@@ -350,23 +378,45 @@ function runUnrar(args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn('unrar', args, { shell: false });
     let out = '', err = '';
+    let stdoutCarry = '';
+    let stderrCarry = '';
+
+    const emitProgressFromChunk = (chunkText, source) => {
+      if (!onProgress) return;
+      const lines = String(chunkText || '').split(/[\r\n]+/).map((l) => String(l || '').trim()).filter(Boolean);
+      for (const ln of lines) {
+        const pctMatch = ln.match(/(?:^|\s)(\d{1,3})%/);
+        const pct = pctMatch ? Math.max(0, Math.min(100, Number(pctMatch[1] || 0))) : null;
+        const fileMatch = ln.match(/(?:extracting|extract)\s+(.+)$/i);
+        const file = fileMatch ? String(fileMatch[1] || '').trim() : '';
+        if (pct != null || file) {
+          try { onProgress({ percent: pct, file, line: ln, tool: 'unrar', source }); } catch {}
+        }
+      }
+    };
+
     child.stdout.on('data', d => {
       const txt = d.toString();
       out += txt;
-      if (!onProgress) return;
-
-      const lines = txt.split(/\r?\n/).map((l) => String(l || '').trim()).filter(Boolean);
-      for (const ln of lines) {
-        const fileMatch = ln.match(/(?:extracting|extract)\s+(.+)$/i);
-        const file = fileMatch ? String(fileMatch[1] || '').trim() : '';
-        if (file) {
-          try { onProgress({ percent: null, file, line: ln, tool: 'unrar' }); } catch {}
-        }
-      }
+      stdoutCarry += txt;
+      const parts = stdoutCarry.split(/[\r\n]+/);
+      stdoutCarry = parts.pop() || '';
+      emitProgressFromChunk(parts.join('\n'), 'stdout');
     });
-    child.stderr.on('data', d => (err += d.toString()));
+
+    child.stderr.on('data', d => {
+      const txt = d.toString();
+      err += txt;
+      stderrCarry += txt;
+      const parts = stderrCarry.split(/[\r\n]+/);
+      stderrCarry = parts.pop() || '';
+      emitProgressFromChunk(parts.join('\n'), 'stderr');
+    });
+
     child.on('error', (e) => reject(new Error(`Spawn error: ${e.message}`)));
     child.on('close', code => {
+      emitProgressFromChunk(stdoutCarry, 'stdout-tail');
+      emitProgressFromChunk(stderrCarry, 'stderr-tail');
       if (code === 0) resolve(out);
       else reject(new Error(`unrar exited ${code}: ${(err || out).slice(0, 300)}`));
     });
@@ -378,7 +428,7 @@ function isUnsupportedArchiveMethodError(msg = '') {
 }
 
 async function extractArchiveWithFallback(archivePath, extractDir, options = {}) {
-  const args7z = ['x', archivePath, `-o${extractDir}`, '-y', '-aoa'];
+  const args7z = ['x', archivePath, `-o${extractDir}`, '-y', '-aoa', '-bb1', '-bsp1'];
   try {
     await run7z(args7z, options);
     return { tool: '7z' };
@@ -428,6 +478,31 @@ function directoryHasEntries(dirPath) {
     return Array.isArray(entries) && entries.length > 0;
   } catch {
     return false;
+  }
+}
+
+function getShallowDirSnapshot(dirPath) {
+  try {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    let dirs = 0;
+    let files = 0;
+    for (const e of entries) {
+      if (e.isDirectory()) dirs += 1;
+      else if (e.isFile()) files += 1;
+    }
+    return {
+      exists: true,
+      entries: entries.length,
+      dirs,
+      files,
+    };
+  } catch {
+    return {
+      exists: false,
+      entries: 0,
+      dirs: 0,
+      files: 0,
+    };
   }
 }
 
@@ -748,10 +823,11 @@ export const scanLocalDirectory = async (req, res) => {
         const heartbeat = setInterval(() => {
           const elapsedSec = Math.max(1, Math.floor((Date.now() - decompressStartAt) / 1000));
           const shouldLogHeartbeat = elapsedSec % 30 === 0;
+          const partial = getShallowDirSnapshot(extractDir);
           setBatchScanStatus(
             {
               phase: 'decompress',
-              message: `Descomprimiendo ${arc.name} (${nextArchiveNumber}/${topArchives.length}) · ${elapsedSec}s`,
+              message: `Descomprimiendo ${arc.name} (${nextArchiveNumber}/${topArchives.length}) · ${elapsedSec}s · outDirs=${partial.dirs} outFiles=${partial.files}`,
               current: archivesDone,
               total: Math.max(topArchives.length, 1),
               counters: {
@@ -785,6 +861,7 @@ export const scanLocalDirectory = async (req, res) => {
                 lastProgressLogAt = now;
 
                 const elapsedSec = Math.max(1, Math.floor((now - decompressStartAt) / 1000));
+                const partial = getShallowDirSnapshot(extractDir);
                 const globalPercent = topArchives.length > 0
                   ? Math.max(0, Math.min(100, Math.round(((archivesDone + ((pct ?? 0) / 100)) / topArchives.length) * 100)))
                   : (pct ?? 0);
@@ -793,7 +870,7 @@ export const scanLocalDirectory = async (req, res) => {
                 setBatchScanStatus(
                   {
                     phase: 'decompress',
-                    message: `Descomprimiendo ${arc.name} (${nextArchiveNumber}/${topArchives.length}) · ${pct != null ? `${pct}%` : 'trabajando'}${fileHint} · ${elapsedSec}s`,
+                    message: `Descomprimiendo ${arc.name} (${nextArchiveNumber}/${topArchives.length}) · ${pct != null ? `${pct}%` : 'trabajando'}${fileHint} · ${elapsedSec}s · outDirs=${partial.dirs} outFiles=${partial.files}`,
                     current: archivesDone,
                     total: Math.max(topArchives.length, 1),
                     percent: globalPercent,
@@ -807,7 +884,7 @@ export const scanLocalDirectory = async (req, res) => {
                 if (shouldUpdateByPct || shouldUpdateByFile) {
                   console.info(
                     `[BATCH SCAN][DECOMPRESS][PROGRESS] arc=${arc.name} ` +
-                    `pct=${pct != null ? `${pct}%` : '-'} elapsed=${elapsedSec}s file=${file || '-'}`
+                    `pct=${pct != null ? `${pct}%` : '-'} elapsed=${elapsedSec}s file=${file || '-'} outDirs=${partial.dirs} outFiles=${partial.files}`
                   );
                 }
               }
