@@ -1373,10 +1373,29 @@ export async function startBatchWorker() {
   while (true) {
     try {
       // Fase 1 prioritaria: terminar todos los MAIN antes de arrancar BACKUPS.
-      const nextMainItem = await prisma.batchImportItem.findFirst({
-        where: { status: 'QUEUED' },
-        orderBy: { createdAt: 'asc' },
-      })
+      let nextMainItem = null
+
+      // Si hay sesión MAIN activa, drenar primero esa misma cuenta para evitar saltos de cuenta.
+      if (Number(activeMegaSessionAccountId || 0) > 0) {
+        nextMainItem = await prisma.batchImportItem.findFirst({
+          where: {
+            status: 'QUEUED',
+            targetAccount: Number(activeMegaSessionAccountId),
+          },
+          orderBy: { createdAt: 'asc' },
+        })
+      }
+
+      // Si no hay pendiente para la cuenta activa, escoger por orden de cuenta y luego antiguedad.
+      if (!nextMainItem) {
+        nextMainItem = await prisma.batchImportItem.findFirst({
+          where: { status: 'QUEUED' },
+          orderBy: [
+            { targetAccount: 'asc' },
+            { createdAt: 'asc' },
+          ],
+        })
+      }
 
       if (nextMainItem) {
         await processMainQueueItem(nextMainItem)
