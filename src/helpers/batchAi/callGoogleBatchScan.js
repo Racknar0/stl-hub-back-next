@@ -402,6 +402,7 @@ function ensureBilingualDescription(raw, fallbackEs, fallbackEn) {
 
 function normalizeCategory(rawCategory, payload, matchers) {
   const bilingual = ensureBilingualName(rawCategory)
+  const catalogCategories = Array.isArray(payload?.dbCatalog?.categories) ? payload.dbCatalog.categories : []
   const matched =
     matchers.findCategory(rawCategory?.slug) ||
     matchers.findCategory(bilingual.es) ||
@@ -416,6 +417,22 @@ function normalizeCategory(rawCategory, payload, matchers) {
       nameEn: matched.nameEn || matched.name,
       es: matched.name,
       en: matched.nameEn || matched.name,
+      fromCatalog: true,
+    }
+  }
+
+  // Nunca dejar un item sin categoria del catalogo: si IA propone una categoria no existente,
+  // usamos una categoria existente como fallback de seguridad.
+  if (catalogCategories.length > 0) {
+    const fallback = catalogCategories[0]
+    return {
+      id: fallback.id,
+      slug: fallback.slug,
+      slugEn: fallback.slugEn || null,
+      name: fallback.name,
+      nameEn: fallback.nameEn || fallback.name,
+      es: fallback.name,
+      en: fallback.nameEn || fallback.name,
       fromCatalog: true,
     }
   }
@@ -673,16 +690,23 @@ async function classifySingleItem(ai, payload, item) {
     'Si las imagenes son ambiguas, insuficientes o no estan presentes, usa como respaldo assetName, sourceTitle y sourcePathHint.',
     'El dominio es una tienda de renders/modelos 3D.',
     'Si el contenido muestra desnudez explicita, sexualidad evidente o una tematica NSFW, debes usar una categoria adulta existente del catalogo si esta disponible.',
-    'Debes elegir SOLO 1 categoria del catalogo recibido.',
+    'Debes elegir SOLO 1 categoria y SIEMPRE debe ser del catalogo recibido.',
+    'No se permite dejar categoria vacia, inventar categorias fuera del catalogo ni usar placeholders como "sin categoria".',
+    'Si hay duda, elige la categoria existente mas cercana del catalogo.',
     'Debes devolver EXACTAMENTE 3 tags.',
     'IMPORTANTE: cada tag debe venir como par bilingue { es, en }.',
+    'Antes de inventar tags, prioriza SIEMPRE los tags existentes del catalogo.',
+    'Para cada tag: primero intenta mapear a un tag ya existente (por slug, nombre en espanol o nombre en ingles).',
     'Si un tag equivalente ya existe en el catalogo en espanol o en ingles, devuelve exactamente ese mismo par es/en del catalogo.',
-    'Si realmente no existe equivalente en el catalogo, propone tag nuevo tambien en formato bilingue (es/en).',
+    'Solo si realmente no existe equivalente en el catalogo, propone tag nuevo en formato bilingue (es/en).',
     'El nombre del asset debe devolverse SIEMPRE bilingue en el objeto nombre: { es, en }.',
     'IMPORTANTE PARA NOMBRE: no copies literalmente sourceTitle/sourcePathHint cuando vengan feos (guiones, underscores, versionado, extensiones, ruido tecnico).',
     'Debes proponer un nombre limpio y comercial, corto (3-9 palabras), legible para tienda.',
     'La categoria debe devolverse SIEMPRE bilingue en el objeto categoria: { es, en }.',
     'La descripcion debe devolverse SIEMPRE bilingue en el objeto descripcion: { es, en }.',
+    'IMPORTANTE DESCRIPCION: cada descripcion (es y en) debe tener exactamente 300 palabras.',
+    'La descripcion debe hablar del personaje y de la figura/modelo fisico para impresion 3D, en tono comercial y descriptivo.',
+    'No escribas menos de 300 ni mas de 300 palabras en cada idioma.',
     'Responde SOLO JSON valido, sin markdown ni texto extra, usando EXACTAMENTE esta forma:',
     JSON.stringify({
       nombre: { es: 'figura anime samurai', en: 'samurai anime figure' },
