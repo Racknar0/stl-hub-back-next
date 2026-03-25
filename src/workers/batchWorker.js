@@ -50,7 +50,7 @@ let activeMegaSessionAccountId = 0
 let activeMegaProxyUrl = ''
 const preferredProxyByAccountId = new Map()
 const sessionUploadedMbByAccountId = new Map()
-const MAX_ACCOUNT_UPLOAD_MB = Number(process.env.BATCH_ACCOUNT_MAX_MB) || (19 * 1024)
+const MAX_ACCOUNT_UPLOAD_MB = Number(process.env.BATCH_ACCOUNT_MAX_MB) || (18 * 1024)
 
 // ────────────────────────────── HELPERS ──────────────────────────────
 

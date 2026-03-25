@@ -11,7 +11,7 @@ const UPLOADS_DIR = path.resolve('uploads');
 const BATCH_DIR = path.join(UPLOADS_DIR, 'batch_imports');
 const ARCHIVE_EXTS = ['.rar', '.zip', '.7z', '.tar', '.gz', '.tgz'];
 const TITLE_PREFIX_RE = /^\s*STL\s*-\s*/i;
-const MAX_ACCOUNT_UPLOAD_MB = 19 * 1024;
+const MAX_ACCOUNT_UPLOAD_MB = 18 * 1024;
 
 let batchScanRunSeq = 0;
 let batchScanStatus = {
