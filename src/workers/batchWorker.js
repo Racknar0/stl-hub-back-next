@@ -27,6 +27,8 @@ import {
   clearActiveBatchUpload,
   consumeBatchProxySwitchRequest,
   hasBatchProxySwitchRequest,
+  hasBatchStopRequest,
+  clearBatchStopRequest,
 } from '../utils/batchProxySwitch.js'
 
 const prisma = new PrismaClient()
@@ -899,6 +901,10 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
 
   for (let attempt = 1; attempt <= MAX_STALL_RETRIES; attempt++) {
     try {
+      if (hasBatchStopRequest(account.__batchItemId)) {
+        throw new Error('BATCH_STOP_REQUESTED')
+      }
+
       const manualSwitchRequested = consumeBatchProxySwitchRequest(account.__batchItemId)
       if (manualSwitchRequested && lastProxyUrl) {
         triedProxyUrls.add(lastProxyUrl)
@@ -996,7 +1002,7 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
           logPrefix: `batch-${role} item=${itemIdCtx || '-'} accId=${account.id} attempt=${attempt}`,
           stallTimeoutMs: STALL_TIMEOUT_MS,
           onProgress,
-          shouldAbort: () => hasBatchProxySwitchRequest(account.__batchItemId),
+          shouldAbort: () => hasBatchProxySwitchRequest(account.__batchItemId) || hasBatchStopRequest(account.__batchItemId),
           onRegisterCancel: (cancelFn) => { cancelUploadNow = cancelFn },
         })
 
@@ -1020,6 +1026,9 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
       clearActiveBatchUpload(account.__batchItemId)
       const msg = String(e?.message || e)
       console.error(`[BATCH][${role.toUpperCase()}][FAIL] attempt=${attempt}/${MAX_STALL_RETRIES} accId=${account.id}: ${msg}`)
+      if (/BATCH_STOP_REQUESTED/i.test(msg)) {
+        throw new Error('BATCH_STOP_REQUESTED')
+      }
       if (/FORCE_PROXY_SWITCH_REQUESTED/i.test(msg)) {
         // Reintento inmediato, sin consumir cupo por acción manual de "otro proxy".
         attempt -= 1
@@ -1226,6 +1235,23 @@ async function processMainQueueItem(item) {
     console.log(`[BATCH][MAIN][OK] item=${item.id} asset=${asset.id}`)
   } catch (err) {
     const msg = String(err?.message || err).slice(0, 500)
+    const manualStop = /BATCH_STOP_REQUESTED/i.test(msg)
+
+    if (manualStop) {
+      await updateItem({
+        status: 'DRAFT',
+        mainStatus: 'PENDING',
+        backupStatus: 'PENDING',
+        mainProgress: 0,
+        error: 'Detenido manualmente. Devuelto a borrador.',
+      })
+      clearBatchStopRequest(item.id)
+      if (ctx?.finalArchivePath) {
+        deleteLocalArchiveBestEffort(ctx.finalArchivePath, `item=${item.id} phase=main manual-stop`)
+      }
+      return
+    }
+
     const accId = Number(ctx?.mainAccount?.id || item?.targetAccount || 0) || '-'
     const folderName = String(item?.folderName || '').trim() || '-'
     const slug = String(ctx?.slug || '').trim() || '-'
@@ -1260,6 +1286,8 @@ async function processBackupsForCompletedItem(item) {
   const updateItem = (data) => prisma.batchImportItem.update({ where: { id: item.id }, data })
 
   try {
+    if (hasBatchStopRequest(item.id)) throw new Error('BATCH_STOP_REQUESTED')
+
     if (!item.createdAssetId) throw new Error('createdAssetId faltante para fase backup')
 
     const asset = await prisma.asset.findUnique({
@@ -1299,6 +1327,7 @@ async function processBackupsForCompletedItem(item) {
 
     const failedBackups = []
     for (const backup of backupAccounts) {
+      if (hasBatchStopRequest(item.id)) throw new Error('BATCH_STOP_REQUESTED')
       try {
         const logBackupProgress = createProgressLogger(`item=${item.id} role=BACKUP acc=${backup.id}`)
         await uploadToAccountWithRetry({
@@ -1348,6 +1377,19 @@ async function processBackupsForCompletedItem(item) {
     console.log(`[BATCH][BACKUP][OK] item=${item.id} asset=${asset.id}`)
   } catch (err) {
     const msg = String(err?.message || err).slice(0, 500)
+    const manualStop = /BATCH_STOP_REQUESTED/i.test(msg)
+
+    if (manualStop) {
+      await updateItem({
+        status: 'DRAFT',
+        mainStatus: 'OK',
+        backupStatus: 'ERROR',
+        error: 'Main ya subido. Backup detenido manualmente para identificar y reintentar.',
+      })
+      clearBatchStopRequest(item.id)
+      return
+    }
+
     console.error(`[BATCH][BACKUP][FAIL] item=${item.id}:`, msg)
     await updateItem({
       status: 'FAILED',

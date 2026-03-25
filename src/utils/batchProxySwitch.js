@@ -1,4 +1,5 @@
 const switchRequests = new Map(); // itemId -> { requestedAt, reason }
+const stopRequests = new Map(); // itemId -> { requestedAt, reason }
 const activeUploads = new Map(); // itemId -> { phase, accountId, proxyUrl, cancel }
 
 function toItemId(value) {
@@ -77,6 +78,46 @@ export function requestBatchProxySwitch(itemId, reason = 'manual') {
     accountId: active?.accountId || null,
     proxyUrl: active?.proxyUrl || null,
   };
+}
+
+export function requestBatchStop(itemId, reason = 'manual-stop') {
+  const id = toItemId(itemId);
+  if (!id) return { ok: false, message: 'invalid itemId' };
+
+  stopRequests.set(id, {
+    requestedAt: Date.now(),
+    reason: String(reason || 'manual-stop').slice(0, 64),
+  });
+
+  const active = activeUploads.get(id);
+  let cancelSent = false;
+  if (active?.cancel) {
+    try {
+      active.cancel('manual-stop-batch');
+      cancelSent = true;
+    } catch {}
+  }
+
+  return {
+    ok: true,
+    itemId: id,
+    cancelSent,
+    phase: active?.phase || null,
+    accountId: active?.accountId || null,
+    proxyUrl: active?.proxyUrl || null,
+  };
+}
+
+export function hasBatchStopRequest(itemId) {
+  const id = toItemId(itemId);
+  if (!id) return false;
+  return stopRequests.has(id);
+}
+
+export function clearBatchStopRequest(itemId) {
+  const id = toItemId(itemId);
+  if (!id) return;
+  stopRequests.delete(id);
 }
 
 export function getActiveBatchUploadInfo(itemId) {

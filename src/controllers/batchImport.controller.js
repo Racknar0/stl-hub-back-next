@@ -2,7 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
-import { requestBatchProxySwitch } from '../utils/batchProxySwitch.js';
+import { requestBatchProxySwitch, requestBatchStop } from '../utils/batchProxySwitch.js';
 import { buildBatchScanRequestData } from '../helpers/batchAi/buildBatchScanRequestData.js';
 import { callGoogleBatchScan } from '../helpers/batchAi/callGoogleBatchScan.js';
 
@@ -1689,6 +1689,95 @@ export const confirmBatchItems = async (req, res) => {
       : undefined;
 
     return res.json({ success: true, confirmed, confirmedIds, renamed, rejectedOverLimit, message });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+// POST /api/batch-imports/stop-and-draft
+// - Intenta detener uploads activos
+// - Devuelve toda la cola no-DRAFT a DRAFT
+// - Si MAIN ya fue subido, marca backup en ERROR para identificar/reintentar
+export const stopAndResetBatchToDraft = async (_req, res) => {
+  try {
+    const items = await prisma.batchImportItem.findMany({
+      where: {
+        status: { not: 'DRAFT' },
+      },
+      select: {
+        id: true,
+        status: true,
+        mainStatus: true,
+        backupStatus: true,
+        createdAssetId: true,
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    if (!items.length) {
+      return res.json({
+        success: true,
+        resetCount: 0,
+        stopSignals: 0,
+        mainUploadedMarked: 0,
+        message: 'No hay items para reiniciar.',
+      });
+    }
+
+    let resetCount = 0;
+    let stopSignals = 0;
+    let mainUploadedMarked = 0;
+
+    for (const item of items) {
+      const status = String(item?.status || '').toUpperCase();
+      const mainStatus = String(item?.mainStatus || '').toUpperCase();
+      const backupStatus = String(item?.backupStatus || '').toUpperCase();
+      const hasCreatedAsset = Number(item?.createdAssetId || 0) > 0;
+
+      const isInFlight =
+        status === 'PROCESSING' ||
+        mainStatus === 'UPLOADING' ||
+        backupStatus === 'UPLOADING';
+
+      if (isInFlight) {
+        const stopResult = requestBatchStop(item.id, 'stop-and-draft');
+        if (stopResult?.ok) stopSignals += 1;
+      }
+
+      const mainAlreadyUploaded = hasCreatedAsset || mainStatus === 'OK' || status === 'COMPLETED';
+
+      const nextData = mainAlreadyUploaded
+        ? {
+            status: 'DRAFT',
+            mainStatus: 'OK',
+            backupStatus: 'ERROR',
+            error: 'Main ya subido. Backup marcado en error para identificar y reintentar.',
+          }
+        : {
+            status: 'DRAFT',
+            mainStatus: 'PENDING',
+            backupStatus: 'PENDING',
+            mainProgress: 0,
+            createdAssetId: null,
+            error: null,
+          };
+
+      await prisma.batchImportItem.update({
+        where: { id: item.id },
+        data: nextData,
+      });
+
+      resetCount += 1;
+      if (mainAlreadyUploaded) mainUploadedMarked += 1;
+    }
+
+    return res.json({
+      success: true,
+      resetCount,
+      stopSignals,
+      mainUploadedMarked,
+      message: `Batch reiniciado: ${resetCount} item(s) en borrador.${mainUploadedMarked > 0 ? ` ${mainUploadedMarked} con main subido quedaron marcados con error en backup.` : ''}`,
+    });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
