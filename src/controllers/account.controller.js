@@ -790,9 +790,8 @@ export const testAccount = async (req, res) => {
         status: 'CONNECTED',
         statusMessage: null,
         lastCheckAt: new Date(),
-        // SE PAUSA EL GUARDE PARA CAPTURAR INFO:
-        // storageUsedMB,
-        // storageTotalMB,
+        storageUsedMB,
+        storageTotalMB,
         fileCount,
         folderCount,
       },
