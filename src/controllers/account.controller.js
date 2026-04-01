@@ -69,10 +69,10 @@ async function megaGetWithStallRetry({ remoteFile, destLocal, ctx, proxies, getP
         stallTimeoutMs: MEGA_TRANSFER_STALL_TIMEOUT_MS,
         heartbeatMs: 30000,
         onProgress: ({ pct }) => {
-          log.verbose(`[SYNC][DL][PROGRESS] ${pct}% ${ctx}`);
+          log.info(`[SYNC][DL][PROGRESS] ${pct}% ${ctx}`);
         },
         onHeartbeat: ({ idleMs, lastPct }) => {
-          log.verbose(`[SYNC][DL][HB] idle=${Math.round(idleMs / 1000)}s pct=${lastPct ?? '--'} ${ctx}`);
+          log.info(`[SYNC][DL][HB] idle=${Math.round(idleMs / 1000)}s pct=${lastPct ?? '--'} ${ctx}`);
         },
       });
       log.info(`[SYNC][DL][DONE] remote=${remoteFile} ${ctx}`);
@@ -102,10 +102,10 @@ async function megaPutWithStallRetry({ localPath, remoteFolderOrFile, ctx, proxi
         stallTimeoutMs: MEGA_TRANSFER_STALL_TIMEOUT_MS,
         heartbeatMs: 30000,
         onProgress: ({ pct }) => {
-          log.verbose(`[SYNC][UP][PROGRESS] ${pct}% ${ctx}`);
+          log.info(`[SYNC][UP][PROGRESS] ${pct}% ${ctx}`);
         },
         onHeartbeat: ({ idleMs, lastPct }) => {
-          log.verbose(`[SYNC][UP][HB] idle=${Math.round(idleMs / 1000)}s pct=${lastPct ?? '--'} ${ctx}`);
+          log.info(`[SYNC][UP][HB] idle=${Math.round(idleMs / 1000)}s pct=${lastPct ?? '--'} ${ctx}`);
         },
       });
       log.info(`[SYNC][UP][DONE] remote=${remoteFolderOrFile} ${ctx}`);
