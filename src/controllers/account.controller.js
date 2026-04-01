@@ -392,7 +392,7 @@ export const listAccounts = async (req, res) => {
       orderBy: { id: 'asc' },
       include: {
         backups: { include: { backupAccount: { select: { id: true, alias: true, type: true, status: true, storageUsedMB: true, storageTotalMB: true } } } },
-        assignedAsBackup: { include: { mainAccount: { select: { id: true, alias: true, type: true, status: true } } } },
+        assignedAsBackup: { include: { mainAccount: { select: { id: true, alias: true, type: true, status: true, storageUsedMB: true, storageTotalMB: true } } } },
       },
     });
 
@@ -435,8 +435,8 @@ export const listAccounts = async (req, res) => {
         lastCheckAt: a.lastCheckAt,
         createdAt: a.createdAt,
         updatedAt: a.updatedAt,
-        backups: (a.backups || []).map(b => ({ id: b.backupAccount.id, alias: b.backupAccount.alias, type: b.backupAccount.type, status: b.backupAccount.status })),
-        mains: (a.assignedAsBackup || []).map(b => ({ id: b.mainAccount.id, alias: b.mainAccount.alias, type: b.mainAccount.type, status: b.mainAccount.status })),
+        backups: (a.backups || []).map(b => ({ id: b.backupAccount.id, alias: b.backupAccount.alias, type: b.backupAccount.type, status: b.backupAccount.status, storageTotalMB: b.backupAccount.storageTotalMB })),
+        mains: (a.assignedAsBackup || []).map(b => ({ id: b.mainAccount.id, alias: b.mainAccount.alias, type: b.mainAccount.type, status: b.mainAccount.status, storageTotalMB: b.mainAccount.storageTotalMB })),
       };
     });
 
