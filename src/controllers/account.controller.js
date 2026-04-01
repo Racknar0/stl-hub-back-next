@@ -1619,7 +1619,7 @@ export const syncMainToBackups = async (req, res) => {
   } catch (ne) {
     log.warn('[NOTIF][SYNC][FAIL] No se pudo crear notificación de error general: ' + String(ne.message).slice(0, 200));
   }
-  logSync('Error general en sincronización: ' + e.message,'error');
+  log.error('Error general en sincronización: ' + e.message);
     return res.status(500).json({ message: 'Error sincronizando', error: e.message });
   }
 };
