@@ -670,12 +670,14 @@ export const testAccount = async (req, res) => {
 
     // Métricas: SOLO almacenamiento (quitar banda). Intentar df primero, luego fallback a du.
     let storageUsedMB = 0, storageTotalMB = 0;
+    let rawDfOutput = ''; // Nuevo: capturar para enviar al Frontend
     // Conteos
     let fileCount = 0, folderCount = 0;
 
     try {
       const dfTxt = await runCmd(dfCmd, ['-h']);
       const txt = (dfTxt.out || dfTxt.err || '').toString();
+      rawDfOutput += `[-h command]:\n${txt}\n`;
       console.log(`\n=== [DEBUG] RAW MEGA-DF -H ACTUAL ACCOUNT ID: ${id} ===\n${txt}\n===============================================\n`);
       
       // Patrones de almacenamiento used/total (EN/ES)
@@ -709,6 +711,7 @@ export const testAccount = async (req, res) => {
       try {
         const dfTxt = await runCmd(dfCmd, []);
         const txt = (dfTxt.out || dfTxt.err || '').toString();
+        rawDfOutput += `[without -h]:\n${txt}\n`;
         console.log(`\n=== [DEBUG] RAW MEGA-DF (sin -h) ACTUAL ACCOUNT ID: ${id} ===\n${txt}\n===============================================\n`);
 
         let m = txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i)
