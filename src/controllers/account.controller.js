@@ -391,33 +391,55 @@ export const listAccounts = async (req, res) => {
     const accounts = await prisma.megaAccount.findMany({
       orderBy: { id: 'asc' },
       include: {
-        backups: { include: { backupAccount: { select: { id: true, alias: true, type: true, status: true } } } },
+        backups: { include: { backupAccount: { select: { id: true, alias: true, type: true, status: true, storageUsedMB: true, storageTotalMB: true } } } },
         assignedAsBackup: { include: { mainAccount: { select: { id: true, alias: true, type: true, status: true } } } },
       },
     });
 
-    const mapped = accounts.map(a => ({
-      id: a.id,
-      alias: a.alias,
-      email: a.email,
-      baseFolder: a.baseFolder,
-      type: a.type,
-      status: a.status,
-      statusMessage: a.statusMessage,
-      suspended: a.suspended,
-      storageUsedMB: a.storageUsedMB,
-      storageTotalMB: a.storageTotalMB,
-      errors24h: a.errors24h,
-      fileCount: a.fileCount,
-      folderCount: a.folderCount,
-      lastCheckAt: a.lastCheckAt,
-      createdAt: a.createdAt,
-      updatedAt: a.updatedAt,
-      backups: (a.backups || []).map(b => ({ id: b.backupAccount.id, alias: b.backupAccount.alias, type: b.backupAccount.type, status: b.backupAccount.status })),
-      mains: (a.assignedAsBackup || []).map(b => ({ id: b.mainAccount.id, alias: b.mainAccount.alias, type: b.mainAccount.type, status: b.mainAccount.status })),
-    }));
-
     const onlyBatchUploadEligible = isTruthyFlag(req?.query?.batchUpload);
+
+    const mapped = accounts.map(a => {
+      let activeUsedMB = a.storageUsedMB || 0;
+      let activeTotalMB = a.storageTotalMB || 0;
+
+      // Si es para batch upload, calculamos el "cuello de botella" de las cuentas backup enlazadas.
+      if (onlyBatchUploadEligible && String(a.type).toLowerCase() === 'main') {
+        let maxAvailable = Math.max(0, activeTotalMB - activeUsedMB);
+        for (const bRef of a.backups || []) {
+          const bAcc = bRef.backupAccount;
+          if (bAcc && String(bAcc.status).toUpperCase() !== 'SUSPENDED') {
+            const bAvail = Math.max(0, (bAcc.storageTotalMB || 0) - (bAcc.storageUsedMB || 0));
+            if (bAvail < maxAvailable) {
+              maxAvailable = bAvail;
+            }
+          }
+        }
+        // Ajustamos el "total" ficticio para que el restante que ve el frontend sea igual al tamaño del botleneck
+        activeTotalMB = activeUsedMB + maxAvailable;
+      }
+
+      return {
+        id: a.id,
+        alias: a.alias,
+        email: a.email,
+        baseFolder: a.baseFolder,
+        type: a.type,
+        status: a.status,
+        statusMessage: a.statusMessage,
+        suspended: a.suspended,
+        storageUsedMB: activeUsedMB,
+        storageTotalMB: activeTotalMB,
+        errors24h: a.errors24h,
+        fileCount: a.fileCount,
+        folderCount: a.folderCount,
+        lastCheckAt: a.lastCheckAt,
+        createdAt: a.createdAt,
+        updatedAt: a.updatedAt,
+        backups: (a.backups || []).map(b => ({ id: b.backupAccount.id, alias: b.backupAccount.alias, type: b.backupAccount.type, status: b.backupAccount.status })),
+        mains: (a.assignedAsBackup || []).map(b => ({ id: b.mainAccount.id, alias: b.mainAccount.alias, type: b.mainAccount.type, status: b.mainAccount.status })),
+      };
+    });
+
     const filtered = onlyBatchUploadEligible
       ? mapped.filter((a) => String(a.type || '').toLowerCase() === 'main')
       : mapped;
