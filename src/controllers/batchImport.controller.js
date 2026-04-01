@@ -1828,21 +1828,27 @@ export const purgeAll = async (req, res) => {
     const deletedItems = await prisma.batchImportItem.deleteMany({});
     const deletedBatches = await prisma.batchImport.deleteMany({});
 
-    // 2. Vaciar la carpeta batch_imports del disco
-    if (fs.existsSync(BATCH_DIR)) {
-      const entries = fs.readdirSync(BATCH_DIR, { withFileTypes: true });
-      for (const entry of entries) {
-        const fullPath = path.join(BATCH_DIR, entry.name);
-        try {
-          fs.rmSync(fullPath, { recursive: true, force: true });
-        } catch (e) {
-          console.warn(`[BATCH PURGE] No se pudo borrar ${fullPath}: ${e.message}`);
+    // 2. Vaciar las carpetas solicitadas del disco
+    const UPLOADS_DIR = path.resolve('uploads');
+    const foldersToClear = ['batch_imports', 'tmp', 'sync-cache', 'batch_staging', 'archives'];
+
+    for (const folderName of foldersToClear) {
+      const folderPath = path.join(UPLOADS_DIR, folderName);
+      if (fs.existsSync(folderPath)) {
+        const entries = fs.readdirSync(folderPath, { withFileTypes: true });
+        for (const entry of entries) {
+          const fullPath = path.join(folderPath, entry.name);
+          try {
+            fs.rmSync(fullPath, { recursive: true, force: true });
+          } catch (e) {
+            console.warn(`[BATCH PURGE] No se pudo borrar ${fullPath}: ${e.message}`);
+          }
         }
       }
     }
 
-    console.log(`[BATCH PURGE] Eliminados ${deletedItems.count} items, ${deletedBatches.count} batches, carpeta limpiada.`);
-    return res.json({ success: true, message: `Eliminados ${deletedItems.count} items y ${deletedBatches.count} batches.` });
+    console.log(`[BATCH PURGE] Eliminados ${deletedItems.count} items, ${deletedBatches.count} batches, limpieza profunda de uploads completada.`);
+    return res.json({ success: true, message: `Eliminados ${deletedItems.count} items, ${deletedBatches.count} batches y todas las carpetas temporales/staging vaciadas.` });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
