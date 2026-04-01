@@ -88,13 +88,13 @@ async function megaGetWithStallRetry({ remoteFile, destLocal, ctx, proxies, getP
   }
 }
 
-async function megaPutWithStallRetry({ localPath, remoteFolderOrFile, ctx, proxies, getProxyIndex, setProxyIndex, relogin, asFilePath = false }){
+async function megaPutWithStallRetry({ localPath, remoteFolderOrFile, ctx, proxies, getProxyIndex, setProxyIndex, relogin, asFilePath = false, useProxy = true }){
   let attempt = 0;
   while (true) {
     attempt++;
     try {
       const args = asFilePath ? [localPath, remoteFolderOrFile] : [localPath, remoteFolderOrFile];
-      log.info(`[SYNC][UP][START] attempt=${attempt} proxyIdx=${getProxyIndex()} local=${localPath} -> remote=${remoteFolderOrFile} ${ctx}`);
+      log.info(`[SYNC][UP][START] attempt=${attempt} proxyIdx=${useProxy ? getProxyIndex() : 'NONE'} local=${localPath} -> remote=${remoteFolderOrFile} ${ctx}`);
       await megaCmdWithProgressAndStall({
         cmd: 'mega-put',
         args,
@@ -113,8 +113,12 @@ async function megaPutWithStallRetry({ localPath, remoteFolderOrFile, ctx, proxi
     } catch (e) {
       if (!isMegaStallError(e) || attempt > MEGA_TRANSFER_STALL_MAX_RETRIES) throw e;
       log.warn(`[SYNC][STALL][UP] sin progreso, rotate proxy + relogin (attempt=${attempt}/${MEGA_TRANSFER_STALL_MAX_RETRIES}) ${ctx}`);
-      setProxyIndex(rotateIndex(getProxyIndex(), proxies.length));
-      await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctx);
+      if (useProxy) {
+        setProxyIndex(rotateIndex(getProxyIndex(), proxies.length));
+        await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctx);
+      } else {
+        await runCmd('mega-proxy', ['--none']); // asegurar que seguimos limpios
+      }
       await relogin();
       await new Promise(r => setTimeout(r, MEGA_TRANSFER_STALL_BACKOFF_MS));
     }
@@ -1397,16 +1401,21 @@ export const syncMainToBackups = async (req, res) => {
           syncIssues.downloadErrors++;
           logSync(`Error descargando asset ${a.id}: ${e.message}`,'warn');
         }
+
+        // Rotar proxy dinámicamente si ya bajamos más de 3GB en medio del batch
+        if (downloadedBytesTotal >= ROTATE_AFTER_DOWNLOAD_BYTES) {
+          const prev = getProxyIndex();
+          setProxyIndex(rotateIndex(prev, proxies.length));
+          logSync(`[SYNC][PROXY] Rotación intermedia total=${Math.round(downloadedBytesTotal/1024/1024)}MB (>=${Math.round(ROTATE_AFTER_DOWNLOAD_BYTES/1024/1024)}MB) idx ${prev} -> ${getProxyIndex()}`);
+          await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctxMain);
+          await reloginMain(); // reconectar luego de cambiar el proxy
+          downloadedBytesTotal = 0; // Reiniciamos el contador dinámico para los siguientes 3GB
+        }
       }
       try { await runCmd('mega-logout', []); } catch {}
     }, `SYNC-DOWNLOAD-${mainId}`);
 
-    // Rotar proxy tras 3GB descargados ANTES de subir (requisito)
-    if (downloadedBytesTotal >= ROTATE_AFTER_DOWNLOAD_BYTES) {
-      const prev = getProxyIndex();
-      setProxyIndex(rotateIndex(prev, proxies.length));
-      logSync(`[SYNC][PROXY] Rotación post-descarga total=${downloadedBytesTotal}B (>=${ROTATE_AFTER_DOWNLOAD_BYTES}B) idx ${prev} -> ${getProxyIndex()}`);
-    }
+    // Rotación eliminada del post-descarga, ya que ahora es dinámica por archivo.
 
     // 6. Subir a cada backup únicamente lo que le falta
     const actions = [];

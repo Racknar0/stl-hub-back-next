@@ -71,10 +71,10 @@ async function megaGetWithStallRetry({ remoteFile, localTemp, ctx, proxies, getP
         stallTimeoutMs: MEGA_TRANSFER_STALL_TIMEOUT_MS,
         heartbeatMs: 30000,
         onProgress: ({ pct }) => {
-          log.verbose(`[RESTORE][DL][PROGRESS] ${pct}% ${ctx}`);
+          log.info(`[RESTORE][DL][PROGRESS] ${pct}% ${ctx}`);
         },
         onHeartbeat: ({ idleMs, lastPct }) => {
-          log.verbose(`[RESTORE][DL][HB] idle=${Math.round(idleMs / 1000)}s pct=${lastPct ?? '--'} ${ctx}`);
+          log.info(`[RESTORE][DL][HB] idle=${Math.round(idleMs / 1000)}s pct=${lastPct ?? '--'} ${ctx}`);
         },
       });
       log.info(`[RESTORE][DL][DONE] remote=${remoteFile} ${ctx}`);
@@ -90,12 +90,12 @@ async function megaGetWithStallRetry({ remoteFile, localTemp, ctx, proxies, getP
   }
 }
 
-async function megaPutWithStallRetry({ localTemp, remoteFile, ctx, proxies, getProxyIndex, setProxyIndex, relogin }){
+async function megaPutWithStallRetry({ localTemp, remoteFile, ctx, proxies, getProxyIndex, setProxyIndex, relogin, useProxy = true }){
   let attempt = 0;
   while (true) {
     attempt++;
     try {
-      log.info(`[RESTORE][UP][START] attempt=${attempt} proxyIdx=${getProxyIndex()} local=${localTemp} -> remote=${remoteFile} ${ctx}`);
+      log.info(`[RESTORE][UP][START] attempt=${attempt} proxyIdx=${useProxy ? getProxyIndex() : 'NONE'} local=${localTemp} -> remote=${remoteFile} ${ctx}`);
       await megaCmdWithProgressAndStall({
         cmd: 'mega-put',
         args: [localTemp, remoteFile],
@@ -103,10 +103,10 @@ async function megaPutWithStallRetry({ localTemp, remoteFile, ctx, proxies, getP
         stallTimeoutMs: MEGA_TRANSFER_STALL_TIMEOUT_MS,
         heartbeatMs: 30000,
         onProgress: ({ pct }) => {
-          log.verbose(`[RESTORE][UP][PROGRESS] ${pct}% ${ctx}`);
+          log.info(`[RESTORE][UP][PROGRESS] ${pct}% ${ctx}`);
         },
         onHeartbeat: ({ idleMs, lastPct }) => {
-          log.verbose(`[RESTORE][UP][HB] idle=${Math.round(idleMs / 1000)}s pct=${lastPct ?? '--'} ${ctx}`);
+          log.info(`[RESTORE][UP][HB] idle=${Math.round(idleMs / 1000)}s pct=${lastPct ?? '--'} ${ctx}`);
         },
       });
       log.info(`[RESTORE][UP][DONE] remote=${remoteFile} ${ctx}`);
@@ -114,8 +114,12 @@ async function megaPutWithStallRetry({ localTemp, remoteFile, ctx, proxies, getP
     } catch (e) {
       if (!isMegaStallError(e) || attempt > MEGA_TRANSFER_STALL_MAX_RETRIES) throw e;
       log.warn(`[RESTORE][STALL][UP] sin progreso, rotate proxy + relogin (attempt=${attempt}/${MEGA_TRANSFER_STALL_MAX_RETRIES}) ${ctx}`);
-      setProxyIndex(rotateIndex(getProxyIndex(), proxies.length));
-      await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctx);
+      if (useProxy) {
+        setProxyIndex(rotateIndex(getProxyIndex(), proxies.length));
+        await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctx);
+      } else {
+        await runCmd('mega-proxy', ['--none'], { quiet: true });
+      }
       await relogin();
       await new Promise(r => setTimeout(r, MEGA_TRANSFER_STALL_BACKOFF_MS));
     }
@@ -400,6 +404,15 @@ export const syncBackupsToMain = async (req, res) => {
                 log.info(`[RESTORE][DL] asset=${asset.id} desde backup=${b.id} size=${size}`)
               }
             } catch(e){ log.warn(`[RESTORE][DL] fallo asset=${asset.id} backup=${b.id} msg=${e.message}`) }
+
+            if (downloadedBytesTotal >= ROTATE_AFTER_DOWNLOAD_BYTES) {
+              const prev = getProxyIndex();
+              setProxyIndex(rotateIndex(prev, proxies.length));
+              log.info(`[RESTORE][PROXY] Rotación intermedia total=${Math.round(downloadedBytesTotal/1024/1024)}MB (>=${Math.round(ROTATE_AFTER_DOWNLOAD_BYTES/1024/1024)}MB) idx ${prev} -> ${getProxyIndex()}`);
+              await applyProxyByIndexOrThrow(proxies, getProxyIndex(), bCtx);
+              await reloginB();
+              downloadedBytesTotal = 0;
+            }
           }
           try {
             await refreshAccountStorageInCurrentSession(b.id, `restore phase=download backup=${b.id}`)
@@ -411,12 +424,7 @@ export const syncBackupsToMain = async (req, res) => {
       }
     }
 
-    // Rotar proxy tras 3GB descargados ANTES de subir (requisito)
-    if (downloadedBytesTotal >= ROTATE_AFTER_DOWNLOAD_BYTES) {
-      const prev = getProxyIndex();
-      setProxyIndex(rotateIndex(prev, proxies.length));
-      log.info(`[RESTORE][PROXY] Rotación post-descarga total=${downloadedBytesTotal}B (>=${ROTATE_AFTER_DOWNLOAD_BYTES}B) idx ${prev} -> ${getProxyIndex()}`);
-    }
+    // (Rotación post-descarga eliminada, ahora es dinámica)
 
     // =============== FASE 3: SUBIDA MAIN (1 login) ===============
     let restored = 0
