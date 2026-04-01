@@ -179,11 +179,11 @@ function pickFirstFileFromLs(lsOut){
 function parseSizeToMB(str) {
   if (!str) return 0
   const s = String(str).trim().toUpperCase()
-  const m = s.match(/[\d.,]+\s*[KMGT]?B/)
+  const m = s.match(/([0-9.,]+)\s*([KMGT]?B)?/)
   if (!m) return 0
-  const num = parseFloat((m[0].match(/[\d.,]+/) || ['0'])[0].replace(',', '.'))
-  const unit = (m[0].match(/[KMGT]?B/) || ['MB'])[0]
-  const factor = unit === 'KB' ? 1 / 1024 : unit === 'MB' ? 1 : unit === 'GB' ? 1024 : unit === 'TB' ? 1024 * 1024 : 1 / (1024 * 1024)
+  const num = parseFloat(m[1].replace(',', '.'))
+  const unit = m[2] || 'B'
+  const factor = unit === 'B' ? 1 / (1024 * 1024) : unit === 'KB' ? 1 / 1024 : unit === 'MB' ? 1 : unit === 'GB' ? 1024 : unit === 'TB' ? 1024 * 1024 : 1 / (1024 * 1024)
   return Math.round(num * factor)
 }
 
@@ -193,6 +193,7 @@ function parseDfText(txtRaw) {
   let storageTotalMB = 0
 
   let m =
+    txt.match(/(?:USED\s+STORAGE|ALMACENAMIENTO\s+USADO):\s*([0-9.,]+(?:\s*[KMGT]?B)?)\s+[0-9.,]+%?\s+(?:of|de)\s+([0-9.,]+(?:\s*[KMGT]?B)?)/i) ||
     txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i) ||
     txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i) ||
     txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i) ||
