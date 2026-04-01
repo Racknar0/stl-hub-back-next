@@ -796,7 +796,7 @@ export const testAccount = async (req, res) => {
     });
 
   log.info(`Prueba cuenta OK id=${id} RESULTADO ACTUAL PARSEADO: usado=${storageUsedMB}MB total=${storageTotalMB}MB archivos=${fileCount} carpetas=${folderCount}`);
-    return res.json({ message: 'OK', status: 'CONNECTED', account: updated });
+    return res.json({ message: 'OK', status: 'CONNECTED', account: updated, rawDfOutput, parsedStorage: { used: storageUsedMB, total: storageTotalMB } });
   } catch (error) {
   log.error('Error probando cuenta', error.message);
     try {
