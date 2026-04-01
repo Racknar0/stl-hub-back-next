@@ -197,11 +197,11 @@ function sleep(ms){ return new Promise(r=>setTimeout(r, ms)) }
 function parseSizeToMB(str){
   if (!str) return 0
   const s = String(str).trim().toUpperCase()
-  const m = s.match(/[\d.,]+\s*[KMGT]?B/)
+  const m = s.match(/([0-9.,]+)\s*([KMGT]?B)?/)
   if (!m) return 0
-  const num = parseFloat((m[0].match(/[\d.,]+/) || ['0'])[0].replace(',', '.'))
-  const unit = (m[0].match(/[KMGT]?B/) || ['MB'])[0]
-  const factor = unit === 'KB' ? 1/1024 : unit === 'MB' ? 1 : unit === 'GB' ? 1024 : unit === 'TB' ? 1024*1024 : 1/(1024*1024)
+  const num = parseFloat(m[1].replace(',', '.'))
+  const unit = m[2] || 'B'
+  const factor = unit === 'B' ? 1/(1024*1024) : unit === 'KB' ? 1/1024 : unit === 'MB' ? 1 : unit === 'GB' ? 1024 : unit === 'TB' ? 1024*1024 : 1/(1024*1024)
   return Math.round(num * factor)
 }
 
@@ -247,8 +247,8 @@ async function getAccountMetrics(base){
 
     // Formato nuevo (MEGAcmd recientes):
     //   USED STORAGE: 18.11 GB  90.53% of 20.00 GB
-    //   Cloud drive:  18.11 GB in 69 file(s) and 69 folder(s)
-    let m = txt.match(/USED\s+STORAGE:\s*([\d.,]+\s*[KMGT]?B).*?\bof\s*([\d.,]+\s*[KMGT]?B)/i);
+    let m = txt.match(/(?:USED\s+STORAGE|ALMACENAMIENTO\s+USADO):\s*([0-9.,]+(?:\s*[KMGT]?B)?)\s+[0-9.,]+%?\s+(?:of|de)\s+([0-9.,]+(?:\s*[KMGT]?B)?)/i) || 
+            txt.match(/USED\s+STORAGE:\s*([\d.,]+\s*[KMGT]?B).*?\bof\s*([\d.,]+\s*[KMGT]?B)/i);
     if (!m) {
       // fallback por si cambia el wording
       m = txt.match(/\bUSED\s+STORAGE\b.*?([\d.,]+\s*[KMGT]?B).*?\bof\s*([\d.,]+\s*[KMGT]?B)/i);
