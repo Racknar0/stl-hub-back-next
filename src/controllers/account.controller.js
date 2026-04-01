@@ -676,6 +676,8 @@ export const testAccount = async (req, res) => {
     try {
       const dfTxt = await runCmd(dfCmd, ['-h']);
       const txt = (dfTxt.out || dfTxt.err || '').toString();
+      console.log(`\n=== [DEBUG] RAW MEGA-DF -H ACTUAL ACCOUNT ID: ${id} ===\n${txt}\n===============================================\n`);
+      
       // Patrones de almacenamiento used/total (EN/ES)
       let m = txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i)
            || txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i)
@@ -707,6 +709,8 @@ export const testAccount = async (req, res) => {
       try {
         const dfTxt = await runCmd(dfCmd, []);
         const txt = (dfTxt.out || dfTxt.err || '').toString();
+        console.log(`\n=== [DEBUG] RAW MEGA-DF (sin -h) ACTUAL ACCOUNT ID: ${id} ===\n${txt}\n===============================================\n`);
+
         let m = txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i)
              || txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i)
              || txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i)
@@ -780,14 +784,15 @@ export const testAccount = async (req, res) => {
         status: 'CONNECTED',
         statusMessage: null,
         lastCheckAt: new Date(),
-        storageUsedMB,
-        storageTotalMB,
+        // SE PAUSA EL GUARDE PARA CAPTURAR INFO:
+        // storageUsedMB,
+        // storageTotalMB,
         fileCount,
         folderCount,
       },
     });
 
-  log.info(`Prueba cuenta OK id=${id} usado=${storageUsedMB}MB total=${storageTotalMB}MB archivos=${fileCount} carpetas=${folderCount}`);
+  log.info(`Prueba cuenta OK id=${id} RESULTADO ACTUAL PARSEADO: usado=${storageUsedMB}MB total=${storageTotalMB}MB archivos=${fileCount} carpetas=${folderCount}`);
     return res.json({ message: 'OK', status: 'CONNECTED', account: updated });
   } catch (error) {
   log.error('Error probando cuenta', error.message);
