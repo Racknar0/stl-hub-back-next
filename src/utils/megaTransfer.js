@@ -40,8 +40,8 @@ export async function killProcessTreeBestEffort(child, label = 'MEGA') {
 
 function extractProgressSignals(s) {
   const txt = String(s || '');
-  // Common MEGAcmd progress includes percentages like " 12%".
-  const m = txt.match(/\b(\d{1,3})%\b/);
+  // MEGAcmd progress outputs e.g., " 12.34%", "12%", "Transferring 12 %"
+  const m = txt.match(/(?:\b|\s|^)(\d{1,3}(?:\.\d+)?)\s*%/);
   const pct = m ? Math.min(100, Math.max(0, Number(m[1]))) : null;
   return { pct };
 }
