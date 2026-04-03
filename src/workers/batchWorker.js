@@ -595,6 +595,8 @@ function slugify(str) {
 function safeSlugLikeUploader(str) {
   return String(str || '')
     .trim()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // eliminar diacríticos (á→a, é→e, ñ→n, etc.)
     .toLowerCase()
     .replace(/[^a-z0-9-_]+/g, '-')
     .replace(/^-+|-+$/g, '')
