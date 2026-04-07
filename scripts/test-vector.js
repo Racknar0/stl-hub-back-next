@@ -38,15 +38,57 @@ async function procesarDiezAssets() {
         continue; 
       }
 
-      const cats = asset.categories && asset.categories.length > 0 
-        ? asset.categories.map(c => c.name).join(", ") 
-        : "Sin categoría";
-        
-      const tags = asset.tags && asset.tags.length > 0 
-        ? asset.tags.map(t => t.name).join(", ") 
-        : "Sin tags";
-        
-      const textoCompleto = `Título: ${asset.title}. Categorías: ${cats}. Tags: ${tags}. Descripción: ${asset.description || 'Sin descripción'}`;
+      const titleEs = String(asset.title || '').trim() || 'Sin título';
+      const titleEn = String(asset.titleEn || asset.title || '').trim() || 'Untitled';
+
+      const descEs = String(asset.description || '').trim() || 'Sin descripción';
+      const descEn = String(asset.descriptionEn || asset.description || '').trim() || 'No description';
+
+      const catsEs = asset.categories && asset.categories.length > 0
+        ? asset.categories.map(c => c.name).filter(Boolean).join(', ')
+        : 'Sin categoría';
+
+      const catsEn = asset.categories && asset.categories.length > 0
+        ? asset.categories.map(c => c.nameEn || c.name).filter(Boolean).join(', ')
+        : 'No category';
+
+      const tagsEs = asset.tags && asset.tags.length > 0
+        ? asset.tags.map(t => t.name).filter(Boolean).join(', ')
+        : 'Sin tags';
+
+      const tagsEn = asset.tags && asset.tags.length > 0
+        ? asset.tags.map(t => t.nameEn || t.name).filter(Boolean).join(', ')
+        : 'No tags';
+
+      const categorySlugs = Array.isArray(asset.categories)
+        ? asset.categories.map(c => String(c.slug || '').trim()).filter(Boolean)
+        : [];
+
+      const categorySlugsEn = Array.isArray(asset.categories)
+        ? asset.categories.map(c => String(c.slugEn || '').trim()).filter(Boolean)
+        : [];
+
+      const tagSlugs = Array.isArray(asset.tags)
+        ? asset.tags.map(t => String(t.slug || '').trim()).filter(Boolean)
+        : [];
+
+      const tagSlugsEn = Array.isArray(asset.tags)
+        ? asset.tags.map(t => String(t.slugEn || '').trim()).filter(Boolean)
+        : [];
+
+      const hasDescriptionEs = Boolean(String(asset.description || '').trim());
+      const hasDescriptionEn = Boolean(String(asset.descriptionEn || '').trim());
+
+      const textoCompleto = [
+        `Título (ES): ${titleEs}.`,
+        `Title (EN): ${titleEn}.`,
+        `Categorías (ES): ${catsEs}.`,
+        `Categories (EN): ${catsEn}.`,
+        `Tags (ES): ${tagsEs}.`,
+        `Tags (EN): ${tagsEn}.`,
+        `Descripción (ES): ${descEs}.`,
+        `Description (EN): ${descEn}.`
+      ].join(' ');
 
       console.log(`⏳ Generando vector para ID ${id}: ${asset.title}...`);
 
@@ -63,8 +105,20 @@ async function procesarDiezAssets() {
           id: asset.id,
           vector: vector,
           payload: {
-            title: asset.title,
-            slug: asset.slug
+            title: titleEs,
+            titleEn: titleEn,
+            slug: asset.slug,
+            isPremium: Boolean(asset.isPremium),
+            status: String(asset.status || ''),
+            downloads: Number(asset.downloads || 0),
+            createdAt: asset.createdAt ? new Date(asset.createdAt).toISOString() : null,
+            updatedAt: asset.updatedAt ? new Date(asset.updatedAt).toISOString() : null,
+            categorySlugs,
+            categorySlugsEn,
+            tagSlugs,
+            tagSlugsEn,
+            hasDescriptionEs,
+            hasDescriptionEn
           }
         }]
       });

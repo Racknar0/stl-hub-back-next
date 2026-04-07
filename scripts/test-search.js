@@ -16,6 +16,10 @@ if (!geminiApiKey) {
 const qdrant = new QdrantClient({ host: '127.0.0.1', port: 6333 });
 const ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
+function formatList(value) {
+  return Array.isArray(value) && value.length > 0 ? value.join(', ') : '---';
+}
+
 async function buscarEnStlHub(fraseUsuario) {
   console.log(`\n🔎 Buscando: "${fraseUsuario}"...\n`);
 
@@ -41,7 +45,22 @@ async function buscarEnStlHub(fraseUsuario) {
     resultados.forEach((res, index) => {
       // Qdrant devuelve el "score" (la coincidencia). Lo pasamos a porcentaje.
       const porcentaje = (res.score * 100).toFixed(1);
-      console.log(`${index + 1}. [${porcentaje}%] ID: ${res.id} | Título: ${res.payload.title}`);
+      const payload = res.payload || {};
+      console.log(`\n${index + 1}. [${porcentaje}%] ID: ${res.id}`);
+      console.log(`   Título ES: ${payload.title || '---'}`);
+      console.log(`   Título EN: ${payload.titleEn || '---'}`);
+      console.log(`   Slug: ${payload.slug || '---'}`);
+      console.log(`   Premium: ${payload.isPremium ? 'Sí' : 'No'}`);
+      console.log(`   Estado: ${payload.status || '---'}`);
+      console.log(`   Descargas: ${Number(payload.downloads || 0)}`);
+      console.log(`   Categorías ES: ${formatList(payload.categorySlugs)}`);
+      console.log(`   Categorías EN: ${formatList(payload.categorySlugsEn)}`);
+      console.log(`   Tags ES: ${formatList(payload.tagSlugs)}`);
+      console.log(`   Tags EN: ${formatList(payload.tagSlugsEn)}`);
+      console.log(`   Tiene descripción ES: ${payload.hasDescriptionEs ? 'Sí' : 'No'}`);
+      console.log(`   Tiene descripción EN: ${payload.hasDescriptionEn ? 'Sí' : 'No'}`);
+      console.log(`   Creado: ${payload.createdAt || '---'}`);
+      console.log(`   Actualizado: ${payload.updatedAt || '---'}`);
     });
 
   } catch (error) {
@@ -53,4 +72,4 @@ async function buscarEnStlHub(fraseUsuario) {
 // ¡HAZ TU PRUEBA AQUÍ!
 // Vamos a buscar algo sin usar el nombre exacto del asset
 // =======================================================
-buscarEnStlHub("un vehículo aéreo de juguete con proporciones graciosas");
+buscarEnStlHub("paisaje prehistórico con reptiles gigantes cazando");
