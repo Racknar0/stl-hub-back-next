@@ -715,9 +715,9 @@ async function classifySingleItem(ai, payload, item) {
     'Debes proponer un nombre limpio y comercial, corto (3-9 palabras), legible para tienda.',
     'La categoria debe devolverse SIEMPRE bilingue en el objeto categoria: { es, en }.',
     'La descripcion debe devolverse SIEMPRE bilingue en el objeto descripcion: { es, en }.',
-    'IMPORTANTE DESCRIPCION: cada descripcion (es y en) debe tener exactamente 300 palabras.',
-    'La descripcion debe hablar del personaje y de la figura/modelo fisico para impresion 3D, en tono comercial y descriptivo.',
-    'No escribas menos de 300 ni mas de 300 palabras en cada idioma.',
+   'Prohibido usar texto de relleno, repeticiones o descripciones filosoficas sobre la historia del personaje.',
+       'IMPORTANTE DESCRIPCION: La descripcion debe ser CORTA, CONCISA y DIRECTA AL GRANO (entre 40 y 80 palabras maximo).',
+    'La descripcion debe mencionar brevemente de que trata el modelo y centrarse en detalles fisicos para la impresion 3D (ej. recomendacion de resina/PLA, si es en una o varias partes).',
     'Responde SOLO JSON valido, sin markdown ni texto extra, usando EXACTAMENTE esta forma:',
     JSON.stringify({
       nombre: { es: 'figura anime samurai', en: 'samurai anime figure' },
@@ -728,13 +728,15 @@ async function classifySingleItem(ai, payload, item) {
         { es: 'fantasia', en: 'fantasy' },
       ],
       descripcion: {
-        es: 'Figura anime samurai lista para impresion 3D, ideal para coleccionistas y vitrinas tematicas.',
-        en: 'Samurai anime figure ready for 3D printing, ideal for collectors and themed display shelves.',
+        es: 'Figura de samurai estilo anime optimizada para impresion 3D. El modelo presenta detalles finos en la armadura y la katana, por lo que se recomienda imprimir en resina para un mejor acabado. No requiere ensamblaje complejo, pero se sugieren soportes en la zona de la espada. Ideal para pintar con acrilicos y exhibir.',
+        en: 'Anime style samurai figure optimized for 3D printing. The model features fine details on the armor and katana, so resin printing is recommended for a better finish. No complex assembly required, but supports are suggested around the sword area. Ideal for painting with acrylics and displaying.',
       },
     }, null, 2),
     'Contexto JSON del asset:',
     JSON.stringify(promptPayload, null, 2),
   ].join('\n\n')
+
+  
 
   console.log('[BATCH][AI][INPUT]', {
     item: getItemDisplayName(item),
