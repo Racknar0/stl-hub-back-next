@@ -15,6 +15,43 @@ if (geminiApiKey) {
   ai = new GoogleGenAI({ apiKey: geminiApiKey });
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const getErrorStatus = (error) => {
+  const status = Number(error?.status || error?.response?.status || error?.cause?.status);
+  return Number.isFinite(status) ? status : null;
+};
+
+const formatErrorReason = (error) => {
+  const base = String(error?.message || error || 'Error desconocido');
+  const status = getErrorStatus(error);
+  if (status) return `${base} (status ${status})`;
+  return base;
+};
+
+const isRetryableVectorError = (error) => {
+  const status = getErrorStatus(error);
+  if ([408, 425, 429, 500, 502, 503, 504].includes(status)) return true;
+
+  const txt = formatErrorReason(error).toLowerCase();
+  const transientHints = [
+    'network error',
+    'fetch failed',
+    'econnreset',
+    'econnrefused',
+    'etimedout',
+    'timeout',
+    'socket hang up',
+    'tls',
+    'temporary',
+    'unavailable',
+    'connection closed',
+    'aborted',
+  ];
+
+  return transientHints.some((hint) => txt.includes(hint));
+};
+
 const ensureCollectionExists = async (vectorSize) => {
   try {
     await qdrant.getCollection(qdrantCollection);
@@ -67,11 +104,15 @@ export const generateAssetVectorText = (asset) => {
 
 export const upsertAssetVector = async (assetId, options = {}) => {
   const includeError = Boolean(options?.includeError);
+  const requestedRetries = Number(options?.maxRetries);
+  const maxRetries = Number.isFinite(requestedRetries)
+    ? Math.min(10, Math.max(1, Math.floor(requestedRetries)))
+    : 1;
 
   if (!ai) {
     const reason = 'Falta GEMINI_API_KEY/GOOGLE_API_KEY en backend/.env';
     console.warn(`[QDRANT] Saltando vectorizacion del asset ${assetId}: ${reason}`);
-    return includeError ? { ok: false, error: reason } : false;
+    return includeError ? { ok: false, error: reason, attempts: 1 } : false;
   }
 
   try {
@@ -85,25 +126,12 @@ export const upsertAssetVector = async (assetId, options = {}) => {
 
     if (!asset) {
       const reason = `Asset ${assetId} no existe en DB`;
-      return includeError ? { ok: false, error: reason } : false;
+      return includeError ? { ok: false, error: reason, attempts: 1 } : false;
     }
 
     const textoCompleto = generateAssetVectorText(asset);
-    
-    // Generar vector
-    const response = await ai.models.embedContent({
-      model: geminiEmbeddingModel,
-      contents: textoCompleto,
-    });
-    
-    const vector = response?.embeddings?.[0]?.values;
-    if (!Array.isArray(vector) || vector.length === 0) {
-      throw new Error('Gemini no devolvio embedding valido');
-    }
 
-    await ensureCollectionExists(vector.length);
-
-    // Extraer variables para payload
+    // Extraer variables para payload una sola vez.
     const titleEs = String(asset.title || '').trim() || 'Sin título';
     const titleEn = String(asset.titleEn || asset.title || '').trim() || 'Untitled';
     const categorySlugs = Array.isArray(asset.categories) ? asset.categories.map(c => String(c.slug || '').trim()).filter(Boolean) : [];
@@ -113,35 +141,76 @@ export const upsertAssetVector = async (assetId, options = {}) => {
     const hasDescriptionEs = Boolean(String(asset.description || '').trim());
     const hasDescriptionEn = Boolean(String(asset.descriptionEn || '').trim());
 
-    await qdrant.upsert(qdrantCollection, {
-      wait: true,
-      points: [{
-        id: asset.id,
-        vector: vector,
-        payload: {
-          title: titleEs,
-          titleEn: titleEn,
-          slug: asset.slug,
-          isPremium: Boolean(asset.isPremium),
-          status: String(asset.status || ''),
-          downloads: Number(asset.downloads || 0),
-          createdAt: asset.createdAt ? new Date(asset.createdAt).toISOString() : null,
-          updatedAt: asset.updatedAt ? new Date(asset.updatedAt).toISOString() : null,
-          categorySlugs,
-          categorySlugsEn,
-          tagSlugs,
-          tagSlugsEn,
-          hasDescriptionEs,
-          hasDescriptionEn
-        }
-      }]
-    });
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const response = await ai.models.embedContent({
+          model: geminiEmbeddingModel,
+          contents: textoCompleto,
+        });
 
-    return includeError ? { ok: true } : true;
+        const vector = response?.embeddings?.[0]?.values;
+        if (!Array.isArray(vector) || vector.length === 0) {
+          throw new Error('Gemini no devolvio embedding valido');
+        }
+
+        await ensureCollectionExists(vector.length);
+
+        await qdrant.upsert(qdrantCollection, {
+          wait: true,
+          points: [{
+            id: asset.id,
+            vector: vector,
+            payload: {
+              title: titleEs,
+              titleEn: titleEn,
+              slug: asset.slug,
+              isPremium: Boolean(asset.isPremium),
+              status: String(asset.status || ''),
+              downloads: Number(asset.downloads || 0),
+              createdAt: asset.createdAt ? new Date(asset.createdAt).toISOString() : null,
+              updatedAt: asset.updatedAt ? new Date(asset.updatedAt).toISOString() : null,
+              categorySlugs,
+              categorySlugsEn,
+              tagSlugs,
+              tagSlugsEn,
+              hasDescriptionEs,
+              hasDescriptionEn
+            }
+          }]
+        });
+
+        return includeError ? { ok: true, attempts: attempt } : true;
+      } catch (error) {
+        const reason = formatErrorReason(error);
+        const retryable = isRetryableVectorError(error);
+        const canRetry = retryable && attempt < maxRetries;
+
+        console.error(`[QDRANT] Error actualizando vector para Asset ${assetId} (intento ${attempt}/${maxRetries}):`, reason);
+
+        if (canRetry) {
+          const backoffMs = Math.min(2500, 350 * attempt);
+          await sleep(backoffMs);
+          continue;
+        }
+
+        return includeError
+          ? {
+              ok: false,
+              error: reason,
+              attempts: attempt,
+              retryExhausted: retryable && attempt >= maxRetries,
+            }
+          : false;
+      }
+    }
+
+    return includeError
+      ? { ok: false, error: 'Fallo inesperado en reintentos', attempts: maxRetries, retryExhausted: true }
+      : false;
   } catch (error) {
-    const reason = error?.message || String(error);
+    const reason = formatErrorReason(error);
     console.error(`[QDRANT] Error actualizando vector para Asset ${assetId}:`, reason);
-    return includeError ? { ok: false, error: reason } : false;
+    return includeError ? { ok: false, error: reason, attempts: 1 } : false;
   }
 };
 

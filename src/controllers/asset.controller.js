@@ -6299,9 +6299,10 @@ export const searchAssets = async (req, res) => {
         // --- Búsqueda IA semántica (Qdrant) ---
         if (isAiSearch && qLower) {
             const AI_MEM_LIMIT = 1500;
+            const AI_MIN_RESULTS = 200;
             const aiLimit = Math.min(
                 AI_MEM_LIMIT,
-                Math.max(120, (page + 1) * size * 3)
+                Math.max(AI_MIN_RESULTS, (page + 1) * size * 3)
             );
 
             const aiResults = await qdrantService.searchSimilarAssets(qStr, aiLimit);

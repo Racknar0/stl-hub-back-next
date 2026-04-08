@@ -98,13 +98,25 @@ export const syncMissingVectors = async (req, res) => {
             const assetName = allAssets.find(a => a.id === id)?.title;
             logAndSend(`⏳ Vectorizando ID ${id}: ${assetName}...`);
             
-            const result = await qdrantService.upsertAssetVector(id, { includeError: true });
+            const result = await qdrantService.upsertAssetVector(id, {
+                includeError: true,
+                maxRetries: 10,
+            });
             if (result?.ok) {
+                if (Number(result?.attempts || 1) > 1) {
+                    logAndSend(`🔁 ID ${id} sincronizado tras ${result.attempts} intentos.`);
+                }
                 logAndSend(`✅ ID ${id} sincronizado exitosamente.`);
                 successCount++;
             } else {
-                logAndSend(`❌ Error al sincronizar ID ${id}: ${result?.error || 'error desconocido'}`);
+                const attempts = Number(result?.attempts || 1);
+                logAndSend(`❌ Error al sincronizar ID ${id} tras ${attempts} intento(s): ${result?.error || 'error desconocido'}`);
                 failCount++;
+
+                if (result?.retryExhausted) {
+                    logAndSend(`🛑 Se corta la corrida: el ID ${id} agotó 10 reintentos por error de red/servicio.`);
+                    break;
+                }
             }
 
             // Pequeña pausa para no saturar la API
