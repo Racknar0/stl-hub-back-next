@@ -435,13 +435,14 @@ export const listAccounts = async (req, res) => {
         lastCheckAt: a.lastCheckAt,
         createdAt: a.createdAt,
         updatedAt: a.updatedAt,
+        ignoreInUploadBatch: a.ignoreInUploadBatch,
         backups: (a.backups || []).map(b => ({ id: b.backupAccount.id, alias: b.backupAccount.alias, type: b.backupAccount.type, status: b.backupAccount.status, storageTotalMB: b.backupAccount.storageTotalMB })),
         mains: (a.assignedAsBackup || []).map(b => ({ id: b.mainAccount.id, alias: b.mainAccount.alias, type: b.mainAccount.type, status: b.mainAccount.status, storageTotalMB: b.mainAccount.storageTotalMB })),
       };
     });
 
     const filtered = onlyBatchUploadEligible
-      ? mapped.filter((a) => String(a.type || '').toLowerCase() === 'main')
+      ? mapped.filter((a) => String(a.type || '').toLowerCase() === 'main' && !a.ignoreInUploadBatch)
       : mapped;
 
     return res.json(filtered);
@@ -473,7 +474,7 @@ export const createAccount = async (req, res) => {
 export const updateAccount = async (req, res) => {
   try {
     const id = Number(req.params.id);
-  const { alias, email, baseFolder, type, suspended, status } = req.body;
+    const { alias, email, baseFolder, type, suspended, status, ignoreInUploadBatch } = req.body;
 
     // Validaciones al cambiar type para evitar estados incoherentes
     if (type !== undefined) {
@@ -501,8 +502,9 @@ export const updateAccount = async (req, res) => {
     if (alias !== undefined) data.alias = alias;
     if (email !== undefined) data.email = email;
     if (baseFolder !== undefined) data.baseFolder = baseFolder;
-  if (type !== undefined) data.type = type;
+    if (type !== undefined) data.type = type;
     if (suspended !== undefined) data.suspended = Boolean(suspended);
+    if (ignoreInUploadBatch !== undefined) data.ignoreInUploadBatch = Boolean(ignoreInUploadBatch);
     if (status !== undefined) data.status = status; // validar enum en frontend o con zod/express-validator
 
     const updated = await prisma.megaAccount.update({ where: { id }, data });

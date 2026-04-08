@@ -120,6 +120,9 @@ model megaAccount {
   bandwidthPeriodAt DateTime?
   errors24h         Int       @default(0)
 
+  // Opciones
+  ignoreInUploadBatch Boolean @default(false)
+
   // Conteos
   fileCount   Int @default(0)
   folderCount Int @default(0)
