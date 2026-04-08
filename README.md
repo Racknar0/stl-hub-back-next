@@ -1,155 +1,133 @@
-# STL HUB — Backend
+# STL HUB Backend
 
-Backend robusto y escalable para la plataforma STL HUB, desarrollado en **Node.js** con **Express** y **Prisma ORM**. Gestiona la lógica de negocio, autenticación, pagos, notificaciones, administración de assets digitales y la integración avanzada con MEGA.nz.
+Backend API para una plataforma de distribucion de modelos STL con gestion de assets, suscripciones, almacenamiento en MEGA y busqueda semantica con embeddings.
 
----
+## Resumen
 
-## 🚀 Características principales
+Este servicio expone una API REST en Node.js para:
 
-- **API RESTful** moderna y segura
-- **Autenticación JWT** y activación de cuentas por email
-- **Recuperación y reseteo de contraseña**
-- **Gestión de assets**: subida, edición, categorías, tags, control de descargas y links MEGA
-- **Sistema de notificaciones** y reportes de links caídos
-- **Integración con MEGA.nz** para almacenamiento y chequeo de links
-- **Pagos y suscripciones** (PayPal, Stripe, etc.)
-- **Panel de administración** (vía frontend)
-- **Internacionalización de mensajes (es/en)**
-- **Logs avanzados y backups automáticos**
-- **Migraciones de base de datos con Prisma**
+- autenticacion y autorizacion de usuarios
+- gestion de assets STL (metadata, tags, categorias, descargas)
+- integracion de pagos y planes premium
+- upload y replicacion de archivos en cuentas MEGA
+- busqueda semantica con Gemini Embeddings + Qdrant
+- operaciones batch para ingesta masiva y sincronizacion
 
----
+## Stack Tecnologico
 
-## 📁 Estructura del proyecto
+- Runtime: Node.js (ES Modules)
+- Framework: Express
+- ORM: Prisma
+- Base de datos: MySQL
+- Vector DB: Qdrant
+- Embeddings: Google GenAI (`@google/genai`)
+- Auth: JWT + bcrypt
+- Uploads: multer + sharp
+- Correo: nodemailer
 
+## Arquitectura
+
+- `server.js`: bootstrap del servidor HTTP
+- `app.js`: composicion de middlewares y rutas
+- `src/controllers`: logica de endpoints
+- `src/routes`: definicion de rutas API
+- `src/workers`: procesos batch y orquestacion de cargas
+- `src/services`: integraciones externas y servicios reutilizables
+- `prisma/schema.prisma`: modelo de datos
+- `uploads/`: archivos temporales, imagenes y archivos finales
+
+## Funcionalidades Destacadas
+
+### 1) Catalogo STL y Metadata
+
+- CRUD de assets
+- categorias y tags multiidioma
+- historico de descargas
+- status de publicacion
+
+### 2) Busqueda Semantica IA
+
+- generacion de embeddings por asset
+- indexacion en Qdrant
+- endpoint de busqueda IA con ranking semantico
+- endpoint de sincronizacion de vectores faltantes con logs SSE
+- reintentos robustos ante microcortes de red
+
+### 3) Upload Batch de Produccion
+
+- flujo de ingesta por lotes
+- subida principal + backups en cuentas MEGA
+- creacion de asset y vectorizacion automatica al crear
+- reintentos y recuperacion ante fallos transitorios
+
+### 4) Suscripciones y Premium
+
+- integracion con proveedores de pago
+- control de acceso por tipo de plan
+- validaciones de estado de suscripcion
+
+## Variables de Entorno Clave
+
+Configurar un archivo `backend/.env` con al menos:
+
+- `PORT`
+- `DATABASE_URL`
+- `JWT_SECRET`
+- `CORS_ORIGINS`
+- `FRONT_URL`
+- `GEMINI_API_KEY` (o `GOOGLE_API_KEY`)
+- `QDRANT_HOST`
+- `QDRANT_PORT`
+- `QDRANT_COLLECTION`
+- `GEMINI_EMBEDDING_MODEL`
+
+Tambien hay variables opcionales para SMTP, PayPal, MEGA y tareas operativas.
+
+## Scripts
+
+Desde la carpeta `backend/`:
+
+```bash
+npm install
+npm run dev
 ```
-backend/
-│
-├── .env                  # Variables de entorno (claves, URLs, etc.)
-├── app.js                # Entry point principal
-├── package.json          # Dependencias y scripts
-├── prisma/               # Esquema y migraciones de base de datos
-│   ├── schema.prisma
-│   └── migrations/
-├── seed/                 # Scripts de seed para datos iniciales
-├── src/
-│   ├── db.js             # Instancia central de PrismaClient
-│   ├── controllers/      # Lógica de negocio (assets, users, pagos, etc.)
-│   ├── middlewares/      # Middlewares de autenticación, validación, etc.
-│   ├── routes/           # Definición de rutas y endpoints
-│   ├── utils/            # Utilidades (MEGA, logs, crypto, backups, etc.)
-├── uploads/              # Archivos subidos (archivos, imágenes, temporales)
-└── README.md             # Este archivo
-```
 
----
+Scripts disponibles (segun `package.json`):
 
-## ⚙️ Instalación y ejecución
+- `npm run dev`: desarrollo con nodemon
+- `npm run start`: arranque de produccion
+- `npm run seed`: seed inicial
+- `npm run randomize:freebies`: utilidad operativa
 
-1. **Clona el repositorio:**
-   ```bash
-   git clone https://github.com/tuusuario/stlhub-backend.git
-   cd stlhub-backend
-   ```
+## Flujo de Desarrollo
 
-2. **Instala las dependencias:**
-   ```bash
-   npm install
-   # o
-   yarn install
-   ```
+1. Instalar dependencias
+2. Configurar `.env`
+3. Ejecutar backend en modo dev
+4. Verificar conexion DB y Qdrant
+5. Probar endpoints desde frontend o cliente API
 
-3. **Configura las variables de entorno:**
-   - Renombra `.env.example` a `.env` y completa los valores necesarios (DB, JWT, SMTP, MEGA, PayPal, etc.)
+## Endpoints Relevantes
 
-4. **Ejecuta las migraciones de base de datos:**
-   ```bash
-   npx prisma migrate deploy
-   # o para desarrollo
-   npx prisma migrate dev
-   ```
+- `GET /api/assets/search`
+- `GET /api/ai/sync-status`
+- `POST /api/ai/sync-missing`
+- `POST /api/auth/*`
+- `POST /api/payments/*`
 
-5. **(Opcional) Ejecuta el seed inicial:**
-   ```bash
-   node seed/seed.js
-   ```
+## Buenas Practicas Aplicadas
 
-6. **Inicia el servidor:**
-   ```bash
-   npm run dev
-   # o
-   yarn dev
-   ```
+- separacion por capas (routes/controllers/services/workers)
+- configuracion por entorno (sin hardcodes)
+- logs de diagnostico para cargas y vectorizacion
+- tratamiento de errores transitorios con reintentos
+- sincronizacion incremental de vectores para consistencia
 
-7. **La API estará disponible en:**
-   [http://localhost:3001/api](http://localhost:3001/api)
+## Enfoque Portafolio
 
----
+Este backend demuestra capacidad para construir sistemas reales orientados a producto:
 
-## 🧩 Principales módulos y rutas
-
-- `/api/auth` — Registro, login, activación, recuperación de contraseña
-- `/api/assets` — Gestión de assets y descargas
-- `/api/categories` — Categorías de assets
-- `/api/tags` — Tags de assets
-- `/api/users` — Gestión de usuarios
-- `/api/notifications` — Notificaciones y reportes
-- `/api/payments` — Pagos y suscripciones
-- `/api/reports` — Reporte de links caídos
-
----
-
-## 🛠️ Tecnologías y librerías clave
-
-- **Node.js** — Entorno de ejecución
-- **Express** — Framework web
-- **Prisma ORM** — Acceso y migración de base de datos
-- **MySQL** — Motor de base de datos (puedes adaptar a PostgreSQL)
-- **MEGAcmd** — Integración con MEGA.nz para descargas y chequeos
-- **nodemailer** — Envío de emails (activación, recuperación, notificaciones)
-- **jsonwebtoken** — Autenticación JWT
-- **bcrypt** — Hash de contraseñas
-- **dotenv** — Variables de entorno
-- **winston** — Logging avanzado
-
----
-
-## 🔒 Seguridad y buenas prácticas
-
-- **Nunca subas tu archivo `.env` ni claves privadas al repositorio.**
-- Usa HTTPS en producción.
-- Valida y sanitiza todos los datos de entrada.
-- Protege rutas sensibles con middlewares de autenticación y roles.
-- Limita la concurrencia de chequeos MEGA para evitar bloqueos.
-- Haz backups periódicos de la base de datos y archivos.
-
----
-
-## 💡 Consejos de desarrollo
-
-- Centraliza la instancia de PrismaClient en `src/db.js` y reutilízala.
-- Usa los helpers de `src/utils/` para lógica común (crypto, logs, MEGA, etc.)
-- Mantén los controladores limpios y delega lógica repetitiva a utilidades.
-- Documenta tus endpoints y flujos críticos.
-- Usa migraciones para cualquier cambio en el modelo de datos.
-
----
-
-## 📦 Despliegue
-
-- Puedes desplegar en cualquier VPS, servidor dedicado o plataforma cloud compatible con Node.js y tu base de datos.
-- Asegúrate de configurar correctamente las variables de entorno y los servicios externos (MEGA, SMTP, PayPal, etc.)
-
----
-
-## 📚 Recursos útiles
-
-- [Documentación Express](https://expressjs.com/)
-- [Prisma ORM](https://www.prisma.io/docs)
-- [MEGAcmd](https://mega.nz/cmd)
-- [Nodemailer](https://nodemailer.com/about/)
-- [JWT](https://jwt.io/)
-
----
-
-**STL HUB Backend** — Potencia, seguridad y flexibilidad para tu plataforma de assets digitales.
+- arquitectura modular y mantenible
+- integracion de IA aplicada al negocio
+- procesamiento batch con resiliencia
+- seguridad, observabilidad y escalabilidad progresiva

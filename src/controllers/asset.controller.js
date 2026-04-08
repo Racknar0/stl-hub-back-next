@@ -2463,7 +2463,16 @@ export const updateAsset = async (req, res) => {
         if (!existing)
             return res.status(404).json({ message: 'Asset not found' });
 
-        const { title, titleEn, description, descriptionEn, categories, tags, isPremium } = req.body;
+        const {
+            title,
+            titleEn,
+            description,
+            descriptionEn,
+            categories,
+            tags,
+            isPremium,
+            images,
+        } = req.body;
         const data = {};
         if (title !== undefined) data.title = String(title);
         if (titleEn !== undefined) data.titleEn = String(titleEn);
@@ -2471,6 +2480,11 @@ export const updateAsset = async (req, res) => {
         if (descriptionEn !== undefined) data.descriptionEn = normalizeDescriptionText(String(descriptionEn)) || null;
         if (typeof isPremium !== 'undefined')
             data.isPremium = Boolean(isPremium);
+        if (Array.isArray(images)) {
+            data.images = images
+                .map((it) => String(it || '').trim())
+                .filter(Boolean);
+        }
 
         const catsParsed = parseCategoriesPayload(categories);
         if (catsParsed.length) {
@@ -2487,6 +2501,19 @@ export const updateAsset = async (req, res) => {
             data,
             include: { categories: true, tags: true },
         });
+
+        if (Array.isArray(images)) {
+            try {
+                await syncAssetImageHashes(id, updated.images || [], {
+                    clearMissing: true,
+                });
+            } catch (hashErr) {
+                console.warn(
+                    `[ASSETS][HASH] sync warn asset=${id}:`,
+                    hashErr?.message || String(hashErr)
+                );
+            }
+        }
         
         qdrantService.upsertAssetVector(id).catch(err => console.error('[QDRANT] Update error:', err));
         
