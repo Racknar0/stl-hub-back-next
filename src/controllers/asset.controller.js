@@ -11,6 +11,7 @@ import { checkMegaLinkAlive } from '../utils/megaCheckFiles/megaLinkChecker.js';
 import { maybeCheckMegaOnVisit } from '../utils/megaCheckFiles/visitTriggeredMegaCheck.js';
 import { applyMegaProxy, listMegaProxies } from '../utils/megaProxy.js';
 import { createPartFromBase64, GoogleGenAI, PartMediaResolutionLevel } from '@google/genai';
+import qdrantService from '../services/qdrant.service.js';
 
 const prisma = new PrismaClient();
 import { randomizeFreebies, getRandomizeFreebiesCountFromEnv } from '../utils/randomizeFreebies.js';
@@ -1404,12 +1405,21 @@ function parseNumberListInput(value, { max = 32 } = {}) {
 // Listar y obtener
 export const listAssets = async (req, res) => {
     try {
-    const { q = '', pageIndex, pageSize, plan, isPremium, accountId, accountAlias } = req.query;
+    const { q = '', pageIndex, pageSize, plan, isPremium, accountId, accountAlias, is_ai_search } = req.query;
         const hasPagination = pageIndex !== undefined && pageSize !== undefined;
 
         // Construir filtro dinámico
         const where = {};
-        if (q) {
+        if (is_ai_search === 'true' && q) {
+            const limit = pageSize ? Number(pageSize) : 50;
+            const aiResults = await qdrantService.searchSimilarAssets(String(q), limit);
+            const foundIds = aiResults.map(res => Number(res.id));
+            if (foundIds.length > 0) {
+                where.id = { in: foundIds };
+            } else {
+                where.id = -1; // Fuerza vacío
+            }
+        } else if (q) {
             const qStr = String(q);
             // Buscar tanto por título visible como por nombre de archivo (si existe en el modelo)
             where.OR = [
@@ -2477,6 +2487,9 @@ export const updateAsset = async (req, res) => {
             data,
             include: { categories: true, tags: true },
         });
+        
+        qdrantService.upsertAssetVector(id).catch(err => console.error('[QDRANT] Update error:', err));
+        
         const updatedSafe = toJsonSafe(updated);
         return res.json(updatedSafe);
     } catch (e) {
@@ -2771,6 +2784,9 @@ export const createAsset = async (req, res) => {
                 },
             });
             createdInDb = true;
+            
+            qdrantService.upsertAssetVector(created.id).catch(err => console.error('[QDRANT] Create error:', err));
+            
             // Convertir BigInt a Number para JSON
             const createdSafe = {
                 ...created,
@@ -3138,6 +3154,8 @@ export const createAssetFull = async (req, res) => {
         enqueueToMegaBatch(created.id).catch((err) =>
             console.error('[MEGA-UP][BATCH] async error:', err)
         );
+
+        qdrantService.upsertAssetVector(created.id).catch(err => console.error('[QDRANT] CreateFull error:', err));
 
         // Evita cleanup accidental post-éxito ante errores posteriores no críticos.
         cleanupPaths = [];
@@ -5660,6 +5678,8 @@ export const deleteAsset = async (req, res) => {
         });
         if (!asset) return res.status(404).json({ message: 'Asset not found' });
 
+        qdrantService.deleteAssetVector(id).catch(err => console.error('[QDRANT] Delete error:', err));
+
         const imgDir = path.join(IMAGES_DIR, asset.slug); // imágenes por slug
         const archDir = path.join(ARCHIVES_DIR, asset.slug); // archivo por slug
 
@@ -6138,6 +6158,7 @@ export const searchAssets = async (req, res) => {
       // opcionales (si quieres mantenerlos)
       plan,
       isPremium,
+            is_ai_search,
       order // ignorado a propósito: siempre latest-first
     } = req.query || {};
 
@@ -6152,6 +6173,12 @@ export const searchAssets = async (req, res) => {
     // --- Texto libre: minúsculas para consistencia ---
     const qStr = String(q || '').trim();
     const qLower = qStr.toLowerCase();
+        const isAiSearch = String(is_ai_search || '').toLowerCase() === 'true';
+
+        // IA sin frase: no debe devolver resultados.
+        if (isAiSearch && !qStr) {
+            return res.json({ items: [], total: 0, page, pageSize: size, hasMore: false });
+        }
 
     // --- Listas de categorías y tags ---
     const catList = String(categories || '')
@@ -6268,6 +6295,65 @@ export const searchAssets = async (req, res) => {
 
     // --- ORDEN: siempre los últimos subidos primero ---
     const orderBy = [{ createdAt: 'desc' }, { id: 'desc' }];
+
+        // --- Búsqueda IA semántica (Qdrant) ---
+        if (isAiSearch && qLower) {
+            const AI_MEM_LIMIT = 1500;
+            const aiLimit = Math.min(
+                AI_MEM_LIMIT,
+                Math.max(120, (page + 1) * size * 3)
+            );
+
+            const aiResults = await qdrantService.searchSimilarAssets(qStr, aiLimit);
+            const aiIdsOrdered = [];
+            const aiSeen = new Set();
+
+            for (const hit of aiResults || []) {
+                const id = Number(hit?.id);
+                if (!Number.isFinite(id) || id <= 0 || aiSeen.has(id)) continue;
+                aiSeen.add(id);
+                aiIdsOrdered.push(id);
+                if (aiIdsOrdered.length >= AI_MEM_LIMIT) break;
+            }
+
+            if (!aiIdsOrdered.length) {
+                return res.json({ items: [], total: 0, page, pageSize: size, hasMore: false });
+            }
+
+            const aiWhere = {
+                ...where,
+                id: { in: aiIdsOrdered },
+            };
+
+            const aiItemsDb = await prisma.asset.findMany({
+                where: aiWhere,
+                select,
+            });
+
+            const aiById = new Map(aiItemsDb.map((it) => [Number(it.id), it]));
+            const orderedBySimilarity = [];
+            for (const id of aiIdsOrdered) {
+                const row = aiById.get(id);
+                if (row) orderedBySimilarity.push(row);
+            }
+
+            const total = orderedBySimilarity.length;
+            const start = page * size;
+            const end = start + size;
+            const out = start < total ? orderedBySimilarity.slice(start, end) : [];
+            const hasMore = end < total;
+
+            const items = out.map((it) => {
+                const { ...rest } = it;
+                const tagsEs = Array.isArray(it.tags) ? it.tags.map((t) => t.slug) : [];
+                const tagsEn = Array.isArray(it.tags)
+                    ? it.tags.map((t) => t.nameEn || t.name || t.slug)
+                    : [];
+                return { ...rest, tagsEs, tagsEn };
+            });
+
+            return res.json({ items, total, page, pageSize: size, hasMore });
+        }
 
         // --- total + página ---
         if (!qLower) {

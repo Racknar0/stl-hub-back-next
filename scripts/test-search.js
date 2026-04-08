@@ -13,7 +13,12 @@ if (!geminiApiKey) {
   throw new Error('Falta GEMINI_API_KEY/GOOGLE_API_KEY en backend/.env');
 }
 
-const qdrant = new QdrantClient({ host: '127.0.0.1', port: 6333 });
+const qdrantHost = process.env.QDRANT_HOST || '127.0.0.1';
+const qdrantPort = Number(process.env.QDRANT_PORT || 6333);
+const qdrantCollection = process.env.QDRANT_COLLECTION || 'stls';
+const geminiEmbeddingModel = process.env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-001';
+
+const qdrant = new QdrantClient({ host: qdrantHost, port: qdrantPort });
 const ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
 function formatList(value) {
@@ -27,14 +32,14 @@ async function buscarEnStlHub(fraseUsuario) {
     // 1. Traducimos tu búsqueda a matemáticas (Vector de 3072 dimensiones)
     console.log("⏳ 1. La IA está convirtiendo tu frase a un vector...");
     const response = await ai.models.embedContent({
-      model: 'gemini-embedding-001',
+      model: geminiEmbeddingModel,
       contents: fraseUsuario,
     });
     const vectorBusqueda = response.embeddings[0].values;
 
     // 2. Buscamos en Qdrant los vectores más cercanos
     console.log("⏳ 2. Qdrant está buscando coincidencias matemáticas...");
-    const resultados = await qdrant.search('stls', {
+    const resultados = await qdrant.search(qdrantCollection, {
       vector: vectorBusqueda,
       limit: 3, // Queremos el Top 3 de resultados
       with_payload: true // Queremos que nos devuelva el título, no solo el ID

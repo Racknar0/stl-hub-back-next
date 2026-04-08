@@ -14,8 +14,13 @@ if (!geminiApiKey) {
   throw new Error('Falta GEMINI_API_KEY/GOOGLE_API_KEY en backend/.env');
 }
 
+const qdrantHost = process.env.QDRANT_HOST || '127.0.0.1';
+const qdrantPort = Number(process.env.QDRANT_PORT || 6333);
+const qdrantCollection = process.env.QDRANT_COLLECTION || 'stls';
+const geminiEmbeddingModel = process.env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-001';
+
 const prisma = new PrismaClient();
-const qdrant = new QdrantClient({ host: '127.0.0.1', port: 6333 });
+const qdrant = new QdrantClient({ host: qdrantHost, port: qdrantPort });
 
 const ai = new GoogleGenAI({ apiKey: geminiApiKey });
 const misDiezIds = [12910, 12909, 12862, 12803, 12661, 12574, 12431, 175, 181, 4438];
@@ -93,13 +98,13 @@ async function procesarDiezAssets() {
       console.log(`⏳ Generando vector para ID ${id}: ${asset.title}...`);
 
       const response = await ai.models.embedContent({
-        model: 'gemini-embedding-001',
+        model: geminiEmbeddingModel,
         contents: textoCompleto,
       });
       
       const vector = response.embeddings[0].values; 
 
-      await qdrant.upsert('stls', {
+      await qdrant.upsert(qdrantCollection, {
         wait: true,
         points: [{
           id: asset.id,
