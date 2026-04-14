@@ -715,9 +715,9 @@ async function classifySingleItem(ai, payload, item) {
     'Debes proponer un nombre limpio y comercial, corto (3-9 palabras), legible para tienda.',
     'La categoria debe devolverse SIEMPRE bilingue en el objeto categoria: { es, en }.',
     'La descripcion debe devolverse SIEMPRE bilingue en el objeto descripcion: { es, en }.',
-   'Prohibido usar texto de relleno, repeticiones o descripciones filosoficas sobre la historia del personaje.',
-       'IMPORTANTE DESCRIPCION: La descripcion debe ser CORTA, CONCISA y DIRECTA AL GRANO (entre 40 y 80 palabras maximo).',
-    'La descripcion debe mencionar brevemente de que trata el modelo y centrarse en detalles fisicos para la impresion 3D (ej. recomendacion de resina/PLA, si es en una o varias partes).',
+   'Prohibido usar texto de relleno, repeticiones o descripciones filosoficas sobre la historia del personaje. NO inventes datos que no se vean en las imagenes.',
+       'IMPORTANTE DESCRIPCION: La descripcion debe tener entre 80 y 150 palabras. Debe ser informativa, natural y util para SEO.',
+    'La descripcion debe: (1) describir visualmente lo que se ve en las imagenes del modelo (pose, detalles, accesorios, base), (2) indicar para que tipo de impresion se recomienda (resina/FDM/PLA), (3) si el modelo parece tener multiples piezas o una sola, (4) sugerir un uso o contexto (exhibicion, coleccion, cosplay, regalo, decoracion), (5) mencionar nivel de detalle visible (alto/medio para resina o PLA). Todo basado SOLO en lo que se observa en las imagenes.',
     'Responde SOLO JSON valido, sin markdown ni texto extra, usando EXACTAMENTE esta forma:',
     JSON.stringify({
       nombre: { es: 'figura anime samurai', en: 'samurai anime figure' },
@@ -728,8 +728,8 @@ async function classifySingleItem(ai, payload, item) {
         { es: 'fantasia', en: 'fantasy' },
       ],
       descripcion: {
-        es: 'Figura de samurai estilo anime optimizada para impresion 3D. El modelo presenta detalles finos en la armadura y la katana, por lo que se recomienda imprimir en resina para un mejor acabado. No requiere ensamblaje complejo, pero se sugieren soportes en la zona de la espada. Ideal para pintar con acrilicos y exhibir.',
-        en: 'Anime style samurai figure optimized for 3D printing. The model features fine details on the armor and katana, so resin printing is recommended for a better finish. No complex assembly required, but supports are suggested around the sword area. Ideal for painting with acrylics and displaying.',
+        es: 'Figura de samurai estilo anime optimizada para impresion 3D en resina o FDM. El modelo presenta un nivel de detalle alto visible en la armadura tradicional japonesa, la katana desenvainada y la pose dinamica de combate. Se observa una base decorativa incluida que facilita la exhibicion. Por el nivel de detalle fino en las piezas de la armadura y los pliegues de la ropa, se recomienda impresion en resina para obtener el mejor acabado superficial, aunque tambien es viable en PLA con boquilla de 0.3mm. El modelo aparenta ser de multiples piezas para facilitar el ensamblaje y pintado. Ideal para coleccionistas de figuras anime, exhibicion en vitrinas o como proyecto de pintura con acrilicos.',
+        en: 'Anime style samurai figure optimized for 3D printing in resin or FDM. The model features a high level of detail visible in the traditional Japanese armor, drawn katana, and dynamic combat pose. A decorative display base is included for easy showcasing. Due to the fine detail level on the armor plates and fabric folds, resin printing is recommended for the best surface finish, though PLA printing with a 0.3mm nozzle is also viable. The model appears to consist of multiple parts for easier assembly and painting. Ideal for anime figure collectors, display cases, or as an acrylic painting project.',
       },
     }, null, 2),
     'Contexto JSON del asset:',

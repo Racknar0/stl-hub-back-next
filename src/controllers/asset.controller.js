@@ -886,11 +886,11 @@ async function generateSeoDescriptionForAsset(assetInput, assetRaw = null) {
 
     const prompt = [
         'Eres redactor SEO para tienda de modelos STL.',
-        'Genera descripción SEO CORTA bilingüe (ES + EN) para ficha de producto.',
+        'Genera descripción SEO bilingüe (ES + EN) de 80 a 150 palabras por idioma para ficha de producto.',
         'Debes analizar primero las imágenes adjuntas del asset (si existen).',
         'Si no hay imágenes suficientes, usa título/categorías/tags como respaldo.',
-        'Reglas estrictas para cada idioma: 1 a 2 frases, sin emojis, sin markdown, texto natural y útil.',
-        'Debe ser breve y apta para SEO.',
+        'Reglas estrictas para cada idioma: 3 a 5 frases, sin emojis, sin markdown, texto natural y descriptivo.',
+        'La descripcion debe describir visualmente el modelo basandose en las imagenes (pose, detalles, accesorios), indicar tipo de impresion recomendada (resina/FDM), sugerir uso (exhibicion, cosplay, decoracion) y mencionar nivel de detalle. NO inventar datos que no se observen en las imagenes. Ideal para SEO y posicionamiento en Google.',
         'Si falta contexto, escribe una descripción genérica breve y correcta.',
         'Responde SOLO JSON con forma: {"description":{"es":"...","en":"..."}}.',
         'Contexto:',
