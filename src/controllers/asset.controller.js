@@ -2529,7 +2529,7 @@ export const updateAsset = async (req, res) => {
 export const generateAssetMetaDescriptions = async (req, res) => {
     try {
         const mode = String(req.body?.mode || 'selected').toLowerCase();
-        const maxAssets = Math.max(1, Math.min(500, Number(req.body?.limit) || 500));
+        const maxAssets = Math.max(1, Math.min(1000, Number(req.body?.limit) || 1000));
         const ids = Array.isArray(req.body?.assetIds)
             ? req.body.assetIds.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0)
             : [];
