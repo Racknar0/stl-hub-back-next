@@ -1125,10 +1125,18 @@ async function megaFindMatchesExpected(baseB, expectedSet, { timeoutMs = 180000 
   }
 }
 
-function truncateNotificationBody(s, max = 191) {
+function truncateNotificationBody(s, max = 0) {
   if (s == null) return null;
-  const txt = String(s);
-  return txt.length <= max ? txt : txt.slice(0, max);
+  const normalized = String(s)
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  const limit = Number(max);
+  if (!Number.isFinite(limit) || limit <= 0) return normalized;
+  return normalized.length <= limit ? normalized : normalized.slice(0, limit);
 }
 
 // Sincroniza todos los assets publicados de una cuenta main hacia sus backups (solo los faltantes)
@@ -1188,7 +1196,7 @@ export const syncMainToBackups = async (req, res) => {
         await prisma.notification.create({
           data: {
             title: String(title || 'Error sincronización MAIN->BACKUPS').slice(0, 160),
-            body: truncateNotificationBody(body, 191),
+            body: truncateNotificationBody(body),
             status: 'UNREAD',
             type: 'AUTOMATION',
             typeStatus: 'ERROR',
@@ -1650,10 +1658,14 @@ export const syncMainToBackups = async (req, res) => {
   } catch (e) {
   // Notificar error general (para cron) y devolver 500.
   try {
+    const errorDetails = [
+      String(e?.message || e),
+      e?.stack ? String(e.stack) : null,
+    ].filter(Boolean).join('\n');
     await prisma.notification.create({
       data: {
         title: 'Error general sync MAIN->BACKUPS',
-        body: truncateNotificationBody(`main=${mainId} err=${String(e.message || e).slice(0, 240)}`, 191),
+        body: truncateNotificationBody(`main=${mainId}\nerr=${errorDetails}`),
         status: 'UNREAD',
         type: 'AUTOMATION',
         typeStatus: 'ERROR',

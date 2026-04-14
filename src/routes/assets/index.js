@@ -36,6 +36,7 @@ import {
   cutMegaBatchToBackups,
   unstickMegaBatch,
   removeAssetFromMegaBatch,
+  saveSelectedAssetMeta,
   generateAssetMetaDescriptions,
   generateAssetMetaTags,
   similarAssets,
@@ -152,6 +153,7 @@ router.post('/cut-mega-batch-to-backups', cutMegaBatchToBackups);
 router.post('/unstick-mega-batch', unstickMegaBatch);
 // Nuevo: eliminar un asset de la cola/batch en caliente
 router.post('/remove-from-mega-batch', removeAssetFromMegaBatch);
+router.post('/meta/save-selected', saveSelectedAssetMeta);
 router.post('/meta/generate-descriptions', generateAssetMetaDescriptions);
 router.post('/meta/generate-tags', generateAssetMetaTags);
 router.put('/:id', updateAsset);

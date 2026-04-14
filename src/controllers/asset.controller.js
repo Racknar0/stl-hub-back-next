@@ -248,10 +248,18 @@ function ensureDir(p) {
     if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
 }
 
-function truncateBatchNotification(text, max = 191) {
-    const s = String(text || '');
-    if (s.length <= max) return s;
-    return `${s.slice(0, Math.max(0, max - 1))}…`;
+function truncateBatchNotification(text, max = 0) {
+    const s = String(text || '')
+        .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .replace(/[ \t]+/g, ' ')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+    const limit = Number(max);
+    if (!Number.isFinite(limit) || limit <= 0) return s;
+    if (s.length <= limit) return s;
+    return `${s.slice(0, Math.max(0, limit - 1))}…`;
 }
 
 async function notifyBatchUploadFailure({
@@ -269,7 +277,7 @@ async function notifyBatchUploadFailure({
 
         const body = truncateBatchNotification(
             `main=${mainAccountId || '-'} asset=${assetId || '-'} backup=${backupAccountId || '-'} err=${String(error || 'unknown').slice(0, 220)}${extra ? ` | ${extra}` : ''}`
-        , 191);
+        );
 
         await prisma.notification.create({
             data: {
@@ -2533,6 +2541,104 @@ export const updateAsset = async (req, res) => {
     }
 };
 
+// POST /assets/meta/save-selected
+export const saveSelectedAssetMeta = async (req, res) => {
+    try {
+        const rawItems = Array.isArray(req.body?.items) ? req.body.items : [];
+        if (!rawItems.length) {
+            return res.status(400).json({ message: 'items requerido' });
+        }
+
+        const items = rawItems
+            .slice(0, 1000)
+            .map((item) => ({
+                id: Number(item?.id),
+                title: item?.title,
+                titleEn: item?.titleEn,
+                description: item?.description,
+                descriptionEn: item?.descriptionEn,
+                categories: item?.categories,
+                tags: item?.tags,
+            }))
+            .filter((item) => Number.isFinite(item.id) && item.id > 0);
+
+        if (!items.length) {
+            return res
+                .status(400)
+                .json({ message: 'items sin ids válidos' });
+        }
+
+        let updated = 0;
+        let failed = 0;
+        const details = [];
+        const chunkSize = 20;
+
+        for (let i = 0; i < items.length; i += chunkSize) {
+            const chunk = items.slice(i, i + chunkSize);
+            const settled = await Promise.allSettled(
+                chunk.map(async (item) => {
+                    const data = {
+                        title: String(item.title || '').trim(),
+                        titleEn: String(item.titleEn || '').trim(),
+                        description:
+                            normalizeDescriptionText(item.description) || null,
+                        descriptionEn:
+                            normalizeDescriptionText(item.descriptionEn) || null,
+                    };
+
+                    const catsParsed = parseCategoriesPayload(item.categories);
+                    if (catsParsed.length) {
+                        data.categories = { set: [], connect: catsParsed };
+                    }
+
+                    const tagsParsed = parseTagsPayload(item.tags);
+                    if (tagsParsed.length) {
+                        data.tags = { set: [], connect: tagsParsed };
+                    }
+
+                    await prisma.asset.update({
+                        where: { id: item.id },
+                        data,
+                    });
+
+                    return { id: item.id, updated: true };
+                }),
+            );
+
+            settled.forEach((result, idx) => {
+                const itemId = chunk[idx]?.id;
+                if (result.status === 'fulfilled') {
+                    updated += 1;
+                    details.push(result.value);
+                    return;
+                }
+
+                failed += 1;
+                details.push({
+                    id: itemId,
+                    updated: false,
+                    error: String(
+                        result.reason?.message ||
+                            result.reason ||
+                            'ERROR_UPDATING_ASSET',
+                    ),
+                });
+            });
+        }
+
+        return res.json({
+            success: failed === 0,
+            processed: items.length,
+            updated,
+            failed,
+            items: details,
+        });
+    } catch (e) {
+        console.error('[ASSETS][META] save selected error:', e);
+        return res.status(500).json({ message: 'Error saving selected metadata' });
+    }
+};
+
 // POST /assets/meta/generate-descriptions
 export const generateAssetMetaDescriptions = async (req, res) => {
     try {
@@ -2699,6 +2805,13 @@ export const generateAssetMetaTags = async (req, res) => {
                 updated: true,
                 tags: Array.isArray(row?.tags) ? row.tags.map((t) => ({ id: t.id, slug: t.slug, name: t.name, nameEn: t.nameEn })) : [],
             });
+
+            // Reindexar vector para alinear búsqueda semántica con los tags recién generados.
+            qdrantService
+                .upsertAssetVector(asset.id)
+                .catch((err) =>
+                    console.error('[QDRANT] Tags generate sync error:', err),
+                );
         }
 
         return res.json({

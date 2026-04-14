@@ -205,21 +205,26 @@ function parseSizeToMB(str){
   return Math.round(num * factor)
 }
 
-function truncateBody(s, max = 240) {
+function truncateBody(s, max = 0) {
   if (s == null) return null;
-  const str = String(s);
-  return str.length > max ? str.slice(0, max - 3) + '...' : str;
+  const str = String(s)
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  const limit = Number(max);
+  if (!Number.isFinite(limit) || limit <= 0) return str;
+  return str.length > limit ? str.slice(0, Math.max(0, limit - 3)) + '...' : str;
 }
-
-// Prisma/Mysql: Notification.body históricamente fue VARCHAR(191)
-const NOTIFICATION_BODY_MAX = 191;
 
 async function notifyAutomationError({ title, body }) {
   try {
     await prisma.notification.create({
       data: {
         title,
-        body: truncateBody(body, NOTIFICATION_BODY_MAX),
+        body: truncateBody(body),
         status: 'UNREAD',
         type: 'AUTOMATION',
         typeStatus: 'ERROR'
@@ -681,14 +686,14 @@ export async function runAutoRestoreMain(){
       try {
         const notifTitle = 'Restauración automática de assets desde backups completada'
         const notifBody = `Cuenta MAIN ${main.alias||'--'} (${main.email||'--'}). Total: ${candidateAssets.length}. Restaurados: ${restored}. Existentes: ${skippedExisting}. Links regenerados: ${regeneratedLinks}. No recuperados: ${notRecovered}. Duración: ${durMs} ms.`
-        await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody, NOTIFICATION_BODY_MAX), status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'SUCCESS' } })
+        await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody), status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'SUCCESS' } })
       } catch(e){ log.warn('[NOTIF][CRON] No se pudo crear notificación (restored>0): '+e.message) }
     } else if (notRecovered > 0) {
       try {
         const pendingIds = Array.from(needDownload.keys())
         const notifTitle = 'Fallo en restauración automática de assets'
         const notifBody = `Cuenta MAIN ${main.alias||'--'} (${main.email||'--'}). Faltantes=${pendingIds.length}. Ninguno restaurado. IDs pendientes: ${pendingIds.slice(0,50).join(', ')}${pendingIds.length>50?' ...':''}. Links regenerados: ${regeneratedLinks}. Duración: ${durMs} ms.`
-        await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody, NOTIFICATION_BODY_MAX), status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'ERROR' } })
+        await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody), status: 'UNREAD', type: 'AUTOMATION', typeStatus: 'ERROR' } })
       } catch(e){ log.warn('[NOTIF][CRON][FAIL] No se pudo crear notificación de fallo: '+e.message) }
     } else {
       log.info('[CRON][NOTIF][SKIP] restored=0 pero noRecovered=0 (todos existen, sin restauraciones)')
@@ -701,7 +706,7 @@ export async function runAutoRestoreMain(){
       await prisma.notification.create({
         data: {
           title: 'Error en restauración automática de backups',
-          body: truncateBody(errBody, NOTIFICATION_BODY_MAX),
+          body: truncateBody(errBody),
           status: 'UNREAD',
           type: 'AUTOMATION',
           typeStatus: 'ERROR'

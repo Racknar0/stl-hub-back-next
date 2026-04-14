@@ -46,7 +46,7 @@ const MEGA_CMD_TIMEOUT_MS = Number(process.env.MEGA_CMD_TIMEOUT_MS) || 90_000
 const UPLOAD_PROGRESS_HEARTBEAT_MS = Number(process.env.BATCH_PROGRESS_HEARTBEAT_MS) || 10_000
 const ARCHIVE_EXTS = ['.rar', '.zip', '.7z', '.tar', '.gz', '.tgz']
 const IMAGE_EXTS   = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff']
-const NOTIFICATION_BODY_MAX = 191
+const NOTIFICATION_BODY_MAX = 0
 let activeMegaSessionAccountId = 0
 let activeMegaProxyUrl = ''
 const preferredProxyByAccountId = new Map()
@@ -179,9 +179,11 @@ function createProgressLogger(label) {
 }
 
 function truncateText(text, max = NOTIFICATION_BODY_MAX) {
-  const s = String(text || '')
-  if (s.length <= max) return s
-  return `${s.slice(0, Math.max(0, max - 1))}…`
+  const s = normalizeMetaText(text)
+  const limit = Number(max)
+  if (!Number.isFinite(limit) || limit <= 0) return s
+  if (s.length <= limit) return s
+  return `${s.slice(0, Math.max(0, limit - 1))}…`
 }
 
 function normalizeMetaText(value) {
