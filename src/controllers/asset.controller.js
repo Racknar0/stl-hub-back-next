@@ -779,24 +779,32 @@ async function buildAssetImageParts(asset) {
 }
 
 async function updateAssetDescriptionSafely(assetId, rawDescription) {
+    const numericAssetId = Number(assetId);
     const safe = normalizeDescriptionText(rawDescription) || ASSET_DESCRIPTION_FALLBACK;
     await prisma.asset.update({
-        where: { id: Number(assetId) },
+        where: { id: numericAssetId },
         data: { description: safe },
     });
+    qdrantService
+        .upsertAssetVector(numericAssetId)
+        .catch((err) => console.error('[QDRANT] Description update error:', err));
     return safe;
 }
 
 async function updateAssetDescriptionsSafely(assetId, rawDescriptionEs, rawDescriptionEn) {
+    const numericAssetId = Number(assetId);
     const safeEs = normalizeDescriptionText(rawDescriptionEs) || ASSET_DESCRIPTION_FALLBACK;
     const safeEn = normalizeDescriptionText(rawDescriptionEn) || ASSET_DESCRIPTION_EN_FALLBACK;
     await prisma.asset.update({
-        where: { id: Number(assetId) },
+        where: { id: numericAssetId },
         data: {
             description: safeEs,
             descriptionEn: safeEn,
         },
     });
+    qdrantService
+        .upsertAssetVector(numericAssetId)
+        .catch((err) => console.error('[QDRANT] Description regenerate error:', err));
     return { description: safeEs, descriptionEn: safeEn };
 }
 
