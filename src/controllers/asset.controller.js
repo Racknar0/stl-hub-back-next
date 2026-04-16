@@ -6069,6 +6069,174 @@ export const mostDownloadedAssets = async (req, res) => {
 };
 
 // Datos centralizados para megamenú (público)
+const SEASONAL_COLLECTIONS_BY_MONTH = {
+    0: [
+        { slug: 'desk-organization', labelEs: 'Organización de escritorio', labelEn: 'Desk Setup' },
+        { slug: 'cable-management', labelEs: 'Gestión de cables', labelEn: 'Cable Management' },
+        { slug: 'planner-accessories', labelEs: 'Accesorios de agenda', labelEn: 'Planner Accessories' },
+        { slug: 'home-organization', labelEs: 'Organización del hogar', labelEn: 'Home Organization' },
+        { slug: 'phone-stands', labelEs: 'Soportes para celular', labelEn: 'Phone Stands' },
+        { slug: 'storage-solutions', labelEs: 'Soluciones de almacenamiento', labelEn: 'Storage Solutions' },
+    ],
+    1: [
+        { slug: 'valentines-day', labelEs: 'San Valentín', labelEn: "Valentine's" },
+        { slug: 'heart-cookie-cutters', labelEs: 'Cortadores corazón', labelEn: 'Heart Cutters' },
+        { slug: 'gift-boxes', labelEs: 'Cajas de regalo', labelEn: 'Gift Boxes' },
+        { slug: 'romantic-lithophanes', labelEs: 'Litofanías románticas', labelEn: 'Romantic Lithophanes' },
+        { slug: 'rose-vases', labelEs: 'Floreros', labelEn: 'Rose Vases' },
+        { slug: 'couples-keychains', labelEs: 'Llaveros de pareja', labelEn: 'Couple Keychains' },
+    ],
+    2: [
+        { slug: 'planters', labelEs: 'Macetas', labelEn: 'Planters' },
+        { slug: 'seed-starters', labelEs: 'Germinadores', labelEn: 'Seed Starters' },
+        { slug: 'garden-tools', labelEs: 'Herramientas de jardín', labelEn: 'Garden Tools' },
+        { slug: 'easter-prep', labelEs: 'Pre-Pascua', labelEn: 'Easter Prep' },
+        { slug: 'desk-planters', labelEs: 'Macetas de escritorio', labelEn: 'Desk Planters' },
+        { slug: 'spring-home-decor', labelEs: 'Decoración de primavera', labelEn: 'Spring Decor' },
+    ],
+    3: [
+        { slug: 'easter', labelEs: 'Pascua', labelEn: 'Easter' },
+        { slug: 'bunny-decor', labelEs: 'Decoración conejo', labelEn: 'Bunny Decor' },
+        { slug: 'egg-holders', labelEs: 'Porta huevos', labelEn: 'Egg Holders' },
+        { slug: 'easter-cookie-cutters', labelEs: 'Cortadores de Pascua', labelEn: 'Easter Cutters' },
+        { slug: 'family-boardgame-accessories', labelEs: 'Accesorios juegos de mesa', labelEn: 'Boardgame Accessories' },
+        { slug: 'spring-tabletop-decor', labelEs: 'Decoración de mesa', labelEn: 'Table Decor' },
+    ],
+    4: [
+        { slug: 'star-wars', labelEs: 'Cultura Geek', labelEn: 'Geek Culture' },
+        { slug: 'star-wars-inspired', labelEs: 'Inspirado Sci-Fi', labelEn: 'Sci-Fi Inspired' },
+        { slug: 'miniatures-display', labelEs: 'Exhibidores miniaturas', labelEn: 'Mini Display' },
+        { slug: 'mothers-day-gifts', labelEs: 'Regalos Día de la Madre', labelEn: "Mother's Day Gifts" },
+        { slug: 'decorative-vases', labelEs: 'Floreros decorativos', labelEn: 'Decorative Vases' },
+        { slug: 'wall-art-panels', labelEs: 'Paneles decorativos', labelEn: 'Wall Art Panels' },
+    ],
+    5: [
+        { slug: 'fathers-day', labelEs: 'Día del Padre', labelEn: "Father's Day" },
+        { slug: 'tool-organizers', labelEs: 'Organizadores de herramientas', labelEn: 'Tool Organizers' },
+        { slug: 'workshop-accessories', labelEs: 'Accesorios de taller', labelEn: 'Workshop Accessories' },
+        { slug: 'desk-gadgets', labelEs: 'Gadgets de escritorio', labelEn: 'Desk Gadgets' },
+        { slug: 'bottle-openers', labelEs: 'Destapadores', labelEn: 'Bottle Openers' },
+        { slug: 'car-accessories', labelEs: 'Accesorios de carro', labelEn: 'Car Accessories' },
+    ],
+    6: [
+        { slug: 'cosplay', labelEs: 'Cosplay & Props', labelEn: 'Cosplay' },
+        { slug: 'costume-props', labelEs: 'Props de vestuario', labelEn: 'Costume Props' },
+        { slug: 'helmet-stands', labelEs: 'Soportes para cascos', labelEn: 'Helmet Stands' },
+        { slug: 'armor-accessories', labelEs: 'Accesorios de armadura', labelEn: 'Armor Accessories' },
+        { slug: 'miniatures-painting-tools', labelEs: 'Herramientas para pintar minis', labelEn: 'Mini Painting Tools' },
+        { slug: 'convention-gear', labelEs: 'Accesorios para eventos', labelEn: 'Convention Gear' },
+    ],
+    7: [
+        { slug: 'back-to-school', labelEs: 'Regreso a clases', labelEn: 'Back to School' },
+        { slug: 'pencil-holders', labelEs: 'Portalápices', labelEn: 'Pencil Holders' },
+        { slug: 'laptop-stands', labelEs: 'Soportes laptop', labelEn: 'Laptop Stands' },
+        { slug: 'study-organizers', labelEs: 'Organizadores de estudio', labelEn: 'Study Organizers' },
+        { slug: 'bookmark-designs', labelEs: 'Separadores', labelEn: 'Bookmarks' },
+        { slug: 'backpack-clips', labelEs: 'Clips para mochila', labelEn: 'Backpack Clips' },
+    ],
+    8: [
+        { slug: 'back-to-school', labelEs: 'Regreso a clases', labelEn: 'Back to School' },
+        { slug: 'productivity-desk', labelEs: 'Productividad escritorio', labelEn: 'Desk Productivity' },
+        { slug: 'headphone-stands', labelEs: 'Soportes audífonos', labelEn: 'Headphone Stands' },
+        { slug: 'cable-management', labelEs: 'Gestión de cables', labelEn: 'Cable Management' },
+        { slug: 'office-mini-storage', labelEs: 'Mini almacenamiento oficina', labelEn: 'Office Mini Storage' },
+        { slug: 'halloween-prep', labelEs: 'Pre-Halloween', labelEn: 'Halloween Prep' },
+    ],
+    9: [
+        { slug: 'halloween', labelEs: 'Halloween', labelEn: 'Halloween' },
+        { slug: 'spooky-decor', labelEs: 'Decoración spooky', labelEn: 'Spooky Decor' },
+        { slug: 'mask-designs', labelEs: 'Máscaras', labelEn: 'Mask Designs' },
+        { slug: 'pumpkin-lanterns', labelEs: 'Calabazas y faroles', labelEn: 'Pumpkin Lanterns' },
+        { slug: 'halloween-cookie-cutters', labelEs: 'Cortadores Halloween', labelEn: 'Halloween Cutters' },
+        { slug: 'candy-bowls', labelEs: 'Bowl dulces', labelEn: 'Candy Bowls' },
+    ],
+    10: [
+        { slug: '3d-printer-upgrades', labelEs: 'Mejoras 3D', labelEn: 'Printer Upgrades' },
+        { slug: 'filament-storage', labelEs: 'Almacenamiento filamento', labelEn: 'Filament Storage' },
+        { slug: 'nozzle-tools', labelEs: 'Herramientas de boquillas', labelEn: 'Nozzle Tools' },
+        { slug: 'calibration-jigs', labelEs: 'Útiles de calibración', labelEn: 'Calibration Jigs' },
+        { slug: 'workshop-organization', labelEs: 'Organización taller', labelEn: 'Workshop Organization' },
+        { slug: 'black-friday-gifts', labelEs: 'Regalos tech', labelEn: 'Tech Gifts' },
+    ],
+    11: [
+        { slug: 'christmas', labelEs: 'Navidad', labelEn: 'Christmas' },
+        { slug: 'tree-ornaments', labelEs: 'Adornos árbol', labelEn: 'Tree Ornaments' },
+        { slug: 'nativity-scene', labelEs: 'Pesebre', labelEn: 'Nativity' },
+        { slug: 'gift-tags', labelEs: 'Etiquetas regalo', labelEn: 'Gift Tags' },
+        { slug: 'christmas-cookie-cutters', labelEs: 'Cortadores navideños', labelEn: 'Christmas Cutters' },
+        { slug: 'advent-calendar', labelEs: 'Calendario de adviento', labelEn: 'Advent Calendar' },
+    ],
+};
+
+function normalizeToken(v) {
+    return String(v || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9-_]+/g, '-');
+}
+
+export function getSeasonalCollections(month = new Date().getMonth()) {
+    const m = Number(month);
+    if (!Number.isFinite(m)) return [];
+    return (SEASONAL_COLLECTIONS_BY_MONTH[m] || []).map((it) => ({ ...it }));
+}
+
+function buildSeasonalCollectionsFromQdrant(baseCollections, orderedAssets) {
+    const perCategoryCap = 2;
+    const maxEvidenceAssets = 60;
+    const diversityCounter = new Map();
+    const evidenceAssets = [];
+
+    for (const asset of orderedAssets || []) {
+        const primaryCategory = normalizeToken(
+            asset?.categories?.[0]?.slug || asset?.categories?.[0]?.slugEn || 'uncategorized'
+        );
+        const used = diversityCounter.get(primaryCategory) || 0;
+        if (used >= perCategoryCap) continue;
+
+        diversityCounter.set(primaryCategory, used + 1);
+        evidenceAssets.push(asset);
+        if (evidenceAssets.length >= maxEvidenceAssets) break;
+    }
+
+    const scoreBySlug = new Map(baseCollections.map((it) => [normalizeToken(it.slug), 0]));
+
+    evidenceAssets.forEach((asset, idx) => {
+        const weight = Math.max(1, 60 - idx);
+        const slugBag = new Set();
+
+        for (const c of asset?.categories || []) {
+            slugBag.add(normalizeToken(c?.slug));
+            slugBag.add(normalizeToken(c?.slugEn));
+        }
+        for (const t of asset?.tags || []) {
+            slugBag.add(normalizeToken(t?.slug));
+            slugBag.add(normalizeToken(t?.slugEn));
+        }
+
+        for (const base of baseCollections) {
+            const key = normalizeToken(base.slug);
+            if (!key) continue;
+            if (slugBag.has(key)) {
+                scoreBySlug.set(key, (scoreBySlug.get(key) || 0) + weight);
+            }
+        }
+    });
+
+    const withScore = baseCollections.map((it, index) => ({
+        ...it,
+        score: scoreBySlug.get(normalizeToken(it.slug)) || 0,
+        _index: index,
+    }));
+
+    withScore.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return a._index - b._index;
+    });
+
+    return withScore.slice(0, 6).map(({ _index, ...rest }) => rest);
+}
+
 export const getMegaMenuData = async (_req, res) => {
     try {
         const [categories, mostDownloaded] = await Promise.all([
@@ -6097,7 +6265,56 @@ export const getMegaMenuData = async (_req, res) => {
             }),
         ]);
 
-        return res.json({ categories, mostDownloaded });
+        const seasonalBase = getSeasonalCollections(new Date().getMonth());
+        let seasonalCollections = seasonalBase;
+
+        if (seasonalBase.length) {
+            const seasonalQuery = seasonalBase
+                .map((it) => `${it.labelEs} ${it.labelEn} ${it.slug}`)
+                .join(' | ');
+
+            const aiResults = await qdrantService.searchSimilarAssets(seasonalQuery, 60);
+            const idsOrdered = [];
+            const seen = new Set();
+
+            for (const hit of aiResults || []) {
+                const id = Number(hit?.id);
+                if (!Number.isFinite(id) || id <= 0 || seen.has(id)) continue;
+                seen.add(id);
+                idsOrdered.push(id);
+                if (idsOrdered.length >= 60) break;
+            }
+
+            if (idsOrdered.length) {
+                const assets = await prisma.asset.findMany({
+                    where: { id: { in: idsOrdered }, status: 'PUBLISHED' },
+                    select: {
+                        id: true,
+                        categories: {
+                            select: {
+                                slug: true,
+                                slugEn: true,
+                            },
+                        },
+                        tags: {
+                            select: {
+                                slug: true,
+                                slugEn: true,
+                            },
+                        },
+                    },
+                });
+
+                const byId = new Map(assets.map((a) => [Number(a.id), a]));
+                const orderedAssets = idsOrdered
+                    .map((id) => byId.get(id))
+                    .filter(Boolean);
+
+                seasonalCollections = buildSeasonalCollectionsFromQdrant(seasonalBase, orderedAssets);
+            }
+        }
+
+        return res.json({ categories, mostDownloaded, seasonalCollections });
     } catch (e) {
         console.error('[ASSETS] megaMenuData error:', e);
         return res.status(500).json({ message: 'Error getting mega menu data' });
