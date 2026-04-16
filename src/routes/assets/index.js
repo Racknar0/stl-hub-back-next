@@ -19,6 +19,7 @@ import {
   searchAssets,
   requestDownload,
   mostDownloadedAssets,
+  getMegaMenuData,
   randomizeFree,
   listAssetReplicas,
   getFullProgress,
@@ -94,6 +95,7 @@ const uploadCombined = multer({ storage: archiveStorage });
 // Rutas públicas
 router.get('/latest', latestAssets);
 router.get('/top', mostDownloadedAssets);
+router.get('/menu/mega', getMegaMenuData);
 router.get('/search', searchAssets);
 router.get('/slugs', listPublishedSlugs);
 // Nueva ruta por slug (antes de :id para evitar conflicto con texto que sea numérico)

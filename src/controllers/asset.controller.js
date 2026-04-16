@@ -6068,6 +6068,42 @@ export const mostDownloadedAssets = async (req, res) => {
     }
 };
 
+// Datos centralizados para megamenú (público)
+export const getMegaMenuData = async (_req, res) => {
+    try {
+        const [categories, mostDownloaded] = await Promise.all([
+            prisma.category.findMany({
+                orderBy: { name: 'asc' },
+                select: {
+                    id: true,
+                    name: true,
+                    nameEn: true,
+                    slug: true,
+                    slugEn: true,
+                },
+            }),
+            prisma.asset.findMany({
+                where: { status: 'PUBLISHED' },
+                orderBy: [{ downloads: 'desc' }, { id: 'desc' }],
+                take: 8,
+                select: {
+                    id: true,
+                    slug: true,
+                    title: true,
+                    titleEn: true,
+                    downloads: true,
+                    isPremium: true,
+                },
+            }),
+        ]);
+
+        return res.json({ categories, mostDownloaded });
+    } catch (e) {
+        console.error('[ASSETS] megaMenuData error:', e);
+        return res.status(500).json({ message: 'Error getting mega menu data' });
+    }
+};
+
 // Búsqueda pública con filtros por categorías, tags y texto libre
 // export const searchAssets = async (req, res) => {
 //     try {
