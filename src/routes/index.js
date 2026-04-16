@@ -12,6 +12,7 @@ import notificationsRoutes from './notifications/index.js';
 import paymentsRoutes from './payments/index.js';
 import metricsRoutes from './metrics/index.js';
 import adminOpsRoutes from './adminOps/index.js';
+import marketingRoutes from './marketing/index.js';
 import batchImportsRoutes from './batchImports/index.js';
 import aiRoutes from './ai.routes.js';
 
@@ -29,6 +30,7 @@ router.use('/payments', paymentsRoutes);
 router.use('/admin/reports', reportsRoutes);
 router.use('/admin/notifications', notificationsRoutes);
 router.use('/admin/ops', adminOpsRoutes);
+router.use('/admin/marketing', marketingRoutes);
 
 router.use('/downloads', downloadsRoutes);
 router.use('/me', meRoutes);

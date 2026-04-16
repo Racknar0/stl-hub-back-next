@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import jwt from 'jsonwebtoken';
 import { execFileSync } from 'child_process';
 import path from 'path';
+import { extractTrackingFromBody, pickTrackingForDb, resolveMarketingCampaignId, toSlug } from '../utils/attribution.js';
 
 const prisma = new PrismaClient();
 
@@ -379,6 +380,51 @@ export async function recordSearchEvent(req, res) {
     console.error('recordSearchEvent error', e)
     // no romper UX del buscador
     return res.status(200).json({ ok: false })
+  }
+}
+
+export async function recordCampaignVisit(req, res) {
+  try {
+    const tracking = extractTrackingFromBody(req.body || {});
+    if (!tracking) return res.status(200).json({ ok: true, ignored: true });
+
+    const marketingCampaignId = await resolveMarketingCampaignId(prisma, tracking);
+    const trackingDb = pickTrackingForDb(tracking);
+
+    const anonIdRaw = String(req.body?.anonId || '').trim();
+    const sessionIdRaw = String(req.body?.sessionId || '').trim();
+    const pagePathRaw = String(req.body?.pagePath || '').trim();
+
+    const anonId = anonIdRaw ? anonIdRaw.slice(0, 120) : null;
+    const sessionId = sessionIdRaw ? sessionIdRaw.slice(0, 120) : null;
+    const pagePath = pagePathRaw ? pagePathRaw.slice(0, 255) : null;
+
+    await prisma.marketingVisit.create({
+      data: {
+        marketingCampaignId,
+        anonId,
+        sessionId,
+        pagePath,
+        utmSource: trackingDb.utmSource,
+        utmMedium: trackingDb.utmMedium,
+        utmCampaign: trackingDb.utmCampaign || (tracking.utmCampaign ? toSlug(tracking.utmCampaign) : null),
+        utmContent: trackingDb.utmContent,
+        utmTerm: trackingDb.utmTerm,
+        clickGclid: trackingDb.clickGclid,
+        clickFbclid: trackingDb.clickFbclid,
+        clickTtclid: trackingDb.clickTtclid,
+        clickMsclkid: trackingDb.clickMsclkid,
+        trackingLandingUrl: trackingDb.utmLandingUrl,
+        trackingReferrer: trackingDb.utmReferrer,
+      },
+      select: { id: true },
+    });
+
+    return res.status(201).json({ ok: true });
+  } catch (e) {
+    console.error('recordCampaignVisit error', e);
+    // No romper UX ni navegación por tracking
+    return res.status(200).json({ ok: false });
   }
 }
 

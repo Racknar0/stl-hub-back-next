@@ -6,6 +6,7 @@ import { getRegistrationMetrics } from '../../controllers/metrics.controller.js'
 import { getTopDownloads } from '../../controllers/metrics.controller.js'
 import { getTaxonomyCounts } from '../../controllers/metrics.controller.js'
 import { recordSearchEvent, recordSearchClick, getSearchInsights } from '../../controllers/metrics.controller.js'
+import { recordCampaignVisit } from '../../controllers/metrics.controller.js'
 
 const router = express.Router()
 
@@ -22,5 +23,6 @@ router.get('/taxonomy-counts', getTaxonomyCounts)
 router.post('/search', recordSearchEvent)
 router.post('/search/:id/click', recordSearchClick)
 router.get('/search-insights', getSearchInsights)
+router.post('/campaign-visit', recordCampaignVisit)
 
 export default router

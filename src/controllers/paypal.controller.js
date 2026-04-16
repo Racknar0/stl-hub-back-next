@@ -2,6 +2,7 @@ import paypal from '@paypal/checkout-server-sdk';
 import plans from '../config/plans.js';
 import { PrismaClient } from '@prisma/client';
 import { transporter } from './nodeMailerController.js';
+import { extractTrackingFromBody, pickTrackingForDb, resolveMarketingCampaignId } from '../utils/attribution.js';
 
 const prisma = new PrismaClient();
 
@@ -85,9 +86,55 @@ async function capturePayPalOrder(req, res) {
             
             // 3. GUARDAR el pago en nuestra base de datos
             const selectedPlan = plans[planId];
+            const parsedUserId = parseInt(userId);
+            const requestTracking = extractTrackingFromBody(req.body || {});
+
+            const user = await prisma.user.findUnique({
+                where: { id: parsedUserId },
+                select: {
+                    id: true,
+                    email: true,
+                    language: true,
+                    marketingCampaignId: true,
+                    utmSource: true,
+                    utmMedium: true,
+                    utmCampaign: true,
+                    utmContent: true,
+                    utmTerm: true,
+                    clickGclid: true,
+                    clickFbclid: true,
+                    clickTtclid: true,
+                    clickMsclkid: true,
+                    utmLandingUrl: true,
+                    utmReferrer: true,
+                },
+            });
+
+            if (!user) {
+                return res.status(404).json({ error: 'Usuario no encontrado.' });
+            }
+
+            const mergedTracking = {
+                utmSource: requestTracking?.utmSource || user.utmSource || null,
+                utmMedium: requestTracking?.utmMedium || user.utmMedium || null,
+                utmCampaign: requestTracking?.utmCampaign || user.utmCampaign || null,
+                utmContent: requestTracking?.utmContent || user.utmContent || null,
+                utmTerm: requestTracking?.utmTerm || user.utmTerm || null,
+                clickGclid: requestTracking?.clickGclid || user.clickGclid || null,
+                clickFbclid: requestTracking?.clickFbclid || user.clickFbclid || null,
+                clickTtclid: requestTracking?.clickTtclid || user.clickTtclid || null,
+                clickMsclkid: requestTracking?.clickMsclkid || user.clickMsclkid || null,
+                landingUrl: requestTracking?.landingUrl || user.utmLandingUrl || null,
+                referrer: requestTracking?.referrer || user.utmReferrer || null,
+            };
+
+            const resolvedCampaignId = requestTracking
+                ? await resolveMarketingCampaignId(prisma, requestTracking)
+                : null;
+
             const newPayment = await prisma.payment.create({
                 data: {
-                    userId: parseInt(userId),
+                    userId: parsedUserId,
                     provider: 'PAYPAL',
                     externalOrderId: captureResult.id, // ID de la transacción de PayPal
                     amount: parseFloat(selectedPlan.price),
@@ -95,12 +142,14 @@ async function capturePayPalOrder(req, res) {
                     status: 'COMPLETED',
                     planType: planId, // Guarda el plan comprado
                     rawResponse: JSON.stringify(captureResult), // Guarda toda la respuesta de PayPal
+                    marketingCampaignId: resolvedCampaignId || user.marketingCampaignId || null,
+                    ...pickTrackingForDb(mergedTracking),
                 }
             });
 
             // 4. ACTUALIZAR la suscripción del usuario
             const userSubscription = await prisma.subscription.findFirst({
-                where: { userId: parseInt(userId) }
+                where: { userId: parsedUserId }
             });
 
             const now = new Date();
@@ -119,7 +168,7 @@ async function capturePayPalOrder(req, res) {
                     status: 'ACTIVE'
                 },
                 create: {
-                    userId: parseInt(userId),
+                    userId: parsedUserId,
                     currentPeriodEnd: newExpiryDate,
                     status: 'ACTIVE'
                 }
@@ -129,8 +178,6 @@ async function capturePayPalOrder(req, res) {
 
             // --- Envío de correos ---
             try {
-                // Obtener email del comprador desde la BD
-                const user = await prisma.user.findUnique({ where: { id: parseInt(userId) } });
                 const buyerEmail = user?.email;
                 const sellerEmail = process.env.SELLER_EMAIL;
                 const lang = user?.language || 'es';

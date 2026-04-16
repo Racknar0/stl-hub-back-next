@@ -3,6 +3,7 @@ import { transporter } from './nodeMailerController.js';
 import { comparePassword, hashPassword } from '../utils/bcryptUtils.js';
 import { generateRandomToken } from '../utils/cryptoUtils.js';
 import { generateJWT } from '../utils/jwtUtils.js';
+import { extractTrackingFromBody, pickTrackingForDb, resolveMarketingCampaignId } from '../utils/attribution.js';
 
 const prisma = new PrismaClient();
 
@@ -365,6 +366,7 @@ export const resetPassword = async (req, res) => {
 export const registerUserSale = async (req, res) => {
     try {
         const { email, password, type_subscription, daysToAdd } = req.body;
+        const tracking = extractTrackingFromBody(req.body || {});
 
         if (!email || !password) {
             return res
@@ -435,6 +437,12 @@ export const registerUserSale = async (req, res) => {
             }
         }
 
+        const marketingCampaignId = tracking
+            ? await resolveMarketingCampaignId(prisma, tracking)
+            : null;
+        const trackingDb = pickTrackingForDb(tracking);
+        const trackingNow = tracking ? new Date() : null;
+
         // Transacción: crear usuario (activo) y su suscripción
         const result = await prisma.$transaction(async (tx) => {
             const user = await tx.user.create({
@@ -443,6 +451,10 @@ export const registerUserSale = async (req, res) => {
                     password: hashedPassword,
                     roleId: 1, // rol por defecto: user
                     isActive: true, // activar cuenta al comprar
+                    marketingCampaignId,
+                    ...trackingDb,
+                    utmFirstAt: trackingNow,
+                    utmLastAt: trackingNow,
                 },
             });
 
@@ -472,6 +484,7 @@ export const registerUserSale = async (req, res) => {
 // Registro de usuario con activationToken
 export const register = async (req, res) => {
     const { email, password, language = 'es' } = req.body;
+    const tracking = extractTrackingFromBody(req.body || {});
 
     if (!email || !password) {
         return res
@@ -492,6 +505,12 @@ export const register = async (req, res) => {
         // Genera un token de activación seguro
         const activationToken = generateRandomToken();
 
+        const marketingCampaignId = tracking
+            ? await resolveMarketingCampaignId(prisma, tracking)
+            : null;
+        const trackingDb = pickTrackingForDb(tracking);
+        const trackingNow = tracking ? new Date() : null;
+
         // Crea el usuario
         const user = await prisma.user.create({
             data: {
@@ -501,6 +520,10 @@ export const register = async (req, res) => {
                 isActive: false,
                 activationToken,
                 roleId: 1, // rol por defecto: user
+                marketingCampaignId,
+                ...trackingDb,
+                utmFirstAt: trackingNow,
+                utmLastAt: trackingNow,
             },
         });
 

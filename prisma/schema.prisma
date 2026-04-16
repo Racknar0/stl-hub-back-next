@@ -36,6 +36,23 @@ model user {
   // Relación con pagos
   payments Payment[]
 
+  // Atribución de adquisición (registro)
+  marketingCampaignId Int?
+  marketingCampaign   MarketingCampaign? @relation(fields: [marketingCampaignId], references: [id], onDelete: SetNull)
+  utmSource           String?
+  utmMedium           String?
+  utmCampaign         String?
+  utmContent          String?
+  utmTerm             String?
+  clickGclid          String?
+  clickFbclid         String?
+  clickTtclid         String?
+  clickMsclkid        String?
+  utmLandingUrl       String?   @db.VarChar(512)
+  utmReferrer         String?   @db.VarChar(512)
+  utmFirstAt          DateTime?
+  utmLastAt           DateTime?
+
   // Perfiles del uploader (persistidos en DB por usuario)
   uploaderProfiles uploaderProfiles?
 
@@ -45,6 +62,7 @@ model user {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@index([marketingCampaignId])
   @@map("user")
 }
 
@@ -419,6 +437,8 @@ model Payment {
   id                Int      @id @default(autoincrement())
   user              user     @relation(fields: [userId], references: [id])
   userId            Int
+  marketingCampaignId Int?
+  marketingCampaign MarketingCampaign? @relation(fields: [marketingCampaignId], references: [id], onDelete: SetNull)
   planType          String // Ej: "30d", "90d", etc.
   provider          String // Ej: "paypal", "stripe", "mercadopago"
   externalOrderId   String // ID de la orden en la pasarela
@@ -426,13 +446,80 @@ model Payment {
   status            String // 'pending', 'completed', 'failed', etc.
   amount            Float
   currency          String   @default("USD")
+  utmSource         String?
+  utmMedium         String?
+  utmCampaign       String?
+  utmContent        String?
+  utmTerm           String?
+  clickGclid        String?
+  clickFbclid       String?
+  clickTtclid       String?
+  clickMsclkid      String?
+  trackingLandingUrl String? @db.VarChar(512)
+  trackingReferrer   String? @db.VarChar(512)
   rawResponse       Json? // Respuesta completa de la pasarela
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
+  @@index([marketingCampaignId])
   @@index([provider])
   @@index([externalOrderId])
+  @@index([utmSource, utmCampaign])
   @@map("payment")
+}
+
+// Campañas publicitarias definidas desde el dashboard admin
+model MarketingCampaign {
+  id          Int      @id @default(autoincrement())
+  name        String
+  slug        String   @unique
+  source      String?
+  medium      String?
+  content     String?
+  term        String?
+  landingPath String?
+  notes       String?  @db.Text
+  isActive    Boolean  @default(true)
+
+  users    user[]
+  payments Payment[]
+  visits   MarketingVisit[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive])
+  @@index([source, medium])
+  @@map("marketingcampaign")
+}
+
+// Visitas anonimas/persistidas por campaña para atribucion top-of-funnel
+model MarketingVisit {
+  id                  Int      @id @default(autoincrement())
+  marketingCampaignId Int?
+  marketingCampaign   MarketingCampaign? @relation(fields: [marketingCampaignId], references: [id], onDelete: SetNull)
+
+  anonId              String?
+  sessionId           String?
+  pagePath            String?  @db.VarChar(255)
+  utmSource           String?
+  utmMedium           String?
+  utmCampaign         String?
+  utmContent          String?
+  utmTerm             String?
+  clickGclid          String?
+  clickFbclid         String?
+  clickTtclid         String?
+  clickMsclkid        String?
+  trackingLandingUrl  String?  @db.VarChar(512)
+  trackingReferrer    String?  @db.VarChar(512)
+  createdAt           DateTime @default(now())
+
+  @@index([marketingCampaignId])
+  @@index([createdAt(sort: Desc)])
+  @@index([utmSource, utmCampaign])
+  @@index([anonId])
+  @@map("marketingvisit")
 }
 
 // Métricas: búsquedas realizadas en el buscador público
