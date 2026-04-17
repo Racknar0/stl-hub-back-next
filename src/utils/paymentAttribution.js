@@ -43,6 +43,49 @@ const toUserTracking = (user) => {
 
 const pickFirst = (...values) => values.find((value) => value != null) || null;
 
+const parseUrlSafe = (value) => {
+  try {
+    return new URL(String(value || '').trim());
+  } catch {
+    return null;
+  }
+};
+
+const isLocalHostname = (hostnameRaw) => {
+  const hostname = String(hostnameRaw || '').toLowerCase();
+  return (
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1' ||
+    hostname === '::1' ||
+    hostname.endsWith('.local')
+  );
+};
+
+const isProductionEnv = () => {
+  const nodeEnv = String(process.env.NODE_ENV || process.env.environment || '').toLowerCase();
+  return nodeEnv === 'production' || nodeEnv === 'prod';
+};
+
+const sanitizeTrackingForPayments = (tracking) => {
+  if (!tracking) return tracking;
+  if (!isProductionEnv()) return tracking;
+
+  const landingUrlObj = parseUrlSafe(tracking.landingUrl);
+  const referrerUrlObj = parseUrlSafe(tracking.referrer);
+
+  return {
+    ...tracking,
+    landingUrl:
+      landingUrlObj && isLocalHostname(landingUrlObj.hostname)
+        ? null
+        : (tracking.landingUrl || null),
+    referrer:
+      referrerUrlObj && isLocalHostname(referrerUrlObj.hostname)
+        ? null
+        : (tracking.referrer || null),
+  };
+};
+
 const mergeTracking = ({ requestTracking, gatewayTracking, userTracking }) => {
   return {
     utmSource: pickFirst(requestTracking?.utmSource, gatewayTracking?.utmSource, userTracking?.utmSource),
@@ -78,11 +121,12 @@ export const resolvePaymentAttribution = async ({ prismaLike, req, user, gateway
   const requestTracking = trackingResolved?.tracking || null;
   const userTracking = toUserTracking(user);
 
-  const mergedTracking = mergeTracking({
+  const mergedTrackingRaw = mergeTracking({
     requestTracking,
     gatewayTracking,
     userTracking,
   });
+  const mergedTracking = sanitizeTrackingForPayments(mergedTrackingRaw);
 
   const resolvedCampaignId = await resolveCampaignIdWithFallbacks(prismaLike, [
     requestTracking,
