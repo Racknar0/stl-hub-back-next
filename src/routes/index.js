@@ -11,6 +11,7 @@ import meRoutes from './me/index.js';
 import notificationsRoutes from './notifications/index.js';
 import paymentsRoutes from './payments/index.js';
 import metricsRoutes from './metrics/index.js';
+import trackRoutes from './track/index.js';
 import adminOpsRoutes from './adminOps/index.js';
 import marketingRoutes from './marketing/index.js';
 import batchImportsRoutes from './batchImports/index.js';
@@ -35,6 +36,7 @@ router.use('/admin/marketing', marketingRoutes);
 router.use('/downloads', downloadsRoutes);
 router.use('/me', meRoutes);
 router.use('/metrics', metricsRoutes);
+router.use('/track', trackRoutes);
 router.use('/batch-imports', batchImportsRoutes);
 
 router.use('/ai', aiRoutes);
