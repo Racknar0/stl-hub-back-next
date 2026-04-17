@@ -1,10 +1,10 @@
 import plans from '../config/plans.js';
 import { PrismaClient } from '@prisma/client';
 import {
-  pickTrackingForDb,
-  resolveMarketingCampaignId,
-  resolveTrackingForRequest,
-} from '../utils/attribution.js';
+  extractGatewayTrackingFromMetadata,
+  PAYMENT_USER_TRACKING_SELECT,
+  resolvePaymentAttribution,
+} from '../utils/paymentAttribution.js';
 
 const prisma = new PrismaClient();
 
@@ -144,20 +144,6 @@ const applySubscriptionIfNeeded = async (userId, selectedPlan, shouldActivate) =
   return true;
 };
 
-const buildTrackingMerge = (requestTracking, user) => ({
-  utmSource: requestTracking?.utmSource || user?.utmSource || null,
-  utmMedium: requestTracking?.utmMedium || user?.utmMedium || null,
-  utmCampaign: requestTracking?.utmCampaign || user?.utmCampaign || null,
-  utmContent: requestTracking?.utmContent || user?.utmContent || null,
-  utmTerm: requestTracking?.utmTerm || user?.utmTerm || null,
-  clickGclid: requestTracking?.clickGclid || user?.clickGclid || null,
-  clickFbclid: requestTracking?.clickFbclid || user?.clickFbclid || null,
-  clickTtclid: requestTracking?.clickTtclid || user?.clickTtclid || null,
-  clickMsclkid: requestTracking?.clickMsclkid || user?.clickMsclkid || null,
-  landingUrl: requestTracking?.landingUrl || user?.utmLandingUrl || null,
-  referrer: requestTracking?.referrer || user?.utmReferrer || null,
-});
-
 const getWebhookUrl = (req) => {
   const explicit = String(process.env.MERCADOPAGO_WEBHOOK_URL || '').trim();
   if (explicit) return explicit;
@@ -200,33 +186,20 @@ const processMercadoPagoPayment = async ({ paymentData, req }) => {
 
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: {
-      id: true,
-      marketingCampaignId: true,
-      utmSource: true,
-      utmMedium: true,
-      utmCampaign: true,
-      utmContent: true,
-      utmTerm: true,
-      clickGclid: true,
-      clickFbclid: true,
-      clickTtclid: true,
-      clickMsclkid: true,
-      utmLandingUrl: true,
-      utmReferrer: true,
-    },
+    select: PAYMENT_USER_TRACKING_SELECT,
   });
 
   if (!user) {
     return { ok: false, statusCode: 404, message: `Usuario ${userId} no encontrado` };
   }
 
-  const trackingResolved = await resolveTrackingForRequest(prisma, req, 'last');
-  const requestTracking = trackingResolved?.tracking || null;
-  const mergedTracking = buildTrackingMerge(requestTracking, user);
-  const resolvedCampaignId = requestTracking
-    ? await resolveMarketingCampaignId(prisma, requestTracking)
-    : null;
+  const gatewayTracking = extractGatewayTrackingFromMetadata(paymentData?.metadata);
+  const attribution = await resolvePaymentAttribution({
+    prismaLike: prisma,
+    req,
+    user,
+    gatewayTracking,
+  });
 
   const dbData = {
     userId,
@@ -238,9 +211,8 @@ const processMercadoPagoPayment = async ({ paymentData, req }) => {
     status: mappedStatus,
     planType: planId,
     rawResponse: paymentData || null,
-    marketingCampaignId:
-      resolvedCampaignId || trackingResolved?.marketingCampaignId || user?.marketingCampaignId || null,
-    ...pickTrackingForDb(mergedTracking),
+    marketingCampaignId: attribution.marketingCampaignId,
+    ...attribution.trackingForDb,
   };
 
   const existingPayment = await prisma.payment.findFirst({
@@ -315,7 +287,7 @@ async function createMercadoPagoPreference(req, res) {
 
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, email: true },
+    select: PAYMENT_USER_TRACKING_SELECT,
   });
 
   if (!user) {
@@ -327,6 +299,12 @@ async function createMercadoPagoPreference(req, res) {
   );
   const callbackUrl = `${frontBase}/payment/mercadopago/callback`;
   const externalReference = `uid:${userId}|plan:${planId}`;
+  const attribution = await resolvePaymentAttribution({
+    prismaLike: prisma,
+    req,
+    user,
+  });
+  const trackingMeta = attribution.mergedTracking || {};
 
   const payload = {
     items: [
@@ -345,6 +323,16 @@ async function createMercadoPagoPreference(req, res) {
       userId,
       planId,
       source: 'stlhub-web',
+      marketingCampaignId: attribution.marketingCampaignId || null,
+      utmSource: trackingMeta.utmSource || null,
+      utmMedium: trackingMeta.utmMedium || null,
+      utmCampaign: trackingMeta.utmCampaign || null,
+      utmContent: trackingMeta.utmContent || null,
+      utmTerm: trackingMeta.utmTerm || null,
+      clickGclid: trackingMeta.clickGclid || null,
+      clickFbclid: trackingMeta.clickFbclid || null,
+      clickTtclid: trackingMeta.clickTtclid || null,
+      clickMsclkid: trackingMeta.clickMsclkid || null,
     },
     statement_descriptor: 'STL HUB',
     back_urls: {

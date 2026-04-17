@@ -2,7 +2,10 @@ import paypal from '@paypal/checkout-server-sdk';
 import plans from '../config/plans.js';
 import { PrismaClient } from '@prisma/client';
 import { transporter } from './nodeMailerController.js';
-import { pickTrackingForDb, resolveMarketingCampaignId, resolveTrackingForRequest } from '../utils/attribution.js';
+import {
+    PAYMENT_USER_TRACKING_SELECT,
+    resolvePaymentAttribution,
+} from '../utils/paymentAttribution.js';
 
 const prisma = new PrismaClient();
 
@@ -87,51 +90,21 @@ async function capturePayPalOrder(req, res) {
             // 3. GUARDAR el pago en nuestra base de datos
             const selectedPlan = plans[planId];
             const parsedUserId = parseInt(userId);
-            const trackingResolved = await resolveTrackingForRequest(prisma, req, 'last');
-            const requestTracking = trackingResolved?.tracking || null;
 
             const user = await prisma.user.findUnique({
                 where: { id: parsedUserId },
-                select: {
-                    id: true,
-                    email: true,
-                    language: true,
-                    marketingCampaignId: true,
-                    utmSource: true,
-                    utmMedium: true,
-                    utmCampaign: true,
-                    utmContent: true,
-                    utmTerm: true,
-                    clickGclid: true,
-                    clickFbclid: true,
-                    clickTtclid: true,
-                    clickMsclkid: true,
-                    utmLandingUrl: true,
-                    utmReferrer: true,
-                },
+                select: PAYMENT_USER_TRACKING_SELECT,
             });
 
             if (!user) {
                 return res.status(404).json({ error: 'Usuario no encontrado.' });
             }
 
-            const mergedTracking = {
-                utmSource: requestTracking?.utmSource || user.utmSource || null,
-                utmMedium: requestTracking?.utmMedium || user.utmMedium || null,
-                utmCampaign: requestTracking?.utmCampaign || user.utmCampaign || null,
-                utmContent: requestTracking?.utmContent || user.utmContent || null,
-                utmTerm: requestTracking?.utmTerm || user.utmTerm || null,
-                clickGclid: requestTracking?.clickGclid || user.clickGclid || null,
-                clickFbclid: requestTracking?.clickFbclid || user.clickFbclid || null,
-                clickTtclid: requestTracking?.clickTtclid || user.clickTtclid || null,
-                clickMsclkid: requestTracking?.clickMsclkid || user.clickMsclkid || null,
-                landingUrl: requestTracking?.landingUrl || user.utmLandingUrl || null,
-                referrer: requestTracking?.referrer || user.utmReferrer || null,
-            };
-
-            const resolvedCampaignId = requestTracking
-                ? await resolveMarketingCampaignId(prisma, requestTracking)
-                : null;
+            const attribution = await resolvePaymentAttribution({
+                prismaLike: prisma,
+                req,
+                user,
+            });
 
             const newPayment = await prisma.payment.create({
                 data: {
@@ -143,8 +116,8 @@ async function capturePayPalOrder(req, res) {
                     status: 'COMPLETED',
                     planType: planId, // Guarda el plan comprado
                     rawResponse: JSON.stringify(captureResult), // Guarda toda la respuesta de PayPal
-                    marketingCampaignId: resolvedCampaignId || trackingResolved?.marketingCampaignId || user.marketingCampaignId || null,
-                    ...pickTrackingForDb(mergedTracking),
+                    marketingCampaignId: attribution.marketingCampaignId,
+                    ...attribution.trackingForDb,
                 }
             });
 
