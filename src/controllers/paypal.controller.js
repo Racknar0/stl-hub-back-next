@@ -6,6 +6,10 @@ import {
     PAYMENT_USER_TRACKING_SELECT,
     resolvePaymentAttribution,
 } from '../utils/paymentAttribution.js';
+import {
+    appendCopSnapshotToRawResponse,
+    buildCopSnapshot,
+} from '../utils/paymentCurrency.js';
 
 const prisma = new PrismaClient();
 
@@ -106,16 +110,35 @@ async function capturePayPalOrder(req, res) {
                 user,
             });
 
+            const captureAmountValue = Number(
+                captureResult?.purchase_units?.[0]?.payments?.captures?.[0]?.amount?.value
+            );
+            const paymentAmount = Number.isFinite(captureAmountValue) && captureAmountValue > 0
+                ? captureAmountValue
+                : Number.parseFloat(selectedPlan.price);
+            const paymentCurrency = String(
+                captureResult?.purchase_units?.[0]?.payments?.captures?.[0]?.amount?.currency_code
+                || selectedPlan.currency
+                || 'USD'
+            ).toUpperCase();
+            const paidAtRaw = captureResult?.purchase_units?.[0]?.payments?.captures?.[0]?.create_time;
+            const paidAt = paidAtRaw ? new Date(paidAtRaw) : new Date();
+            const copSnapshot = await buildCopSnapshot({
+                amount: paymentAmount,
+                currency: paymentCurrency,
+                paidAt,
+            });
+
             const newPayment = await prisma.payment.create({
                 data: {
                     userId: parsedUserId,
                     provider: 'PAYPAL',
                     externalOrderId: captureResult.id, // ID de la transacción de PayPal
-                    amount: parseFloat(selectedPlan.price),
-                    currency: selectedPlan.currency,
+                    amount: paymentAmount,
+                    currency: paymentCurrency,
                     status: 'COMPLETED',
                     planType: planId, // Guarda el plan comprado
-                    rawResponse: JSON.stringify(captureResult), // Guarda toda la respuesta de PayPal
+                    rawResponse: appendCopSnapshotToRawResponse(captureResult, copSnapshot),
                     marketingCampaignId: attribution.marketingCampaignId,
                     ...attribution.trackingForDb,
                 }

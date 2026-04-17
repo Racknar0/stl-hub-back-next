@@ -5,10 +5,17 @@ import {
   PAYMENT_USER_TRACKING_SELECT,
   resolvePaymentAttribution,
 } from '../utils/paymentAttribution.js';
+import {
+  appendCopSnapshotToRawResponse,
+  buildCopSnapshot,
+} from '../utils/paymentCurrency.js';
 
 const prisma = new PrismaClient();
 
+// Base oficial de la API REST de MercadoPago.
 const MP_API_BASE = 'https://api.mercadopago.com';
+
+// ---------- Helpers de normalizacion/validacion ----------
 
 const parsePositiveInt = (value) => {
   const n = Number(value);
@@ -46,11 +53,13 @@ const shouldSendAutoReturn = (callbackUrl) => {
   return true;
 };
 
+// Lee el token privado desde variables de entorno.
 const getAccessToken = () => {
   const token = String(process.env.MERCADOPAGO_ACCESS_TOKEN || '').trim();
   return token || null;
 };
 
+// Decodifica el external_reference para recuperar userId/planId en callbacks/webhooks.
 const parseExternalReference = (value) => {
   const raw = String(value || '').trim();
   if (!raw) return { userId: null, planId: null };
@@ -82,6 +91,7 @@ const mapMpStatusToInternal = (statusRaw) => {
   return 'PENDING';
 };
 
+// Wrapper HTTP para MercadoPago: centraliza auth, parse JSON y manejo de errores.
 const mpRequest = async (path, { method = 'GET', body, accessToken, headers = {} } = {}) => {
   const response = await fetch(`${MP_API_BASE}${path}`, {
     method,
@@ -119,6 +129,7 @@ const computeNewExpiryDate = (currentPeriodEnd, durationDays) => {
   return newExpiryDate;
 };
 
+// Activa/extiende suscripcion solo cuando corresponde (evita duplicar extensiones).
 const applySubscriptionIfNeeded = async (userId, selectedPlan, shouldActivate) => {
   if (!shouldActivate) return false;
 
@@ -144,6 +155,7 @@ const applySubscriptionIfNeeded = async (userId, selectedPlan, shouldActivate) =
   return true;
 };
 
+// Determina URL de webhook: usa env explicita o la infiere del host/proxy actual.
 const getWebhookUrl = (req) => {
   const explicit = String(process.env.MERCADOPAGO_WEBHOOK_URL || '').trim();
   if (explicit) return explicit;
@@ -156,6 +168,11 @@ const getWebhookUrl = (req) => {
   return `${apiBase}/api/payments/mercadopago/webhook`;
 };
 
+// Procesador comun para pagos ya emitidos por MercadoPago (callback y webhook).
+// 1) Resuelve user/plan
+// 2) Resuelve atribucion de campaña
+// 3) Crea/actualiza Payment de forma idempotente
+// 4) Activa suscripcion si status aprobado
 const processMercadoPagoPayment = async ({ paymentData, req }) => {
   const externalOrderId = String(paymentData?.id || '').trim();
   if (!externalOrderId) {
@@ -201,20 +218,31 @@ const processMercadoPagoPayment = async ({ paymentData, req }) => {
     gatewayTracking,
   });
 
+  const paymentAmount = Number(paymentData?.transaction_amount || selectedPlan.price || 0);
+  const paymentCurrency = String(paymentData?.currency_id || selectedPlan.currency || 'USD').toUpperCase();
+  const paidAtRaw = paymentData?.date_approved || paymentData?.date_created || null;
+  const paidAt = paidAtRaw ? new Date(paidAtRaw) : new Date();
+  const copSnapshot = await buildCopSnapshot({
+    amount: paymentAmount,
+    currency: paymentCurrency,
+    paidAt,
+  });
+
   const dbData = {
     userId,
     provider: 'MERCADOPAGO',
     externalOrderId,
     externalCaptureId: String(paymentData?.order?.id || '').trim() || null,
-    amount: Number(paymentData?.transaction_amount || selectedPlan.price || 0),
-    currency: String(paymentData?.currency_id || selectedPlan.currency || 'USD').toUpperCase(),
+    amount: paymentAmount,
+    currency: paymentCurrency,
     status: mappedStatus,
     planType: planId,
-    rawResponse: paymentData || null,
+    rawResponse: appendCopSnapshotToRawResponse(paymentData || null, copSnapshot),
     marketingCampaignId: attribution.marketingCampaignId,
     ...attribution.trackingForDb,
   };
 
+  // Idempotencia: si este payment_id ya existe, actualizamos en vez de crear duplicado.
   const existingPayment = await prisma.payment.findFirst({
     where: {
       provider: 'MERCADOPAGO',
@@ -267,6 +295,7 @@ const processMercadoPagoPayment = async ({ paymentData, req }) => {
   };
 };
 
+// Crea la preferencia de checkout y devuelve initPoint para redireccionar al usuario.
 async function createMercadoPagoPreference(req, res) {
   const token = getAccessToken();
   if (!token) {
@@ -344,7 +373,7 @@ async function createMercadoPagoPreference(req, res) {
     binary_mode: false,
   };
 
-  // auto_return requiere back_url.success pública/https; en localhost suele fallar con invalid_auto_return.
+  // auto_return requiere back_url.success publica/https; en localhost suele fallar con invalid_auto_return.
   if (shouldSendAutoReturn(callbackUrl)) {
     payload.auto_return = 'approved';
   }
@@ -374,6 +403,8 @@ async function createMercadoPagoPreference(req, res) {
   }
 }
 
+// Endpoint llamado por el frontend al volver del checkout de MercadoPago.
+// Consulta el payment_id real y delega el guardado/activacion al procesador comun.
 async function captureMercadoPagoPayment(req, res) {
   const token = getAccessToken();
   if (!token) {
@@ -417,6 +448,8 @@ async function captureMercadoPagoPayment(req, res) {
   }
 }
 
+// Endpoint de notificaciones asincronas de MercadoPago.
+// Es clave para medios diferidos (pending) donde la aprobacion llega despues.
 async function mercadoPagoWebhook(req, res) {
   const token = getAccessToken();
   if (!token) {

@@ -7,6 +7,8 @@ import { getTopDownloads } from '../../controllers/metrics.controller.js'
 import { getTaxonomyCounts } from '../../controllers/metrics.controller.js'
 import { recordSearchEvent, recordSearchClick, getSearchInsights } from '../../controllers/metrics.controller.js'
 import { recordCampaignVisit } from '../../controllers/metrics.controller.js'
+import { getSalesMetrics } from '../../controllers/metrics.controller.js'
+import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
 
 const router = express.Router()
 
@@ -18,6 +20,7 @@ router.get('/downloads', getDownloadMetrics)
 router.get('/registrations', getRegistrationMetrics)
 router.get('/top-downloads', getTopDownloads)
 router.get('/taxonomy-counts', getTaxonomyCounts)
+router.get('/sales', requireAuth, requireAdmin, getSalesMetrics)
 
 // Tracking de buscador (público)
 router.post('/search', recordSearchEvent)

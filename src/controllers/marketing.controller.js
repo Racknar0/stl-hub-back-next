@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { toSlug } from '../utils/attribution.js';
+import { sumPaymentsInCop } from '../utils/paymentCurrency.js';
 
 const prisma = new PrismaClient();
 
@@ -54,15 +55,18 @@ export const listMarketingCampaigns = async (_req, res) => {
       campaigns.map(async (campaign) => {
         const where = buildCampaignWhere(campaign);
 
-        const [registrations, paymentAgg, latestPayment, visits, uniqueVisitorsRows] = await Promise.all([
+        const [registrations, completedPayments, latestPayment, visits, uniqueVisitorsRows] = await Promise.all([
           prisma.user.count({ where }),
-          prisma.payment.aggregate({
+          prisma.payment.findMany({
             where: {
               ...where,
               status: 'COMPLETED',
             },
-            _count: { id: true },
-            _sum: { amount: true },
+            select: {
+              amount: true,
+              currency: true,
+              rawResponse: true,
+            },
           }),
           prisma.payment.findFirst({
             where: {
@@ -89,8 +93,9 @@ export const listMarketingCampaigns = async (_req, res) => {
             visits,
             uniqueVisitors: Array.isArray(uniqueVisitorsRows) ? uniqueVisitorsRows.length : 0,
             registrations,
-            purchases: paymentAgg?._count?.id || 0,
-            revenue: Number(paymentAgg?._sum?.amount || 0),
+            purchases: Array.isArray(completedPayments) ? completedPayments.length : 0,
+            revenue: sumPaymentsInCop(completedPayments),
+            revenueCurrency: 'COP',
             lastPurchaseAt: latestPayment?.createdAt || null,
           },
         };

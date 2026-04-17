@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import { execFileSync } from 'child_process';
 import path from 'path';
 import { extractTrackingFromBody, extractVisitIdentityFromRequest, pickTrackingForDb, resolveMarketingCampaignId, toSlug } from '../utils/attribution.js';
+import { toCopAmountFromPayment } from '../utils/paymentCurrency.js';
 
 const prisma = new PrismaClient();
 
@@ -70,6 +71,27 @@ function startOfDay(d) {
   t.setHours(0,0,0,0)
   return t
 }
+
+const salesProviderLabel = (providerRaw) => {
+  const provider = String(providerRaw || '').trim().toUpperCase();
+  if (provider === 'PAYPAL') return 'PayPal';
+  if (provider === 'MERCADOPAGO') return 'MercadoPago';
+  if (provider === 'STRIPE') return 'Stripe';
+  return provider || 'Otro';
+};
+
+const buildSalesRangeBoundaries = (now = new Date()) => ({
+  '1d': new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000),
+  '1w': new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000),
+  '1m': new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000),
+  '1y': new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000),
+});
+
+const roundMoney = (value) => {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+};
 
 function readLinuxDiskSnapshot(targetPath) {
   try {
@@ -294,6 +316,83 @@ export async function getDownloadMetrics(req, res) {
   } catch (e) {
     console.error('getDownloadMetrics error', e)
     return res.status(500).json({ error: 'internal' })
+  }
+}
+
+export async function getSalesMetrics(req, res) {
+  try {
+    const now = new Date();
+    const boundaries = buildSalesRangeBoundaries(now);
+    const maxItemsPerRange = Math.max(10, Number(process.env.SALES_METRICS_ITEMS_PER_RANGE || 40) || 40);
+
+    const completedPayments = await prisma.payment.findMany({
+      where: { status: 'COMPLETED' },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        provider: true,
+        amount: true,
+        currency: true,
+        rawResponse: true,
+        createdAt: true,
+      },
+    });
+
+    const totals = { '1d': 0, '1w': 0, '1m': 0, '1y': 0, all: 0 };
+    const items = { '1d': [], '1w': [], '1m': [], '1y': [], all: [] };
+
+    for (const payment of completedPayments) {
+      const paymentDate = payment?.createdAt ? new Date(payment.createdAt) : null;
+      if (!paymentDate || Number.isNaN(paymentDate.getTime())) continue;
+
+      const amountCop = toCopAmountFromPayment(payment);
+      const row = {
+        id: payment.id,
+        provider: String(payment.provider || '').toUpperCase(),
+        method: salesProviderLabel(payment.provider),
+        amountCop,
+        amountOriginal: Number(payment.amount || 0),
+        currency: String(payment.currency || 'USD').toUpperCase(),
+        date: paymentDate.toISOString().slice(0, 10),
+        createdAt: paymentDate.toISOString(),
+      };
+
+      totals.all += amountCop;
+      if (items.all.length < maxItemsPerRange) items.all.push(row);
+
+      if (paymentDate >= boundaries['1d']) {
+        totals['1d'] += amountCop;
+        if (items['1d'].length < maxItemsPerRange) items['1d'].push(row);
+      }
+      if (paymentDate >= boundaries['1w']) {
+        totals['1w'] += amountCop;
+        if (items['1w'].length < maxItemsPerRange) items['1w'].push(row);
+      }
+      if (paymentDate >= boundaries['1m']) {
+        totals['1m'] += amountCop;
+        if (items['1m'].length < maxItemsPerRange) items['1m'].push(row);
+      }
+      if (paymentDate >= boundaries['1y']) {
+        totals['1y'] += amountCop;
+        if (items['1y'].length < maxItemsPerRange) items['1y'].push(row);
+      }
+    }
+
+    return res.json({
+      currency: 'COP',
+      totals: {
+        '1d': roundMoney(totals['1d']),
+        '1w': roundMoney(totals['1w']),
+        '1m': roundMoney(totals['1m']),
+        '1y': roundMoney(totals['1y']),
+        all: roundMoney(totals.all),
+      },
+      items,
+      totalPayments: completedPayments.length,
+    });
+  } catch (e) {
+    console.error('getSalesMetrics error', e);
+    return res.status(500).json({ error: 'internal' });
   }
 }
 
