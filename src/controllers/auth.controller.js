@@ -3,7 +3,7 @@ import { transporter } from './nodeMailerController.js';
 import { comparePassword, hashPassword } from '../utils/bcryptUtils.js';
 import { generateRandomToken } from '../utils/cryptoUtils.js';
 import { generateJWT } from '../utils/jwtUtils.js';
-import { extractTrackingFromRequest, pickTrackingForDb, resolveMarketingCampaignId } from '../utils/attribution.js';
+import { pickTrackingForDb, resolveMarketingCampaignId, resolveTrackingForRequest } from '../utils/attribution.js';
 
 const prisma = new PrismaClient();
 
@@ -366,7 +366,8 @@ export const resetPassword = async (req, res) => {
 export const registerUserSale = async (req, res) => {
     try {
         const { email, password, type_subscription, daysToAdd } = req.body;
-        const tracking = extractTrackingFromRequest(req, 'first');
+        const trackingResolved = await resolveTrackingForRequest(prisma, req, 'first');
+        const tracking = trackingResolved?.tracking || null;
 
         if (!email || !password) {
             return res
@@ -437,9 +438,10 @@ export const registerUserSale = async (req, res) => {
             }
         }
 
-        const marketingCampaignId = tracking
+        const marketingCampaignIdFromTracking = tracking
             ? await resolveMarketingCampaignId(prisma, tracking)
             : null;
+        const marketingCampaignId = marketingCampaignIdFromTracking || trackingResolved?.marketingCampaignId || null;
         const trackingDb = pickTrackingForDb(tracking);
         const trackingNow = tracking ? new Date() : null;
 
@@ -484,7 +486,8 @@ export const registerUserSale = async (req, res) => {
 // Registro de usuario con activationToken
 export const register = async (req, res) => {
     const { email, password, language = 'es' } = req.body;
-    const tracking = extractTrackingFromRequest(req, 'first');
+    const trackingResolved = await resolveTrackingForRequest(prisma, req, 'first');
+    const tracking = trackingResolved?.tracking || null;
 
     if (!email || !password) {
         return res
@@ -505,9 +508,10 @@ export const register = async (req, res) => {
         // Genera un token de activación seguro
         const activationToken = generateRandomToken();
 
-        const marketingCampaignId = tracking
+        const marketingCampaignIdFromTracking = tracking
             ? await resolveMarketingCampaignId(prisma, tracking)
             : null;
+        const marketingCampaignId = marketingCampaignIdFromTracking || trackingResolved?.marketingCampaignId || null;
         const trackingDb = pickTrackingForDb(tracking);
         const trackingNow = tracking ? new Date() : null;
 

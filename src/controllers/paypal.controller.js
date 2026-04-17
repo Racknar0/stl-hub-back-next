@@ -2,7 +2,7 @@ import paypal from '@paypal/checkout-server-sdk';
 import plans from '../config/plans.js';
 import { PrismaClient } from '@prisma/client';
 import { transporter } from './nodeMailerController.js';
-import { extractTrackingFromRequest, pickTrackingForDb, resolveMarketingCampaignId } from '../utils/attribution.js';
+import { pickTrackingForDb, resolveMarketingCampaignId, resolveTrackingForRequest } from '../utils/attribution.js';
 
 const prisma = new PrismaClient();
 
@@ -87,7 +87,8 @@ async function capturePayPalOrder(req, res) {
             // 3. GUARDAR el pago en nuestra base de datos
             const selectedPlan = plans[planId];
             const parsedUserId = parseInt(userId);
-            const requestTracking = extractTrackingFromRequest(req, 'last');
+            const trackingResolved = await resolveTrackingForRequest(prisma, req, 'last');
+            const requestTracking = trackingResolved?.tracking || null;
 
             const user = await prisma.user.findUnique({
                 where: { id: parsedUserId },
@@ -142,7 +143,7 @@ async function capturePayPalOrder(req, res) {
                     status: 'COMPLETED',
                     planType: planId, // Guarda el plan comprado
                     rawResponse: JSON.stringify(captureResult), // Guarda toda la respuesta de PayPal
-                    marketingCampaignId: resolvedCampaignId || user.marketingCampaignId || null,
+                    marketingCampaignId: resolvedCampaignId || trackingResolved?.marketingCampaignId || user.marketingCampaignId || null,
                     ...pickTrackingForDb(mergedTracking),
                 }
             });

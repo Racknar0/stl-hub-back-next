@@ -1,5 +1,6 @@
 const MAX_TEXT = 191;
 const MAX_URL = 512;
+const TRACK_FALLBACK_HOURS = Math.max(1, Number(process.env.MARKETING_TRACK_FALLBACK_HOURS || 24) || 24);
 const TRACK_ANON_COOKIE = 'mkt_anon_id';
 const TRACK_SESSION_COOKIE = 'mkt_session_id';
 const TRACK_ATTR_FIRST_COOKIE = 'mkt_attr_first';
@@ -144,7 +145,93 @@ export const extractTrackingFromRequest = (req, prefer = 'first') => {
 
 export const extractVisitIdentityFromRequest = (req) => {
   const cookies = parseCookieHeader(req?.headers?.cookie || '');
-  const anonId = safeText(cookies[TRACK_ANON_COOKIE], 120);
-  const sessionId = safeText(cookies[TRACK_SESSION_COOKIE], 120);
+  const anonId = safeText(req?.body?.anonId || cookies[TRACK_ANON_COOKIE], 120);
+  const sessionId = safeText(req?.body?.sessionId || cookies[TRACK_SESSION_COOKIE], 120);
   return { anonId, sessionId };
+};
+
+const trackingFromVisitRow = (visit) => {
+  if (!visit) return null;
+  return extractTrackingFromBody({
+    utmSource: visit.utmSource,
+    utmMedium: visit.utmMedium,
+    utmCampaign: visit.utmCampaign,
+    utmContent: visit.utmContent,
+    utmTerm: visit.utmTerm,
+    clickGclid: visit.clickGclid,
+    clickFbclid: visit.clickFbclid,
+    clickTtclid: visit.clickTtclid,
+    clickMsclkid: visit.clickMsclkid,
+    landingUrl: visit.trackingLandingUrl,
+    referrer: visit.trackingReferrer,
+  });
+};
+
+export const resolveTrackingForRequest = async (prismaLike, req, prefer = 'first') => {
+  const direct = extractTrackingFromRequest(req, prefer);
+  if (direct) {
+    return {
+      tracking: direct,
+      marketingCampaignId: null,
+      source: 'request',
+    };
+  }
+
+  const identity = extractVisitIdentityFromRequest(req);
+  if (!identity.sessionId && !identity.anonId) {
+    return {
+      tracking: null,
+      marketingCampaignId: null,
+      source: 'none',
+    };
+  }
+
+  const createdAtCutoff = new Date(Date.now() - TRACK_FALLBACK_HOURS * 60 * 60 * 1000);
+  const baseSelect = {
+    marketingCampaignId: true,
+    utmSource: true,
+    utmMedium: true,
+    utmCampaign: true,
+    utmContent: true,
+    utmTerm: true,
+    clickGclid: true,
+    clickFbclid: true,
+    clickTtclid: true,
+    clickMsclkid: true,
+    trackingLandingUrl: true,
+    trackingReferrer: true,
+  };
+
+  let visit = null;
+
+  // 1) Prioridad: sessionId (más preciso que anonId)
+  if (identity.sessionId) {
+    visit = await prismaLike.marketingVisit.findFirst({
+      where: {
+        sessionId: identity.sessionId,
+        createdAt: { gte: createdAtCutoff },
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      select: baseSelect,
+    });
+  }
+
+  // 2) Fallback: anonId (si no hubo match de sesión)
+  if (!visit && identity.anonId) {
+    visit = await prismaLike.marketingVisit.findFirst({
+      where: {
+        anonId: identity.anonId,
+        createdAt: { gte: createdAtCutoff },
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      select: baseSelect,
+    });
+  }
+
+  const tracking = trackingFromVisitRow(visit);
+  return {
+    tracking,
+    marketingCampaignId: visit?.marketingCampaignId || null,
+    source: visit ? 'visit-fallback' : 'none',
+  };
 };
