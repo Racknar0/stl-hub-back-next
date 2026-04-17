@@ -2,7 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import jwt from 'jsonwebtoken';
 import { execFileSync } from 'child_process';
 import path from 'path';
-import { extractTrackingFromBody, pickTrackingForDb, resolveMarketingCampaignId, toSlug } from '../utils/attribution.js';
+import { extractTrackingFromBody, extractVisitIdentityFromRequest, pickTrackingForDb, resolveMarketingCampaignId, toSlug } from '../utils/attribution.js';
 
 const prisma = new PrismaClient();
 
@@ -391,8 +391,9 @@ export async function recordCampaignVisit(req, res) {
     const marketingCampaignId = await resolveMarketingCampaignId(prisma, tracking);
     const trackingDb = pickTrackingForDb(tracking);
 
-    const anonIdRaw = String(req.body?.anonId || '').trim();
-    const sessionIdRaw = String(req.body?.sessionId || '').trim();
+    const cookieIdentity = extractVisitIdentityFromRequest(req);
+    const anonIdRaw = String(req.body?.anonId || cookieIdentity.anonId || '').trim();
+    const sessionIdRaw = String(req.body?.sessionId || cookieIdentity.sessionId || '').trim();
     const pagePathRaw = String(req.body?.pagePath || '').trim();
 
     const anonId = anonIdRaw ? anonIdRaw.slice(0, 120) : null;

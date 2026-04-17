@@ -1,5 +1,9 @@
 const MAX_TEXT = 191;
 const MAX_URL = 512;
+const TRACK_ANON_COOKIE = 'mkt_anon_id';
+const TRACK_SESSION_COOKIE = 'mkt_session_id';
+const TRACK_ATTR_FIRST_COOKIE = 'mkt_attr_first';
+const TRACK_ATTR_LAST_COOKIE = 'mkt_attr_last';
 
 const safeText = (value, max = MAX_TEXT) => {
   const v = String(value || '').trim();
@@ -96,4 +100,51 @@ export const pickTrackingForDb = (tracking) => {
     utmLandingUrl: tracking.landingUrl || null,
     utmReferrer: tracking.referrer || null,
   };
+};
+
+const parseCookieHeader = (cookieHeader) => {
+  const source = String(cookieHeader || '').trim();
+  if (!source) return {};
+
+  return source.split(';').reduce((acc, part) => {
+    const i = part.indexOf('=');
+    if (i <= 0) return acc;
+    const key = part.slice(0, i).trim();
+    const value = part.slice(i + 1).trim();
+    if (key) acc[key] = value;
+    return acc;
+  }, {});
+};
+
+const decodeTrackingCookie = (raw) => {
+  const value = String(raw || '').trim();
+  if (!value) return null;
+  try {
+    const decoded = decodeURIComponent(value);
+    const parsed = JSON.parse(decoded);
+    return extractTrackingFromBody(parsed);
+  } catch {
+    return null;
+  }
+};
+
+const getTrackingFromCookies = (req, prefer = 'first') => {
+  const cookies = parseCookieHeader(req?.headers?.cookie || '');
+  const first = decodeTrackingCookie(cookies[TRACK_ATTR_FIRST_COOKIE]);
+  const last = decodeTrackingCookie(cookies[TRACK_ATTR_LAST_COOKIE]);
+
+  return prefer === 'last' ? (last || first) : (first || last);
+};
+
+export const extractTrackingFromRequest = (req, prefer = 'first') => {
+  const fromCookies = getTrackingFromCookies(req, prefer);
+  if (fromCookies) return fromCookies;
+  return extractTrackingFromBody(req?.body || {});
+};
+
+export const extractVisitIdentityFromRequest = (req) => {
+  const cookies = parseCookieHeader(req?.headers?.cookie || '');
+  const anonId = safeText(cookies[TRACK_ANON_COOKIE], 120);
+  const sessionId = safeText(cookies[TRACK_SESSION_COOKIE], 120);
+  return { anonId, sessionId };
 };

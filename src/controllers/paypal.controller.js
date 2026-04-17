@@ -2,7 +2,7 @@ import paypal from '@paypal/checkout-server-sdk';
 import plans from '../config/plans.js';
 import { PrismaClient } from '@prisma/client';
 import { transporter } from './nodeMailerController.js';
-import { extractTrackingFromBody, pickTrackingForDb, resolveMarketingCampaignId } from '../utils/attribution.js';
+import { extractTrackingFromRequest, pickTrackingForDb, resolveMarketingCampaignId } from '../utils/attribution.js';
 
 const prisma = new PrismaClient();
 
@@ -87,7 +87,7 @@ async function capturePayPalOrder(req, res) {
             // 3. GUARDAR el pago en nuestra base de datos
             const selectedPlan = plans[planId];
             const parsedUserId = parseInt(userId);
-            const requestTracking = extractTrackingFromBody(req.body || {});
+            const requestTracking = extractTrackingFromRequest(req, 'last');
 
             const user = await prisma.user.findUnique({
                 where: { id: parsedUserId },
