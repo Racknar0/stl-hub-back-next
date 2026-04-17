@@ -9,6 +9,7 @@ import {
   appendCopSnapshotToRawResponse,
   buildCopSnapshot,
 } from '../utils/paymentCurrency.js';
+import { dispatchSaleNotification } from '../utils/saleNotifications.js';
 
 const prisma = new PrismaClient();
 
@@ -264,25 +265,18 @@ const processMercadoPagoPayment = async ({ paymentData, req }) => {
   const activated = await applySubscriptionIfNeeded(userId, selectedPlan, shouldActivateSubscription);
 
   if (activated) {
-    try {
-      await prisma.notification.create({
-        data: {
-          title: `Nueva compra MercadoPago - Payment ${externalOrderId}`,
-          body: [
-            `Usuario ID: ${userId}`,
-            `Plan: ${planId}`,
-            `Monto: ${dbData.amount} ${dbData.currency}`,
-            `Payment ID: ${externalOrderId}`,
-            `Proveedor: MERCADOPAGO`,
-          ].join('\n'),
-          type: 'SALES',
-          typeStatus: 'SUCCESS',
-          status: 'UNREAD',
-        },
-      });
-    } catch (notificationError) {
-      console.error('No se pudo crear notificación de venta de MercadoPago:', notificationError);
-    }
+    await dispatchSaleNotification({
+      prismaLike: prisma,
+      provider: 'MERCADOPAGO',
+      orderId: externalOrderId,
+      userId,
+      buyerEmail: user?.email,
+      planName: selectedPlan?.name_es || planId,
+      planNameEn: selectedPlan?.name_en || selectedPlan?.name_es || planId,
+      amount: dbData.amount,
+      currency: dbData.currency,
+      userLanguage: user?.language || 'es',
+    });
   }
 
   return {
