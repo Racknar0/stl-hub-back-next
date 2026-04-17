@@ -1,6 +1,5 @@
 import {
   extractTrackingFromBody,
-  pickTrackingForDb,
   resolveMarketingCampaignId,
   resolveTrackingForRequest,
 } from './attribution.js';
@@ -86,6 +85,23 @@ const sanitizeTrackingForPayments = (tracking) => {
   };
 };
 
+const pickTrackingForPaymentDb = (tracking) => {
+  if (!tracking) return {};
+  return {
+    utmSource: tracking.utmSource || null,
+    utmMedium: tracking.utmMedium || null,
+    utmCampaign: tracking.utmCampaign || null,
+    utmContent: tracking.utmContent || null,
+    utmTerm: tracking.utmTerm || null,
+    clickGclid: tracking.clickGclid || null,
+    clickFbclid: tracking.clickFbclid || null,
+    clickTtclid: tracking.clickTtclid || null,
+    clickMsclkid: tracking.clickMsclkid || null,
+    trackingLandingUrl: tracking.landingUrl || null,
+    trackingReferrer: tracking.referrer || null,
+  };
+};
+
 const mergeTracking = ({ requestTracking, gatewayTracking, userTracking }) => {
   return {
     utmSource: pickFirst(requestTracking?.utmSource, gatewayTracking?.utmSource, userTracking?.utmSource),
@@ -144,7 +160,7 @@ export const resolvePaymentAttribution = async ({ prismaLike, req, user, gateway
       user?.marketingCampaignId ||
       mergedTracking?.marketingCampaignId ||
       null,
-    trackingForDb: pickTrackingForDb(mergedTracking),
+    trackingForDb: pickTrackingForPaymentDb(mergedTracking),
   };
 };
 
