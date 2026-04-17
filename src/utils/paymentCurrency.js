@@ -1,4 +1,5 @@
 const TARGET_CURRENCY = 'COP';
+const FRANKFURTER_API_BASE = String(process.env.FRANKFURTER_API_BASE || 'https://api.frankfurter.dev').replace(/\/+$/, '');
 
 const fxCache = globalThis.__stlHubFxCache || new Map();
 globalThis.__stlHubFxCache = fxCache;
@@ -90,14 +91,14 @@ const fetchFrankfurterRateToCop = async (currency, paidAt) => {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const url = `https://api.frankfurter.app/${dateKey}?from=${encodeURIComponent(from)}&to=${TARGET_CURRENCY}`;
+    const url = `${FRANKFURTER_API_BASE}/v2/rate/${encodeURIComponent(from)}/${TARGET_CURRENCY}?date=${encodeURIComponent(dateKey)}`;
     const response = await fetch(url, { signal: controller.signal });
     if (!response.ok) {
       throw new Error(`fx-http-${response.status}`);
     }
 
     const payload = await response.json();
-    const rate = Number(payload?.rates?.[TARGET_CURRENCY] || 0);
+    const rate = Number(payload?.rate || 0);
     if (!Number.isFinite(rate) || rate <= 0) {
       throw new Error('fx-invalid-rate');
     }
