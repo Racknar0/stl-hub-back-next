@@ -703,31 +703,31 @@ export async function getTaxonomyCounts(req, res) {
 export async function recordSiteVisit(req, res) {
   try {
     const userAgent = req.headers['user-agent'] || '';
-    // Regex simple para detectar bots
     const botPattern = /bot|googlebot|crawler|spider|robot|crawling|curl|wget|slurp|facebookexternalhit|whatsapp|bingbot|yandex|baiduspider/i;
     
     if (botPattern.test(userAgent)) {
-      // Es un bot, ignoramos pero devolvemos 200 OK para no levantar sospechas
       return res.status(200).json({ ok: true, ignored: true, reason: 'bot_detected' });
     }
 
     const ipHashRaw = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
-    // Un hash muy simple para no guardar la IP real completa (opcional, pero buena práctica)
     const ipHash = ipHashRaw ? Buffer.from(ipHashRaw).toString('base64').substring(0, 64) : null;
     const path = String(req.body?.path || '').substring(0, 255);
+    const sessionId = String(req.body?.sessionId || '').substring(0, 128) || null;
+    const visitorId = String(req.body?.visitorId || '').substring(0, 128) || null;
 
     await prisma.siteVisit.create({
       data: {
         userAgent: userAgent.substring(0, 500),
         ipHash,
         path,
+        sessionId,
+        visitorId
       }
     });
 
     return res.status(201).json({ ok: true });
   } catch (e) {
     console.error('recordSiteVisit error', e);
-    // No romper la carga de la página
     return res.status(200).json({ ok: false });
   }
 }
@@ -740,17 +740,37 @@ export async function getSiteVisitsMetrics(req, res) {
     const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
     const threeSixtyFiveDaysAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000)
 
-    const [d1, d7, d30, d365, total] = await Promise.all([
-      prisma.siteVisit.count({ where: { createdAt: { gte: oneDayAgo } } }),
-      prisma.siteVisit.count({ where: { createdAt: { gte: sevenDaysAgo } } }),
-      prisma.siteVisit.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
-      prisma.siteVisit.count({ where: { createdAt: { gte: threeSixtyFiveDaysAgo } } }),
-      prisma.siteVisit.count(),
-    ])
+    const getStats = async (gte) => {
+      let result;
+      if (gte) {
+        result = await prisma.$queryRaw`SELECT COUNT(*) as pv, COUNT(DISTINCT sessionId) as sessions, COUNT(DISTINCT visitorId) as visitors FROM sitevisit WHERE createdAt >= ${gte}`;
+      } else {
+        result = await prisma.$queryRaw`SELECT COUNT(*) as pv, COUNT(DISTINCT sessionId) as sessions, COUNT(DISTINCT visitorId) as visitors FROM sitevisit`;
+      }
+      const row = result?.[0] || {};
+      return {
+        pv: Number(row.pv || 0),
+        sessions: Number(row.sessions || 0),
+        visitors: Number(row.visitors || 0)
+      };
+    };
 
-    return res.json({ '1d': d1, '1w': d7, '1m': d30, '1y': d365, all: total })
+    const [d1, d7, d30, d365, all] = await Promise.all([
+      getStats(oneDayAgo),
+      getStats(sevenDaysAgo),
+      getStats(thirtyDaysAgo),
+      getStats(threeSixtyFiveDaysAgo),
+      getStats(null)
+    ]);
+
+    return res.json({
+      pv: { '1d': d1.pv, '1w': d7.pv, '1m': d30.pv, '1y': d365.pv, all: all.pv },
+      sessions: { '1d': d1.sessions, '1w': d7.sessions, '1m': d30.sessions, '1y': d365.sessions, all: all.sessions },
+      visitors: { '1d': d1.visitors, '1w': d7.visitors, '1m': d30.visitors, '1y': d365.visitors, all: all.visitors },
+    })
   } catch (e) {
     console.error('getSiteVisitsMetrics error', e)
     return res.status(500).json({ error: 'internal' })
   }
 }
+
