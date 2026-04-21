@@ -522,6 +522,18 @@ model MarketingVisit {
   @@map("marketingvisit")
 }
 
+// Visitas globales al sitio (filtradas de bots)
+model SiteVisit {
+  id        Int      @id @default(autoincrement())
+  ipHash    String?  @db.VarChar(64)
+  userAgent String?  @db.Text
+  path      String?  @db.VarChar(255)
+  createdAt DateTime @default(now())
+
+  @@index([createdAt(sort: Desc)])
+  @@map("sitevisit")
+}
+
 // Métricas: búsquedas realizadas en el buscador público
 model SearchEvent {
   id     Int   @id @default(autoincrement())

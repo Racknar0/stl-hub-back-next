@@ -699,3 +699,58 @@ export async function getTaxonomyCounts(req, res) {
     return res.status(500).json({ error: 'internal' })
   }
 }
+
+export async function recordSiteVisit(req, res) {
+  try {
+    const userAgent = req.headers['user-agent'] || '';
+    // Regex simple para detectar bots
+    const botPattern = /bot|googlebot|crawler|spider|robot|crawling|curl|wget|slurp|facebookexternalhit|whatsapp|bingbot|yandex|baiduspider/i;
+    
+    if (botPattern.test(userAgent)) {
+      // Es un bot, ignoramos pero devolvemos 200 OK para no levantar sospechas
+      return res.status(200).json({ ok: true, ignored: true, reason: 'bot_detected' });
+    }
+
+    const ipHashRaw = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
+    // Un hash muy simple para no guardar la IP real completa (opcional, pero buena práctica)
+    const ipHash = ipHashRaw ? Buffer.from(ipHashRaw).toString('base64').substring(0, 64) : null;
+    const path = String(req.body?.path || '').substring(0, 255);
+
+    await prisma.siteVisit.create({
+      data: {
+        userAgent: userAgent.substring(0, 500),
+        ipHash,
+        path,
+      }
+    });
+
+    return res.status(201).json({ ok: true });
+  } catch (e) {
+    console.error('recordSiteVisit error', e);
+    // No romper la carga de la página
+    return res.status(200).json({ ok: false });
+  }
+}
+
+export async function getSiteVisitsMetrics(req, res) {
+  try {
+    const now = new Date()
+    const oneDayAgo = new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000)
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+    const threeSixtyFiveDaysAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000)
+
+    const [d1, d7, d30, d365, total] = await Promise.all([
+      prisma.siteVisit.count({ where: { createdAt: { gte: oneDayAgo } } }),
+      prisma.siteVisit.count({ where: { createdAt: { gte: sevenDaysAgo } } }),
+      prisma.siteVisit.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
+      prisma.siteVisit.count({ where: { createdAt: { gte: threeSixtyFiveDaysAgo } } }),
+      prisma.siteVisit.count(),
+    ])
+
+    return res.json({ '1d': d1, '1w': d7, '1m': d30, '1y': d365, all: total })
+  } catch (e) {
+    console.error('getSiteVisitsMetrics error', e)
+    return res.status(500).json({ error: 'internal' })
+  }
+}
