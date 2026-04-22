@@ -2601,6 +2601,11 @@ export const saveSelectedAssetMeta = async (req, res) => {
                         data,
                     });
 
+                    // Sincronizar Qdrant al guardar desde la vista Meta SEO
+                    qdrantService
+                        .upsertAssetVector(item.id)
+                        .catch((err) => console.error('[QDRANT] Meta save sync error:', err));
+
                     return { id: item.id, updated: true };
                 }),
             );
