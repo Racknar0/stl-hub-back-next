@@ -694,7 +694,7 @@ async function classifySingleItem(ai, payload, item) {
     'No se permite dejar categoria vacia, inventar categorias fuera del catalogo ni usar placeholders como "sin categoria".',
     'Si hay duda, elige la categoria existente mas cercana del catalogo.',
     'REGLAS ESPECIALES DE CATEGORIZACION (Aplica obligatoriamente la siguiente categoria y/o tag si la imagen o el nombre del asset coinciden con alguna de estas reglas):',
-    '- Si es un busto o si la palabra "busto" (o "bust") aparece en el nombre original, debes añadirle obligatoriamente la categoria "busto" y tambien el tag "busto".',
+    '- REGLA ESTRICTA BUSTOS: Si la imagen es un busto (solo cabeza y hombros) o si el nombre contiene "busto" o "bust", la categoria DEBE SER "busto" OBLIGATORIAMENTE. ESTA PROHIBIDO usar la categoria "decoracion" para bustos. Tambien añade el tag "busto".',
     '- Si es un personaje de cartoon clasico añadele categoria cartoons',
     '- Si es un dinosaurio le pones dinosaurios',
     '- Si es una figura para hacer algo especifico es un gadget',
@@ -807,35 +807,72 @@ async function classifySingleItem(ai, payload, item) {
     }
   }
 
-  return {
-    results: normalized.map((entry) => {
-    const namePair = refineSuggestedNamePair(ensureBilingualName(entry?.nombre), item)
-    const category = normalizeCategory(entry?.categoria, payload, matchers)
-    const tags = normalizeTags(entry?.tags, matchers)
-    const descriptionPair = ensureBilingualDescription(
-      entry?.descripcion,
-      `Modelo STL de ${namePair.es}.`,
-      `STL model of ${namePair.en}.`,
-    )
-
     return {
-      itemId: Number(item?.itemId || 0) || null,
-      sourcePathHint: String(item?.sourcePathHint || ''),
-      nombre: {
-        es: namePair.es,
-        en: namePair.en,
-      },
-      categoria: category,
-      tags,
-      descripcion: {
-        es: descriptionPair.es,
-        en: descriptionPair.en,
-      },
+      results: normalized.map((entry) => {
+        const namePair = refineSuggestedNamePair(ensureBilingualName(entry?.nombre), item)
+        let category = normalizeCategory(entry?.categoria, payload, matchers)
+        const tags = normalizeTags(entry?.tags, matchers)
+        const descriptionPair = ensureBilingualDescription(
+          entry?.descripcion,
+          `Modelo STL de ${namePair.es}.`,
+          `STL model of ${namePair.en}.`,
+        )
+
+        // HARD OVERRIDE FOR BUSTO
+        const sourceNameFallback = String(item?.sourceTitle || item?.assetName || item?.sourcePathHint || '').toLowerCase()
+        if (/\b(busto|bust|bustos|busts)\b/i.test(sourceNameFallback)) {
+          const bustoCategory = matchers.findCategory('busto') || matchers.findCategory('bust')
+          if (bustoCategory) {
+            category = {
+              id: bustoCategory.id,
+              slug: bustoCategory.slug,
+              slugEn: bustoCategory.slugEn || null,
+              name: bustoCategory.name,
+              nameEn: bustoCategory.nameEn || bustoCategory.name,
+              es: bustoCategory.name,
+              en: bustoCategory.nameEn || bustoCategory.name,
+              fromCatalog: true,
+            }
+          }
+          
+          const hasBustoTag = tags.some(t => t.slug === 'busto' || t.slug === 'bust' || t.name.toLowerCase() === 'busto' || t.nameEn.toLowerCase() === 'bust')
+          if (!hasBustoTag) {
+            const bustoTagMatcher = matchers.findTag('busto') || matchers.findTag('bust')
+            if (bustoTagMatcher) {
+              tags.unshift({
+                id: bustoTagMatcher.id,
+                slug: bustoTagMatcher.slug,
+                slugEn: bustoTagMatcher.slugEn || null,
+                name: bustoTagMatcher.name,
+                nameEn: bustoTagMatcher.nameEn || bustoTagMatcher.name,
+                es: bustoTagMatcher.name,
+                en: bustoTagMatcher.nameEn || bustoTagMatcher.name,
+                fromCatalog: true,
+                iaSuggested: true,
+              })
+              if (tags.length > 3) tags.pop()
+            }
+          }
+        }
+
+        return {
+          itemId: Number(item?.itemId || 0) || null,
+          sourcePathHint: String(item?.sourcePathHint || ''),
+          nombre: {
+            es: namePair.es,
+            en: namePair.en,
+          },
+          categoria: category,
+          tags,
+          descripcion: {
+            es: descriptionPair.es,
+            en: descriptionPair.en,
+          },
+        }
+      }),
+      retriesUsed,
+      rateLimitedSeen,
     }
-    }),
-    retriesUsed,
-    rateLimitedSeen,
-  }
 }
 
 export async function callGoogleBatchScan(payload) {
