@@ -75,17 +75,27 @@ export const syncMissingMultimodalVectors = async (req, res) => {
             const assetName = allAssets.find(a => a.id === id)?.title;
             logAndSend(`⏳ [${i + 1}/${toProcess.length}] Vectorizando ID ${id}: ${assetName}...`);
             
-            const success = await qdrantMultimodalService.upsertAssetMultimodalVector(id);
-            if (success) {
-                logAndSend(`✅ [${i + 1}/${toProcess.length}] ID ${id} sincronizado.`);
-                successCount++;
-            } else {
-                logAndSend(`❌ [${i + 1}/${toProcess.length}] Error al sincronizar ID ${id}`);
-                failCount++;
+            let success = false;
+            const maxRetries = 3;
+            for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                success = await qdrantMultimodalService.upsertAssetMultimodalVector(id);
+                if (success) {
+                    logAndSend(`✅ [${i + 1}/${toProcess.length}] ID ${id} sincronizado.`);
+                    successCount++;
+                    break;
+                }
+                if (attempt < maxRetries) {
+                    const backoffMs = attempt * 8000 + Math.random() * 4000;
+                    logAndSend(`⏸️ [${i + 1}/${toProcess.length}] ID ${id} falló (intento ${attempt}/${maxRetries}). Reintentando en ${Math.round(backoffMs / 1000)}s...`);
+                    await new Promise(r => setTimeout(r, backoffMs));
+                } else {
+                    logAndSend(`❌ [${i + 1}/${toProcess.length}] Error al sincronizar ID ${id} tras ${maxRetries} intentos`);
+                    failCount++;
+                }
             }
 
-            // Pausa mayor por procesar imágenes
-            await new Promise(r => setTimeout(r, 2000));
+            // Pausa entre assets para respetar rate limits de Google
+            await new Promise(r => setTimeout(r, 3000));
         }
 
         logAndSend(`🎉 Sincronización multimodal terminada. Éxito: ${successCount}, Errores: ${failCount}.`);
