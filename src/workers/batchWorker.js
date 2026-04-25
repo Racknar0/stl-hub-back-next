@@ -1124,7 +1124,7 @@ async function prepareItemForMain(item, updateItem) {
   if (!fs.existsSync(folderPath)) throw new Error(`Carpeta no encontrada: ${folderPath}`)
   if (!item.targetAccount) throw new Error('No tiene cuenta MEGA asignada')
 
-  const mainAccount = await prisma.megaAccount.findUnique({
+  let mainAccount = await prisma.megaAccount.findUnique({
     where: { id: item.targetAccount },
     include: {
       credentials: true,
@@ -1133,7 +1133,7 @@ async function prepareItemForMain(item, updateItem) {
   })
   if (!mainAccount) throw new Error(`Cuenta MEGA id=${item.targetAccount} no encontrada`)
 
-  const backupAccounts = (mainAccount.backups || [])
+  let backupAccounts = (mainAccount.backups || [])
     .map((b) => b.backupAccount)
     .filter((b) => b && b.type === 'backup')
 
@@ -1147,6 +1147,54 @@ async function prepareItemForMain(item, updateItem) {
   const packed = await recompressFolder(folderPath, slug)
   const stagingArchivePath = packed.outputPath
   const archiveSizeBytes = fs.statSync(stagingArchivePath).size
+
+  // -- NEW AUTO DISTRIBUTION LOGIC --
+  const archiveSizeMb = archiveSizeBytes / (1024 * 1024)
+  const usedMb = toSafeNumber(mainAccount.storageUsedMB, 0)
+  const sessionUploadedMb = getSessionUploadedMb(mainAccount.id)
+  const projectedMb = usedMb + sessionUploadedMb + archiveSizeMb
+
+  if (projectedMb > MAX_ACCOUNT_UPLOAD_MB) {
+    console.warn(`[BATCH][MAIN] Cuenta original ${mainAccount.id} llena (Proyectado: ${projectedMb.toFixed(2)} MB). Buscando alternativa...`)
+    const batchItems = await prisma.batchImportItem.findMany({
+      where: { batchId: item.batchId },
+      select: { targetAccount: true }
+    })
+    const preferredIds = Array.from(new Set(batchItems.map(i => i.targetAccount).filter(Boolean)))
+    
+    const candidates = await prisma.megaAccount.findMany({
+      where: { type: 'main', status: 'CONNECTED', suspended: false, ignoreInUploadBatch: false },
+      include: {
+        credentials: true,
+        backups: { include: { backupAccount: { include: { credentials: true } } } },
+      },
+    })
+    
+    const accountsWithSpace = candidates.map(acc => {
+      const u = toSafeNumber(acc.storageUsedMB, 0)
+      const s = getSessionUploadedMb(acc.id)
+      const p = u + s + archiveSizeMb
+      return { acc, p, isPreferred: preferredIds.includes(acc.id) }
+    }).filter(x => x.p <= MAX_ACCOUNT_UPLOAD_MB)
+    
+    if (accountsWithSpace.length > 0) {
+      accountsWithSpace.sort((a, b) => {
+        if (a.isPreferred && !b.isPreferred) return -1
+        if (!a.isPreferred && b.isPreferred) return 1
+        return a.p - b.p // Escoger la de menor espacio ocupado
+      })
+      const newAccount = accountsWithSpace[0].acc
+      console.log(`[BATCH][MAIN] Reasignando item ${item.id} a cuenta alternativa ${newAccount.id} (${newAccount.alias})`)
+      
+      await updateItem({ targetAccount: newAccount.id })
+      item.targetAccount = newAccount.id
+      mainAccount = newAccount
+      backupAccounts = (mainAccount.backups || []).map((b) => b.backupAccount).filter((b) => b && b.type === 'backup')
+    } else {
+      console.warn(`[BATCH][MAIN] No se encontraron cuentas alternativas con espacio suficiente para ${archiveSizeMb.toFixed(2)} MB.`)
+    }
+  }
+  // -- END NEW LOGIC --
 
   const archDir = path.join(ARCHIVES_DIR, slug)
   fs.mkdirSync(archDir, { recursive: true })

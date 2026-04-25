@@ -256,7 +256,7 @@ export const getMultimodalSyncStatus = async () => {
         let qdrantCount = 0;
         try {
             const collectionInfo = await qdrant.getCollection(qdrantCollection);
-            qdrantCount = collectionInfo?.vectors_count || 0;
+            qdrantCount = collectionInfo?.points_count || collectionInfo?.vectors_count || 0;
         } catch {
             qdrantCount = 0;
         }
