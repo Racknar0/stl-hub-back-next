@@ -143,8 +143,8 @@ export const searchByImageHandler = async (req, res) => {
         tagsEn: (db.tags || []).map(t => t.nameEn || t.name).filter(Boolean),
         isPremium: Boolean(db.isPremium),
         createdAt: db.createdAt,
-        archiveSizeB: db.archiveSizeB,
-        fileSizeB: db.fileSizeB,
+        archiveSizeB: typeof db.archiveSizeB === 'bigint' ? db.archiveSizeB.toString() : db.archiveSizeB,
+        fileSizeB: typeof db.fileSizeB === 'bigint' ? db.fileSizeB.toString() : db.fileSizeB,
         _score: r.score,
       };
     }).filter(Boolean);
