@@ -1,6 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { QdrantClient } from '@qdrant/js-client-rest';
-import qdrantService from '../services/qdrant.service.js';
+import qdrantMultimodalService from '../services/qdrantMultimodal.service.js';
 
 const prisma = new PrismaClient();
 const qdrantHost = process.env.QDRANT_HOST || '127.0.0.1';
@@ -98,11 +98,8 @@ export const syncMissingVectors = async (req, res) => {
             const assetName = allAssets.find(a => a.id === id)?.title;
             logAndSend(`⏳ Vectorizando ID ${id}: ${assetName}...`);
             
-            const result = await qdrantService.upsertAssetVector(id, {
-                includeError: true,
-                maxRetries: 10,
-            });
-            if (result?.ok) {
+            const result = await qdrantMultimodalService.upsertAssetMultimodalVector(id);
+            if (result) {
                 if (Number(result?.attempts || 1) > 1) {
                     logAndSend(`🔁 ID ${id} sincronizado tras ${result.attempts} intentos.`);
                 }

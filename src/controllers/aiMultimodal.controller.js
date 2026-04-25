@@ -70,16 +70,17 @@ export const syncMissingMultimodalVectors = async (req, res) => {
         let successCount = 0;
         let failCount = 0;
 
-        for (const id of toProcess) {
+        for (let i = 0; i < toProcess.length; i++) {
+            const id = toProcess[i];
             const assetName = allAssets.find(a => a.id === id)?.title;
-            logAndSend(`⏳ Vectorizando ID ${id}: ${assetName}...`);
+            logAndSend(`⏳ [${i + 1}/${toProcess.length}] Vectorizando ID ${id}: ${assetName}...`);
             
             const success = await qdrantMultimodalService.upsertAssetMultimodalVector(id);
             if (success) {
-                logAndSend(`✅ ID ${id} sincronizado exitosamente.`);
+                logAndSend(`✅ [${i + 1}/${toProcess.length}] ID ${id} sincronizado.`);
                 successCount++;
             } else {
-                logAndSend(`❌ Error al sincronizar ID ${id}`);
+                logAndSend(`❌ [${i + 1}/${toProcess.length}] Error al sincronizar ID ${id}`);
                 failCount++;
             }
 
@@ -153,5 +154,85 @@ export const searchByImageHandler = async (req, res) => {
   } catch (error) {
     console.error('[AI MULTIMODAL] Error en búsqueda por imagen:', error?.message || error);
     return res.status(500).json({ message: error?.message || 'Error interno en búsqueda visual' });
+  }
+};
+
+import fs from 'fs';
+import path from 'path';
+
+export const searchByLocalImageHandler = async (req, res) => {
+  try {
+    const imagePath = String(req.body?.imagePath || '').trim();
+    const textContext = String(req.body?.textContext || '').trim();
+    const limit = Number(req.body?.limit) || 8;
+
+    if (!imagePath) {
+      return res.status(400).json({ message: 'Se requiere una ruta de imagen (imagePath)' });
+    }
+
+    // Resolve absolute path safely within uploads directory
+    const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(process.cwd(), 'uploads');
+    
+    // Normalize path to prevent directory traversal
+    const relativePath = imagePath.replace(/^(\/|\\)+/, '').replace(/^uploads(\/|\\)/i, '');
+    const absolutePath = path.resolve(UPLOADS_DIR, relativePath);
+
+    if (!absolutePath.startsWith(path.resolve(UPLOADS_DIR))) {
+        return res.status(403).json({ message: 'Ruta de imagen no permitida' });
+    }
+
+    if (!fs.existsSync(absolutePath)) {
+      return res.status(404).json({ message: 'La imagen local no existe en el servidor' });
+    }
+
+    const imageBuffer = fs.readFileSync(absolutePath);
+    const ext = path.extname(absolutePath).toLowerCase();
+    const mimeTypes = {
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.webp': 'image/webp'
+    };
+    const mimeType = mimeTypes[ext] || 'image/jpeg';
+
+    const results = await qdrantMultimodalService.searchByImage(imageBuffer, mimeType, textContext, limit);
+
+    if (!results || results.length === 0) {
+      return res.json({ items: [], total: 0 });
+    }
+
+    // Enrich with full DB data (same as normal search)
+    const ids = results.map(r => Number(r.id)).filter(n => Number.isFinite(n) && n > 0);
+    const dbAssets = await prisma.asset.findMany({
+      where: { id: { in: ids } },
+      include: {
+        categories: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+        tags: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+      }
+    });
+
+    const dbMap = new Map(dbAssets.map(a => [a.id, a]));
+
+    const items = results.map(r => {
+      const db = dbMap.get(Number(r.id));
+      if (!db) return null;
+      return {
+        id: db.id,
+        title: db.title,
+        titleEn: db.titleEn,
+        slug: db.slug,
+        images: Array.isArray(db.images) ? db.images : [],
+        categories: db.categories || [],
+        tags: db.tags || [],
+        tagsEs: (db.tags || []).map(t => t.name).filter(Boolean),
+        tagsEn: (db.tags || []).map(t => t.nameEn || t.name).filter(Boolean),
+        _score: r.score,
+      };
+    }).filter(Boolean);
+
+    return res.json({ items, total: items.length });
+  } catch (error) {
+    console.error('[AI MULTIMODAL] Error en búsqueda por imagen local:', error?.message || error);
+    return res.status(500).json({ message: error?.message || 'Error interno en búsqueda visual local' });
   }
 };

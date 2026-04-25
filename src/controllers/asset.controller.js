@@ -11,7 +11,7 @@ import { checkMegaLinkAlive } from '../utils/megaCheckFiles/megaLinkChecker.js';
 import { maybeCheckMegaOnVisit } from '../utils/megaCheckFiles/visitTriggeredMegaCheck.js';
 import { applyMegaProxy, listMegaProxies } from '../utils/megaProxy.js';
 import { createPartFromBase64, GoogleGenAI, PartMediaResolutionLevel } from '@google/genai';
-import qdrantService from '../services/qdrant.service.js';
+import qdrantMultimodalService from '../services/qdrantMultimodal.service.js';
 
 const prisma = new PrismaClient();
 import { randomizeFreebies, getRandomizeFreebiesCountFromEnv } from '../utils/randomizeFreebies.js';
@@ -793,8 +793,8 @@ async function updateAssetDescriptionSafely(assetId, rawDescription) {
         where: { id: numericAssetId },
         data: { description: safe },
     });
-    qdrantService
-        .upsertAssetVector(numericAssetId)
+    qdrantMultimodalService
+        .upsertAssetMultimodalVector(numericAssetId)
         .catch((err) => console.error('[QDRANT] Description update error:', err));
     return safe;
 }
@@ -810,8 +810,8 @@ async function updateAssetDescriptionsSafely(assetId, rawDescriptionEs, rawDescr
             descriptionEn: safeEn,
         },
     });
-    qdrantService
-        .upsertAssetVector(numericAssetId)
+    qdrantMultimodalService
+        .upsertAssetMultimodalVector(numericAssetId)
         .catch((err) => console.error('[QDRANT] Description regenerate error:', err));
     return { description: safeEs, descriptionEn: safeEn };
 }
@@ -1428,7 +1428,7 @@ export const listAssets = async (req, res) => {
         const where = {};
         if (is_ai_search === 'true' && q) {
             const limit = pageSize ? Number(pageSize) : 50;
-            const aiResults = await qdrantService.searchSimilarAssets(String(q), limit);
+            const aiResults = await qdrantMultimodalService.searchByImage(null, null, String(q), limit);
             const foundIds = aiResults.map(res => Number(res.id));
             if (foundIds.length > 0) {
                 where.id = { in: foundIds };
@@ -2531,7 +2531,7 @@ export const updateAsset = async (req, res) => {
             }
         }
         
-        qdrantService.upsertAssetVector(id).catch(err => console.error('[QDRANT] Update error:', err));
+        qdrantMultimodalService.upsertAssetMultimodalVector(id).catch(err => console.error('[QDRANT] Update error:', err));
         
         const updatedSafe = toJsonSafe(updated);
         return res.json(updatedSafe);
@@ -2602,8 +2602,8 @@ export const saveSelectedAssetMeta = async (req, res) => {
                     });
 
                     // Sincronizar Qdrant al guardar desde la vista Meta SEO
-                    qdrantService
-                        .upsertAssetVector(item.id)
+                    qdrantMultimodalService
+                        .upsertAssetMultimodalVector(item.id)
                         .catch((err) => console.error('[QDRANT] Meta save sync error:', err));
 
                     return { id: item.id, updated: true };
@@ -2812,8 +2812,8 @@ export const generateAssetMetaTags = async (req, res) => {
             });
 
             // Reindexar vector para alinear búsqueda semántica con los tags recién generados.
-            qdrantService
-                .upsertAssetVector(asset.id)
+            qdrantMultimodalService
+                .upsertAssetMultimodalVector(asset.id)
                 .catch((err) =>
                     console.error('[QDRANT] Tags generate sync error:', err),
                 );
@@ -2938,7 +2938,7 @@ export const createAsset = async (req, res) => {
             });
             createdInDb = true;
             
-            qdrantService.upsertAssetVector(created.id).catch(err => console.error('[QDRANT] Create error:', err));
+            qdrantMultimodalService.upsertAssetMultimodalVector(created.id).catch(err => console.error('[QDRANT] Create error:', err));
             
             // Convertir BigInt a Number para JSON
             const createdSafe = {
@@ -3308,7 +3308,7 @@ export const createAssetFull = async (req, res) => {
             console.error('[MEGA-UP][BATCH] async error:', err)
         );
 
-        qdrantService.upsertAssetVector(created.id).catch(err => console.error('[QDRANT] CreateFull error:', err));
+        qdrantMultimodalService.upsertAssetMultimodalVector(created.id).catch(err => console.error('[QDRANT] CreateFull error:', err));
 
         // Evita cleanup accidental post-éxito ante errores posteriores no críticos.
         cleanupPaths = [];
@@ -5831,7 +5831,7 @@ export const deleteAsset = async (req, res) => {
         });
         if (!asset) return res.status(404).json({ message: 'Asset not found' });
 
-        qdrantService.deleteAssetVector(id).catch(err => console.error('[QDRANT] Delete error:', err));
+        qdrantMultimodalService.deleteAssetMultimodalVector(id).catch(err => console.error('[QDRANT] Delete error:', err));
 
         const imgDir = path.join(IMAGES_DIR, asset.slug); // imágenes por slug
         const archDir = path.join(ARCHIVES_DIR, asset.slug); // archivo por slug
@@ -6278,7 +6278,7 @@ export const getMegaMenuData = async (_req, res) => {
                 .map((it) => `${it.labelEs} ${it.labelEn} ${it.slug}`)
                 .join(' | ');
 
-            const aiResults = await qdrantService.searchSimilarAssets(seasonalQuery, 60);
+            const aiResults = await qdrantMultimodalService.searchByImage(null, null, seasonalQuery, 60);
             const idsOrdered = [];
             const seen = new Set();
 
@@ -6711,7 +6711,7 @@ export const searchAssets = async (req, res) => {
                 Math.max(AI_MIN_RESULTS, (page + 1) * size * 3)
             );
 
-            const aiResults = await qdrantService.searchSimilarAssets(qStr, aiLimit);
+            const aiResults = await qdrantMultimodalService.searchByImage(null, null, qStr, aiLimit);
             const aiIdsOrdered = [];
             const aiSeen = new Set();
 

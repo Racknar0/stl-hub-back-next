@@ -30,7 +30,7 @@ import {
   hasBatchStopRequest,
   clearBatchStopRequest,
 } from '../utils/batchProxySwitch.js'
-import qdrantService from '../services/qdrant.service.js'
+import qdrantMultimodalService from '../services/qdrantMultimodal.service.js'
 
 const prisma = new PrismaClient()
 const UPLOADS_DIR  = path.resolve('uploads')
@@ -1268,7 +1268,7 @@ async function processMainQueueItem(item) {
       categories: item.categories,
     })
 
-    qdrantService.upsertAssetVector(asset.id).catch(err => console.error('[QDRANT][BATCH] Error generando vector:', err));
+    qdrantMultimodalService.upsertAssetMultimodalVector(asset.id).catch(err => console.error('[QDRANT][BATCH] Error generando vector multimodal:', err));
 
     const hasBackups = ctx.backupAccounts.length > 0
     await updateItem({
