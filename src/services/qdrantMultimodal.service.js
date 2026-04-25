@@ -272,9 +272,71 @@ export const getMultimodalSyncStatus = async () => {
     }
 };
 
+export const searchByImage = async (imageBuffer, mimeType, textContext = '', limit = 20) => {
+  if (!ai) {
+    throw new Error('GEMINI_API_KEY no configurada para búsqueda multimodal');
+  }
+
+  try {
+    await ensureCollectionExists();
+
+    // Build contents array: image + optional text
+    const contentsArr = [];
+
+    if (imageBuffer && mimeType) {
+      const base64Data = imageBuffer.toString('base64');
+      contentsArr.push({
+        inlineData: {
+          data: base64Data,
+          mimeType: mimeType
+        }
+      });
+    }
+
+    const text = String(textContext || '').trim();
+    if (text) {
+      contentsArr.push({ text });
+    }
+
+    if (contentsArr.length === 0) {
+      throw new Error('Se requiere al menos una imagen o texto para buscar');
+    }
+
+    // Generate embedding
+    const response = await ai.models.embedContent({
+      model: geminiEmbeddingModel,
+      contents: contentsArr,
+      outputDimensionality: MULTIMODAL_DIMENSIONS
+    });
+
+    const queryVector = response?.embeddings?.[0]?.values;
+    if (!Array.isArray(queryVector) || queryVector.length === 0) {
+      throw new Error('Gemini no devolvió embedding válido para la búsqueda');
+    }
+
+    // Query Qdrant
+    const results = await qdrant.search(qdrantCollection, {
+      vector: queryVector,
+      limit: Math.min(200, Math.max(1, Number(limit) || 20)),
+      with_payload: true,
+      score_threshold: 0.3
+    });
+
+    return (results || []).map(r => ({
+      id: r.id,
+      score: Number(r.score || 0).toFixed(4),
+      ...r.payload
+    }));
+  } catch (error) {
+    console.error('[QDRANT MULTIMODAL] Error en searchByImage:', error?.message || error);
+    throw error;
+  }
+};
+
 export default {
   generateMultimodalVectorText,
   upsertAssetMultimodalVector,
   deleteAssetMultimodalVector,
-  getMultimodalSyncStatus
+  getMultimodalSyncStatus,
+  searchByImage
 };

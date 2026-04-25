@@ -96,3 +96,62 @@ export const syncMissingMultimodalVectors = async (req, res) => {
         res.end();
     }
 };
+
+export const searchByImageHandler = async (req, res) => {
+  try {
+    const file = req.file;
+    const textContext = String(req.body?.text || '').trim();
+    const limit = Number(req.body?.limit) || 20;
+
+    if (!file || !file.buffer) {
+      return res.status(400).json({ message: 'Se requiere una imagen para buscar' });
+    }
+
+    const mimeType = file.mimetype || 'image/jpeg';
+    const results = await qdrantMultimodalService.searchByImage(file.buffer, mimeType, textContext, limit);
+
+    if (!results || results.length === 0) {
+      return res.json({ items: [], total: 0 });
+    }
+
+    // Enrich with full DB data
+    const ids = results.map(r => Number(r.id)).filter(n => Number.isFinite(n) && n > 0);
+    const dbAssets = await prisma.asset.findMany({
+      where: { id: { in: ids } },
+      include: {
+        categories: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+        tags: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+      }
+    });
+
+    const dbMap = new Map(dbAssets.map(a => [a.id, a]));
+
+    const items = results.map(r => {
+      const db = dbMap.get(Number(r.id));
+      if (!db) return null;
+      return {
+        id: db.id,
+        title: db.title,
+        titleEn: db.titleEn,
+        description: db.description,
+        descriptionEn: db.descriptionEn,
+        slug: db.slug,
+        images: Array.isArray(db.images) ? db.images : [],
+        categories: db.categories || [],
+        tags: db.tags || [],
+        tagsEs: (db.tags || []).map(t => t.name).filter(Boolean),
+        tagsEn: (db.tags || []).map(t => t.nameEn || t.name).filter(Boolean),
+        isPremium: Boolean(db.isPremium),
+        createdAt: db.createdAt,
+        archiveSizeB: db.archiveSizeB,
+        fileSizeB: db.fileSizeB,
+        _score: r.score,
+      };
+    }).filter(Boolean);
+
+    return res.json({ items, total: items.length });
+  } catch (error) {
+    console.error('[AI MULTIMODAL] Error en búsqueda por imagen:', error?.message || error);
+    return res.status(500).json({ message: error?.message || 'Error interno en búsqueda visual' });
+  }
+};
