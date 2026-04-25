@@ -261,7 +261,7 @@ export const getVisualSimilarGroupsBatch = async (req, res) => {
     });
     const qdrantCollection = process.env.QDRANT_COLLECTION || 'stls-multimodal';
 
-    const ignoredPairs = await prisma.ignoredSimilarPair.findMany();
+    const ignoredPairs = await prisma.assetSimilarIgnorePair.findMany();
     const ignoredSet = new Set(ignoredPairs.map(p => `${Math.min(p.assetAId, p.assetBId)}-${Math.max(p.assetAId, p.assetBId)}`));
 
     const groups = [];
