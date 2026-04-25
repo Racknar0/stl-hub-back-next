@@ -236,3 +236,95 @@ export const searchByLocalImageHandler = async (req, res) => {
     return res.status(500).json({ message: error?.message || 'Error interno en búsqueda visual local' });
   }
 };
+
+export const getVisualSimilarGroupsBatch = async (req, res) => {
+  try {
+    const pageIndex = Number(req.query.pageIndex) || 0;
+    const pageSize = Number(req.query.pageSize) || 50;
+    const threshold = Number(req.query.threshold) || 85;
+
+    const assets = await prisma.asset.findMany({
+      skip: pageIndex * pageSize,
+      take: pageSize,
+      orderBy: { id: 'desc' },
+      select: { id: true, title: true, images: true, accountId: true }
+    });
+
+    if (assets.length === 0) {
+      return res.json({ groups: [], totalProcessed: 0 });
+    }
+
+    const { QdrantClient } = await import('@qdrant/js-client-rest');
+    const qdrant = new QdrantClient({
+      url: process.env.QDRANT_URL || 'http://127.0.0.1:6333',
+      apiKey: process.env.QDRANT_API_KEY
+    });
+    const qdrantCollection = process.env.QDRANT_COLLECTION || 'stls-multimodal';
+
+    const ignoredPairs = await prisma.ignoredSimilarPair.findMany();
+    const ignoredSet = new Set(ignoredPairs.map(p => `${Math.min(p.assetAId, p.assetBId)}-${Math.max(p.assetAId, p.assetBId)}`));
+
+    const groups = [];
+    const processedIds = new Set();
+
+    for (const asset of assets) {
+      if (processedIds.has(asset.id)) continue;
+
+      try {
+        const results = await qdrant.recommend(qdrantCollection, {
+          positive: [asset.id],
+          limit: 10,
+          score_threshold: threshold / 100,
+          with_payload: true
+        });
+
+        if (results && results.length > 0) {
+          const validMatches = results.filter(r => {
+             const aId = Math.min(asset.id, Number(r.id));
+             const bId = Math.max(asset.id, Number(r.id));
+             return !ignoredSet.has(`${aId}-${bId}`);
+          });
+
+          if (validMatches.length > 0) {
+            const matchIds = validMatches.map(r => Number(r.id));
+            const allIdsInGroup = [asset.id, ...matchIds];
+            
+            const groupDbAssets = await prisma.asset.findMany({
+               where: { id: { in: allIdsInGroup } },
+               include: { account: { select: { alias: true } } }
+            });
+            const dbMap = new Map(groupDbAssets.map(a => [a.id, a]));
+
+            const groupItems = [
+              { asset: dbMap.get(asset.id), similarity: 100, distance: 0 },
+              ...validMatches.map(r => ({
+                 asset: dbMap.get(Number(r.id)),
+                 similarity: Math.round(Number(r.score) * 100),
+                 distance: Number(r.score).toFixed(4)
+              })).filter(i => i.asset)
+            ];
+
+            if (groupItems.length > 1) {
+              groups.push({
+                 id: `group-vis-${asset.id}`,
+                 signature: `visual-${asset.id}`,
+                 confidence: Math.round(Number(validMatches[0].score) * 100),
+                 items: groupItems
+              });
+              
+              allIdsInGroup.forEach(id => processedIds.add(id));
+            }
+          }
+        }
+      } catch(e) {
+         // recommend falla si el asset no está en Qdrant (aún no se han generado sus vectores)
+      }
+    }
+
+    res.json({ groups, totalProcessed: assets.length });
+
+  } catch (error) {
+    console.error('[AI MULTIMODAL] Visual Similar Batch Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
