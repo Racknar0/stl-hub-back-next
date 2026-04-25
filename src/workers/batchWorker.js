@@ -828,7 +828,7 @@ async function recompressFolder(folderPath, outputName) {
 
   // Intento primario: RAR. En algunos entornos 7z no soporta creación de RAR.
   try {
-    await run7z(['a', '-trar', outputRarPath, path.join(folderPath, '*'), '-r', '-mx5'])
+    await run7z(['a', '-trar', outputRarPath, path.join(folderPath, '*'), '-r', '-mx0'])
     const sizeMB = fs.existsSync(outputRarPath) ? (fs.statSync(outputRarPath).size / (1024 * 1024)).toFixed(1) : 0
     console.log(`[BATCH][RECOMPRESS] OK → ${outputName}.rar (${sizeMB} MB)`)
     return { outputPath: outputRarPath, ext: 'rar' }
@@ -838,7 +838,7 @@ async function recompressFolder(folderPath, outputName) {
     console.warn('[BATCH][RECOMPRESS][WARN] RAR no soportado por 7z en este host, fallback a ZIP')
   }
 
-  await run7z(['a', '-tzip', outputZipPath, path.join(folderPath, '*'), '-r', '-mx5'])
+  await run7z(['a', '-tzip', outputZipPath, path.join(folderPath, '*'), '-r', '-mx0'])
   const sizeMB = fs.existsSync(outputZipPath) ? (fs.statSync(outputZipPath).size / (1024 * 1024)).toFixed(1) : 0
   console.log(`[BATCH][RECOMPRESS] OK → ${outputName}.zip (${sizeMB} MB)`)
   return { outputPath: outputZipPath, ext: 'zip' }
