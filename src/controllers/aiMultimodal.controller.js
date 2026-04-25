@@ -250,9 +250,11 @@ export const getVisualSimilarGroupsBatch = async (req, res) => {
       select: { id: true, title: true, images: true, accountId: true }
     });
 
+    const totalAssetsInDb = await prisma.asset.count();
+
     if (assets.length === 0) {
       res.setHeader('Content-Type', 'application/json');
-      return res.send(JSON.stringify({ groups: [], totalProcessed: 0 }));
+      return res.send(JSON.stringify({ groups: [], totalProcessed: 0, totalAssets: totalAssetsInDb }));
     }
 
     const { QdrantClient } = await import('@qdrant/js-client-rest');
@@ -323,7 +325,7 @@ export const getVisualSimilarGroupsBatch = async (req, res) => {
     }
 
     res.setHeader('Content-Type', 'application/json');
-    res.send(JSON.stringify({ groups, totalProcessed: assets.length }, (key, value) => 
+    res.send(JSON.stringify({ groups, totalProcessed: assets.length, totalAssets: totalAssetsInDb }, (key, value) => 
       typeof value === 'bigint' ? value.toString() : value
     ));
 
