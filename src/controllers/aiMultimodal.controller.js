@@ -251,7 +251,8 @@ export const getVisualSimilarGroupsBatch = async (req, res) => {
     });
 
     if (assets.length === 0) {
-      return res.json({ groups: [], totalProcessed: 0 });
+      res.setHeader('Content-Type', 'application/json');
+      return res.send(JSON.stringify({ groups: [], totalProcessed: 0 }));
     }
 
     const { QdrantClient } = await import('@qdrant/js-client-rest');
@@ -321,7 +322,10 @@ export const getVisualSimilarGroupsBatch = async (req, res) => {
       }
     }
 
-    res.json({ groups, totalProcessed: assets.length });
+    res.setHeader('Content-Type', 'application/json');
+    res.send(JSON.stringify({ groups, totalProcessed: assets.length }, (key, value) => 
+      typeof value === 'bigint' ? value.toString() : value
+    ));
 
   } catch (error) {
     console.error('[AI MULTIMODAL] Visual Similar Batch Error:', error);
