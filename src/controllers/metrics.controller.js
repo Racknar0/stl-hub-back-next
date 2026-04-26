@@ -774,3 +774,106 @@ export async function getSiteVisitsMetrics(req, res) {
   }
 }
 
+export async function getSiteVisitsTimeseries(req, res) {
+  try {
+    const now = new Date()
+    const fromRaw = String(req.query.from || '').trim()
+    const toRaw = String(req.query.to || '').trim()
+
+    const toDate = toRaw ? new Date(`${toRaw}T23:59:59`) : now
+    const fromDate = fromRaw ? new Date(`${fromRaw}T00:00:00`) : new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+
+    if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+      return res.status(400).json({ error: 'invalid-dates' })
+    }
+
+    const diffMs = toDate.getTime() - fromDate.getTime()
+    const diffDays = diffMs / (24 * 60 * 60 * 1000)
+
+    let granularity, dateExpr, dateFormat
+    if (diffDays <= 1) {
+      granularity = 'hour'
+      dateExpr = "DATE_FORMAT(createdAt, '%Y-%m-%d %H:00:00')"
+      dateFormat = '%Y-%m-%d %H:00'
+    } else if (diffDays <= 60) {
+      granularity = 'day'
+      dateExpr = 'DATE(createdAt)'
+      dateFormat = '%Y-%m-%d'
+    } else {
+      granularity = 'week'
+      dateExpr = "DATE(DATE_SUB(createdAt, INTERVAL WEEKDAY(createdAt) DAY))"
+      dateFormat = '%Y-%m-%d'
+    }
+
+    const query = `
+      SELECT ${dateExpr} as bucket,
+             COUNT(*) as pv,
+             COUNT(DISTINCT sessionId) as sessions,
+             COUNT(DISTINCT visitorId) as visitors
+      FROM sitevisit
+      WHERE createdAt >= ? AND createdAt <= ?
+      GROUP BY bucket
+      ORDER BY bucket ASC
+    `
+
+    const rows = await prisma.$queryRawUnsafe(query, fromDate, toDate)
+
+    const series = (rows || []).map((r) => ({
+      date: r.bucket instanceof Date ? r.bucket.toISOString().slice(0, granularity === 'hour' ? 16 : 10) : String(r.bucket || '').slice(0, granularity === 'hour' ? 16 : 10),
+      pv: Number(r.pv || 0),
+      sessions: Number(r.sessions || 0),
+      visitors: Number(r.visitors || 0),
+    }))
+
+    return res.json({
+      from: fromDate.toISOString().slice(0, 10),
+      to: toDate.toISOString().slice(0, 10),
+      granularity,
+      series,
+    })
+  } catch (e) {
+    console.error('getSiteVisitsTimeseries error', e)
+    return res.status(500).json({ error: 'internal' })
+  }
+}
+
+export async function getTopPages(req, res) {
+  try {
+    const now = new Date()
+    const fromRaw = String(req.query.from || '').trim()
+    const toRaw = String(req.query.to || '').trim()
+
+    const toDate = toRaw ? new Date(`${toRaw}T23:59:59`) : now
+    const fromDate = fromRaw ? new Date(`${fromRaw}T00:00:00`) : new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+
+    if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+      return res.status(400).json({ error: 'invalid-dates' })
+    }
+
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT path, COUNT(*) as cnt
+       FROM sitevisit
+       WHERE createdAt >= ? AND createdAt <= ? AND path IS NOT NULL AND path != ''
+       GROUP BY path
+       ORDER BY cnt DESC
+       LIMIT 15`,
+      fromDate,
+      toDate
+    )
+
+    const pages = (rows || []).map((r) => ({
+      path: String(r.path || '/'),
+      count: Number(r.cnt || 0),
+    }))
+
+    return res.json({
+      from: fromDate.toISOString().slice(0, 10),
+      to: toDate.toISOString().slice(0, 10),
+      pages,
+    })
+  } catch (e) {
+    console.error('getTopPages error', e)
+    return res.status(500).json({ error: 'internal' })
+  }
+}
+
