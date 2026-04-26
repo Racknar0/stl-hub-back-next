@@ -344,3 +344,226 @@ export const getVisualSimilarGroupsBatch = async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 };
+
+// ============================================================
+// FULL VISUAL SIMILAR SCAN – Union-Find clustering via SSE
+// ============================================================
+export const fullVisualSimilarScan = async (req, res) => {
+  const threshold = Number(req.query.threshold) || 90;
+
+  // SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const send = (obj) => {
+    try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (_) {}
+  };
+
+  try {
+    // 1. Load all published assets
+    const allAssets = await prisma.asset.findMany({
+      where: { status: 'PUBLISHED' },
+      select: { id: true, title: true, images: true, accountId: true },
+      orderBy: { id: 'desc' },
+    });
+    const totalAssets = allAssets.length;
+    send({ type: 'init', totalAssets });
+
+    if (totalAssets === 0) {
+      send({ type: 'done', groups: [], totalAssets: 0 });
+      return res.end();
+    }
+
+    // 2. Load ignored pairs
+    const ignoredPairs = await prisma.assetSimilarIgnorePair.findMany();
+    const ignoredSet = new Set(
+      ignoredPairs.map(p => `${Math.min(p.assetAId, p.assetBId)}-${Math.max(p.assetAId, p.assetBId)}`)
+    );
+
+    // 3. Qdrant client
+    const { QdrantClient } = await import('@qdrant/js-client-rest');
+    const qdrantClient = new QdrantClient({
+      url: process.env.QDRANT_URL || 'http://127.0.0.1:6333',
+      apiKey: process.env.QDRANT_API_KEY,
+    });
+    const collection = process.env.QDRANT_COLLECTION || 'stls-multimodal';
+
+    // 4. Union-Find structure
+    const parent = new Map();
+    const rank = new Map();
+
+    function find(x) {
+      if (!parent.has(x)) { parent.set(x, x); rank.set(x, 0); }
+      while (parent.get(x) !== x) {
+        parent.set(x, parent.get(parent.get(x))); // path compression
+        x = parent.get(x);
+      }
+      return x;
+    }
+
+    function union(a, b) {
+      const ra = find(a);
+      const rb = find(b);
+      if (ra === rb) return;
+      const rkA = rank.get(ra);
+      const rkB = rank.get(rb);
+      if (rkA < rkB) { parent.set(ra, rb); }
+      else if (rkA > rkB) { parent.set(rb, ra); }
+      else { parent.set(rb, ra); rank.set(ra, rkA + 1); }
+    }
+
+    // 5. Store similarity scores per pair
+    const pairScores = new Map(); // "minId-maxId" -> score
+
+    // 6. Scan every asset against Qdrant
+    const scoreThreshold = threshold / 100;
+
+    for (let i = 0; i < totalAssets; i++) {
+      const asset = allAssets[i];
+
+      if (i % 10 === 0 || i === totalAssets - 1) {
+        send({ type: 'progress', current: i + 1, totalAssets, assetId: asset.id });
+      }
+
+      try {
+        const results = await qdrantClient.recommend(collection, {
+          positive: [asset.id],
+          limit: 50,
+          score_threshold: scoreThreshold,
+          with_payload: false,
+        });
+
+        if (results && results.length > 0) {
+          for (const r of results) {
+            const matchId = Number(r.id);
+            const aId = Math.min(asset.id, matchId);
+            const bId = Math.max(asset.id, matchId);
+            const pairKey = `${aId}-${bId}`;
+
+            // Skip ignored pairs
+            if (ignoredSet.has(pairKey)) continue;
+
+            // Union the two assets
+            union(asset.id, matchId);
+
+            // Store the best score for this pair
+            const score = Math.round(Number(r.score) * 100);
+            if (!pairScores.has(pairKey) || pairScores.get(pairKey) < score) {
+              pairScores.set(pairKey, score);
+            }
+          }
+        }
+      } catch (_) {
+        // Asset not in Qdrant yet, skip silently
+      }
+    }
+
+    send({ type: 'progress', current: totalAssets, totalAssets, phase: 'clustering' });
+
+    // 7. Build clusters from Union-Find
+    const clusters = new Map(); // rootId -> [assetId, ...]
+    for (const asset of allAssets) {
+      if (!parent.has(asset.id)) continue; // never had any match
+      const root = find(asset.id);
+      if (!clusters.has(root)) clusters.set(root, []);
+      clusters.get(root).push(asset.id);
+    }
+
+    // 8. Build group objects (only clusters with 2+ members)
+    const assetMap = new Map(allAssets.map(a => [a.id, a]));
+
+    // We need account info for display
+    const clusterIds = [];
+    for (const [, members] of clusters) {
+      if (members.length > 1) clusterIds.push(...members);
+    }
+    const uniqueClusterIds = [...new Set(clusterIds)];
+
+    // Batch load accounts
+    let accountMap = new Map();
+    if (uniqueClusterIds.length > 0) {
+      const chunkSize = 500;
+      for (let i = 0; i < uniqueClusterIds.length; i += chunkSize) {
+        const chunk = uniqueClusterIds.slice(i, i + chunkSize);
+        const dbAssets = await prisma.asset.findMany({
+          where: { id: { in: chunk } },
+          select: { id: true, account: { select: { alias: true } } },
+        });
+        for (const a of dbAssets) accountMap.set(a.id, a.account);
+      }
+    }
+
+    const groups = [];
+    for (const [rootId, members] of clusters) {
+      if (members.length < 2) continue;
+
+      // Build items with similarity scores relative to the first member
+      const primaryId = members[0]; // highest ID (sorted desc)
+      const items = members.map(id => {
+        const asset = assetMap.get(id);
+        if (!asset) return null;
+
+        let similarity = 100;
+        if (id !== primaryId) {
+          const aId = Math.min(primaryId, id);
+          const bId = Math.max(primaryId, id);
+          similarity = pairScores.get(`${aId}-${bId}`) || 0;
+
+          // If no direct pair score, find best score to any member in group
+          if (similarity === 0) {
+            for (const otherId of members) {
+              if (otherId === id) continue;
+              const ak = Math.min(otherId, id);
+              const bk = Math.max(otherId, id);
+              const s = pairScores.get(`${ak}-${bk}`) || 0;
+              if (s > similarity) similarity = s;
+            }
+          }
+        }
+
+        return {
+          asset: { ...asset, account: accountMap.get(id) || null },
+          similarity,
+          distance: (similarity / 100).toFixed(4),
+        };
+      }).filter(Boolean);
+
+      if (items.length > 1) {
+        // Sort: highest similarity first (after the primary which is 100%)
+        items.sort((a, b) => b.similarity - a.similarity);
+
+        const bestScore = items.filter(i => i.similarity < 100)
+          .reduce((max, i) => Math.max(max, i.similarity), 0);
+
+        groups.push({
+          id: `group-vis-${rootId}`,
+          signature: `visual-${rootId}`,
+          confidence: bestScore || threshold,
+          items,
+        });
+      }
+    }
+
+    // Sort groups by size descending (biggest duplicates first)
+    groups.sort((a, b) => b.items.length - a.items.length);
+
+    send({ type: 'done', totalGroups: groups.length, totalAssets });
+
+    // Send groups in chunks to avoid huge SSE messages
+    const CHUNK = 50;
+    for (let i = 0; i < groups.length; i += CHUNK) {
+      const chunk = groups.slice(i, i + CHUNK);
+      send({ type: 'groups', groups: chunk, offset: i });
+    }
+
+    send({ type: 'complete' });
+    res.end();
+
+  } catch (error) {
+    console.error('[AI MULTIMODAL] Full Visual Scan Error:', error);
+    send({ type: 'error', message: error.message });
+    res.end();
+  }
+};
