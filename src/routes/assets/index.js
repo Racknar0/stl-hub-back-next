@@ -41,9 +41,6 @@ import {
   generateAssetMetaDescriptions,
   generateAssetMetaTags,
   similarAssets,
-  getAssetImageHashStats,
-  getAssetImageHashBackfillStatus,
-  startAssetImageHashBackfill,
   listIgnoredSimilarSignatures,
   upsertIgnoredSimilarSignature,
   clearIgnoredSimilarSignatures,
@@ -125,9 +122,7 @@ router.post('/randomize-free', randomizeFree)
 // Similaridad por nombre (para uploader)
 router.get('/similar', similarAssets);
 router.post('/similar', similarAssets);
-router.get('/similar/hash/stats', getAssetImageHashStats);
-router.get('/similar/hash/backfill-status', getAssetImageHashBackfillStatus);
-router.post('/similar/hash/backfill', startAssetImageHashBackfill);
+
 router.get('/similar/ignored-signatures', listIgnoredSimilarSignatures);
 router.post('/similar/ignored-signatures', upsertIgnoredSimilarSignature);
 router.delete('/similar/ignored-signatures', clearIgnoredSimilarSignatures);
