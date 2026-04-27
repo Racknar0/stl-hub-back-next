@@ -3031,7 +3031,7 @@ export const uploadImages = async (req, res) => {
                 // Redimensionar a un ancho máximo de 700px manteniendo aspecto y sin ampliar
                 await sharp(f.path)
                     .rotate()
-                    .resize({ width: 700, withoutEnlargement: true })
+                    .resize({ width: 1600, withoutEnlargement: true })
                     .webp({ quality: 80, effort: 6 })
                     .toFile(dest);
             } finally {
@@ -3221,7 +3221,7 @@ export const createAssetFull = async (req, res) => {
                 // Redimensionar a un ancho máximo de 700px manteniendo aspecto y sin ampliar
                 await sharp(f.path)
                     .rotate()
-                    .resize({ width: 700, withoutEnlargement: true })
+                    .resize({ width: 1600, withoutEnlargement: true })
                     .webp({ quality: 80, effort: 6 })
                     .toFile(out);
             } finally {

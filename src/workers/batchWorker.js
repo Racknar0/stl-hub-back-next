@@ -862,7 +862,7 @@ async function extractImages(folderPath, slug) {
     try {
       await sharp(images[i])
         .rotate()
-        .resize({ width: 700, withoutEnlargement: true })
+        .resize({ width: 1600, withoutEnlargement: true })
         .webp({ quality: 80, effort: 6 })
         .toFile(dest)
       saved.push(path.relative(UPLOADS_DIR, dest).replace(/\\/g, '/'))
