@@ -182,4 +182,24 @@ router.post('/undo', (req, res) => {
     }
 });
 
+// Purge SOURCE_DIR (remove all orphan files)
+router.delete('/purge', (req, res) => {
+    try {
+        if (!fs.existsSync(SOURCE_DIR)) {
+            return res.json({ success: true, message: 'La carpeta ya está vacía.' });
+        }
+
+        const entries = fs.readdirSync(SOURCE_DIR);
+        for (const entry of entries) {
+            const entryPath = path.join(SOURCE_DIR, entry);
+            fs.rmSync(entryPath, { recursive: true, force: true });
+        }
+
+        res.json({ success: true, message: 'Carpeta purgada correctamente.' });
+    } catch (error) {
+        console.error('Error purging source directory:', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
 export default router;
