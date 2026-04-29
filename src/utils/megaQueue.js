@@ -41,7 +41,9 @@ export function withMegaLock(fn, label = 'MEGA') {
       if (active === 0) {
         if (pendingLogoutTimer) { clearTimeout(pendingLogoutTimer); pendingLogoutTimer = null; }
         pendingLogoutTimer = setTimeout(() => {
+          pendingLogoutTimer = null;
           if (active === 0) {
+            console.log('[MEGA-AUTO-LOGOUT] Logging out...');
             try {
               const child = spawn('mega-logout', [], { shell: true });
               if (VERBOSE_MEGA) {
@@ -73,4 +75,19 @@ export function megaQueueStatus() {
       ? { label: current.label, startedAt: current.startedAt, heldForMs: Date.now() - current.startedAt, id: current.id }
       : null,
   };
+}
+
+/**
+ * Cancela el timer de auto-logout pendiente.
+ * Llamar antes de procesar un nuevo item en batch para evitar que el
+ * auto-logout mate MEGAcmd mientras se preparan archivos fuera del lock.
+ */
+export function cancelPendingAutoLogout() {
+  if (pendingLogoutTimer) {
+    clearTimeout(pendingLogoutTimer);
+    pendingLogoutTimer = null;
+    if (VERBOSE_MEGA) console.log('[MEGA-LOCK] auto-logout timer cancelled');
+    return true;
+  }
+  return false;
 }

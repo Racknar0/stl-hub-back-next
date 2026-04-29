@@ -18,7 +18,7 @@ import fs from 'fs'
 import path from 'path'
 import { spawn } from 'child_process'
 import sharp from 'sharp'
-import { withMegaLock } from '../utils/megaQueue.js'
+import { withMegaLock, cancelPendingAutoLogout } from '../utils/megaQueue.js'
 import { applyMegaProxy, listMegaProxies } from '../utils/megaProxy.js'
 import { decryptToJson } from '../utils/cryptoUtils.js'
 import {
@@ -1223,6 +1223,8 @@ async function prepareItemForMain(item, updateItem) {
 }
 
 async function processMainQueueItem(item) {
+  // Cancelar auto-logout pendiente para que MEGAcmd no muera durante preparación
+  cancelPendingAutoLogout()
   const updateItem = (data) => prisma.batchImportItem.update({ where: { id: item.id }, data })
 
   await updateItem({
@@ -1345,6 +1347,8 @@ async function processMainQueueItem(item) {
 // ──────────────────── BACKUP PHASE (SOLO REPLICACIÓN) ────────────────────
 
 async function processBackupsForCompletedItem(item) {
+  // Cancelar auto-logout pendiente para que MEGAcmd no muera durante preparación
+  cancelPendingAutoLogout()
   const updateItem = (data) => prisma.batchImportItem.update({ where: { id: item.id }, data })
 
   try {
