@@ -442,7 +442,12 @@ export const listAccounts = async (req, res) => {
     });
 
     const filtered = onlyBatchUploadEligible
-      ? mapped.filter((a) => String(a.type || '').toLowerCase() === 'main' && !a.ignoreInUploadBatch)
+      ? mapped.filter((a) =>
+          String(a.type || '').toLowerCase() === 'main'
+          && !a.ignoreInUploadBatch
+          && String(a.status || '').toUpperCase() === 'CONNECTED'
+          && !a.suspended
+        )
       : mapped;
 
     return res.json(filtered);
