@@ -1,7 +1,7 @@
 import express from 'express';
 import multer from 'multer';
-import { getVectorSyncStatus, syncMissingVectors } from '../controllers/ai.controller.js';
-import { getMultimodalVectorSyncStatus, syncMissingMultimodalVectors, searchByImageHandler, searchByLocalImageHandler, getVisualSimilarGroupsBatch } from '../controllers/aiMultimodal.controller.js';
+import { getVectorSyncStatus, syncMissingVectors } from '../../controllers/ai.controller.js';
+import { getMultimodalVectorSyncStatus, syncMissingMultimodalVectors, searchByImageHandler, searchByLocalImageHandler, getVisualSimilarGroupsBatch } from '../../controllers/aiMultimodal.controller.js';
 
 const router = express.Router();
 const uploadMemory = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });

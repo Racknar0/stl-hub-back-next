@@ -21,3 +21,6 @@ uploads/archives/**
 
 # Ignore proxies
 src/utils/proxies.txt
+
+# Telegram session (credencial sensible)
+data/telegram.session

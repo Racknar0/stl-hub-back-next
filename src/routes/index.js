@@ -15,7 +15,8 @@ import trackRoutes from './track/index.js';
 import adminOpsRoutes from './adminOps/index.js';
 import marketingRoutes from './marketing/index.js';
 import batchImportsRoutes from './batchImports/index.js';
-import aiRoutes from './ai.routes.js';
+import aiRoutes from './ai/index.js';
+import telegramRoutes from './telegram/index.js';
 
 const router = express.Router();
 
@@ -40,5 +41,6 @@ router.use('/track', trackRoutes);
 router.use('/batch-imports', batchImportsRoutes);
 
 router.use('/ai', aiRoutes);
+router.use('/', telegramRoutes);
 
 export default router;

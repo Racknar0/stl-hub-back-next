@@ -3,16 +3,11 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import {
-  createAsset,
-  createAssetFull,
-  enqueueUploadToMega,
   getAsset,
-  getAssetProgress,
   getAssetBySlug,
   listPublishedSlugs,
   listAssets,
   uploadImages,
-  uploadArchiveTemp,
   updateAsset,
   deleteAsset,
   latestAssets,
@@ -22,21 +17,12 @@ import {
   getMegaMenuData,
   randomizeFree,
   listAssetReplicas,
-  getFullProgress,
   restoreAssetFromBackup,
   checkAssetUnique,
-  testUploadSpeed,
-  getStagedStatus,
   getStagedStatusBatch,
   getBatchImportsStagedStatus,
   getScpConfig,
   getScpCommand,
-  getUploadsRoot,
-  holdUploadsActive,
-  holdMegaBatchQuiet,
-  cutMegaBatchToBackups,
-  unstickMegaBatch,
-  removeAssetFromMegaBatch,
   saveSelectedAssetMeta,
   generateAssetMetaDescriptions,
   generateAssetMetaTags,
@@ -59,10 +45,9 @@ const router = Router();
 const UPLOADS_DIR = path.resolve('uploads');
 const TEMP_DIR = path.join(UPLOADS_DIR, 'tmp');
 const IMAGES_DIR = path.join(UPLOADS_DIR, 'images');
-const ARCHIVES_DIR = path.join(UPLOADS_DIR, 'archives');
 
 // Asegurar carpetas
-for (const d of [UPLOADS_DIR, TEMP_DIR, IMAGES_DIR, ARCHIVES_DIR]) {
+for (const d of [UPLOADS_DIR, TEMP_DIR, IMAGES_DIR]) {
   if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
 }
 
@@ -72,22 +57,12 @@ const tsName = (original) => {
   return `${Date.now()}_${base}${ext}`;
 };
 
-// Multer para archivo principal (asset) a tmp
-const archiveStorage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, TEMP_DIR),
-  filename: (_req, file, cb) => cb(null, tsName(file.originalname)),
-});
-const uploadArchive = multer({ storage: archiveStorage });
-
-// Multer para imágenes (legacy: directo a images). Para flujo unificado, usamos tmp.
+// Multer para imágenes a tmp
 const imageStorage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, TEMP_DIR),
   filename: (_req, file, cb) => cb(null, tsName(file.originalname)),
 });
 const uploadImagesMulter = multer({ storage: imageStorage });
-
-// Multer combinado para /upload (todo va a tmp)
-const uploadCombined = multer({ storage: archiveStorage });
 
 // Rutas públicas
 router.get('/latest', latestAssets);
@@ -95,19 +70,14 @@ router.get('/top', mostDownloadedAssets);
 router.get('/menu/mega', getMegaMenuData);
 router.get('/search', searchAssets);
 router.get('/slugs', listPublishedSlugs);
-// Nueva ruta por slug (antes de :id para evitar conflicto con texto que sea numérico)
 router.get('/slug/:slug', getAssetBySlug);
 router.get('/:id(\\d+)', getAsset);
 router.post('/:id/request-download', requestDownload);
-// Reportar link roto (público: no requiere login)
 router.post('/:id/report-broken-link', createBrokenReport);
 
-// IMPORTANTE: Endpoints de progreso deben ser públicos para no desconectar al usuario por expiración del token
-router.get('/:id/progress', getAssetProgress);
+// Réplicas (público para UI de progreso)
 router.get('/:id/replicas', listAssetReplicas);
-router.get('/:id/full-progress', getFullProgress);
-// Estado de archivo staged en uploads/tmp (para flujo SCP) también sin auth
-router.get('/staged-status', getStagedStatus);
+// Staged status para batch imports
 router.get('/staged-status/batch', getStagedStatusBatch);
 router.post('/staged-status/batch', getStagedStatusBatch);
 router.get('/staged-status/batch-imports', getBatchImportsStagedStatus);
@@ -116,10 +86,10 @@ router.post('/staged-status/batch-imports', getBatchImportsStagedStatus);
 //! A partir de aquí, requieren admin
 router.use(requireAuth, requireAdmin)
 
-// Nuevo: randomizar freebies
+// Randomizar freebies
 router.post('/randomize-free', randomizeFree)
 
-// Similaridad por nombre (para uploader)
+// Similaridad por nombre
 router.get('/similar', similarAssets);
 router.post('/similar', similarAssets);
 
@@ -132,48 +102,22 @@ router.post('/similar/ignored-pairs', upsertIgnoredSimilarPairs);
 router.delete('/similar/ignored-pairs', clearIgnoredSimilarPairs);
 router.delete('/similar/ignored-pairs/:assetAId/:assetBId', deleteIgnoredSimilarPair);
 
-// GET /assets?q=texto&pageIndex=0&pageSize=25 para paginación del lado del servidor
+// Assets CRUD
 router.get('/', listAssets);
-// Validación pre-flight de unicidad de slug/carpeta
 router.get('/check-unique', checkAssetUnique);
-// Nuevo: configuración SCP del servidor (seguro, sin password)
+// SCP (usado por batch upload)
 router.get('/scp-config', getScpConfig);
 router.post('/scp-command', getScpCommand);
-router.get('/uploads-root', getUploadsRoot);
-// Nuevo: mantener lock uploads-active durante sesiones largas (modo SCP / rellenar cola)
-router.post('/hold-uploads-active', holdUploadsActive);
-// Nuevo: mantener quiet del batch por cuenta MAIN (evita pasar a backups mientras se sigue encolando por SCP)
-router.post('/hold-mega-batch-quiet', holdMegaBatchQuiet);
-// Nuevo: cortar cola (pasar a BACKUP y descartar MAIN pendientes)
-router.post('/cut-mega-batch-to-backups', cutMegaBatchToBackups);
-// Nuevo: desatascar (logout + rotar proxy) sin perder el orden
-router.post('/unstick-mega-batch', unstickMegaBatch);
-// Nuevo: eliminar un asset de la cola/batch en caliente
-router.post('/remove-from-mega-batch', removeAssetFromMegaBatch);
+// Meta AI
 router.post('/meta/save-selected', saveSelectedAssetMeta);
 router.post('/meta/generate-descriptions', generateAssetMetaDescriptions);
 router.post('/meta/generate-tags', generateAssetMetaTags);
 router.put('/:id', updateAsset);
 router.delete('/:id', deleteAsset);
 
-// Flujo unificado: archivo + imágenes en una sola llamada
-router.post('/upload', uploadCombined.fields([
-  { name: 'archive', maxCount: 1 },
-  { name: 'images', maxCount: 20 },
-]), createAssetFull);
-
-// Rutas legacy (si se desea usar por pasos)
-router.post('/upload-archive', uploadArchive.single('archive'), uploadArchiveTemp);
+// Imágenes (usado en edición de assets)
 router.post('/:assetId/images', uploadImagesMulter.array('images', 20), uploadImages);
-router.post('/', createAsset);
 
-// Encolar manualmente (si no se usó flujo unificado)
-router.post('/:id/enqueue', enqueueUploadToMega);
-
-// Test endpoint para medir velocidad pura de upload
-router.post('/test-upload-speed', testUploadSpeed);
-
-router.post('/:assetId/restore-link', restoreAssetFromBackup); // alias
-
+router.post('/:assetId/restore-link', restoreAssetFromBackup);
 
 export default router;
