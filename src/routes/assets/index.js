@@ -26,11 +26,6 @@ import {
   saveSelectedAssetMeta,
   generateAssetMetaDescriptions,
   generateAssetMetaTags,
-  similarAssets,
-  listIgnoredSimilarSignatures,
-  upsertIgnoredSimilarSignature,
-  clearIgnoredSimilarSignatures,
-  deleteIgnoredSimilarSignature,
   listIgnoredSimilarPairs,
   upsertIgnoredSimilarPairs,
   clearIgnoredSimilarPairs,
@@ -89,14 +84,7 @@ router.use(requireAuth, requireAdmin)
 // Randomizar freebies
 router.post('/randomize-free', randomizeFree)
 
-// Similaridad por nombre
-router.get('/similar', similarAssets);
-router.post('/similar', similarAssets);
-
-router.get('/similar/ignored-signatures', listIgnoredSimilarSignatures);
-router.post('/similar/ignored-signatures', upsertIgnoredSimilarSignature);
-router.delete('/similar/ignored-signatures', clearIgnoredSimilarSignatures);
-router.delete('/similar/ignored-signatures/:signature', deleteIgnoredSimilarSignature);
+// Pares de similares ignorados (usado por VisualSimilarTab)
 router.get('/similar/ignored-pairs', listIgnoredSimilarPairs);
 router.post('/similar/ignored-pairs', upsertIgnoredSimilarPairs);
 router.delete('/similar/ignored-pairs', clearIgnoredSimilarPairs);
