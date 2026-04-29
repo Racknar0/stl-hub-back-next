@@ -35,6 +35,7 @@ import qdrantMultimodalService from '../services/qdrantMultimodal.service.js'
 const prisma = new PrismaClient()
 const UPLOADS_DIR  = path.resolve('uploads')
 const BATCH_DIR    = path.join(UPLOADS_DIR, 'batch_imports')
+const TELEGRAM_DIR = path.join(UPLOADS_DIR, 'telegram_downloads_organized')
 const ARCHIVES_DIR = path.join(UPLOADS_DIR, 'archives')
 const IMAGES_DIR   = path.join(UPLOADS_DIR, 'images')
 const STAGING_DIR  = path.join(UPLOADS_DIR, 'batch_staging')
@@ -1111,7 +1112,12 @@ async function createAssetRecord({ slug, title, titleEn, description, descriptio
 
 async function prepareItemForMain(item, updateItem) {
   const batchFolder = await prisma.batchImport.findUnique({ where: { id: item.batchId } })
-  const folderPath = path.join(BATCH_DIR, batchFolder?.folderName || '', item.folderName)
+  // Resolver ruta: buscar primero en batch_imports (SCP), luego en telegram_downloads_organized
+  let folderPath = path.join(BATCH_DIR, batchFolder?.folderName || '', item.folderName)
+  if (!fs.existsSync(folderPath)) {
+    const altPath = path.join(TELEGRAM_DIR, batchFolder?.folderName || '', item.folderName)
+    if (fs.existsSync(altPath)) folderPath = altPath
+  }
   const friendlyName = item.title || item.folderName || `item-${item.id}`
   const titleForSlug = ensurePrefixedTitle(friendlyName)
   const baseSlug = safeSlugLikeUploader(titleForSlug) || slugify(item.folderName || friendlyName)

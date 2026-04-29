@@ -9,6 +9,7 @@ import { callGoogleBatchScan } from '../helpers/batchAi/callGoogleBatchScan.js';
 const prisma = new PrismaClient();
 const UPLOADS_DIR = path.resolve('uploads');
 const BATCH_DIR = path.join(UPLOADS_DIR, 'batch_imports');
+const TELEGRAM_DIR = path.join(UPLOADS_DIR, 'telegram_downloads_organized');
 const ARCHIVE_EXTS = ['.rar', '.zip', '.7z', '.tar', '.gz', '.tgz'];
 const TITLE_PREFIX_RE = /^\s*STL\s*-\s*/i;
 const MAX_ACCOUNT_UPLOAD_MB = 18 * 1024;
@@ -691,6 +692,12 @@ function buildAiScanItemFromBatchItem(item) {
 export const scanLocalDirectory = async (req, res) => {
   const extractedArchivesThisRun = [];
   let stopScanWatchdog = () => {};
+
+  // Determinar directorio fuente: 'telegram' usa la carpeta del Organizer, default usa batch_imports (SCP)
+  const source = String(req?.query?.source || req?.body?.source || '').toLowerCase();
+  const isTelegramSource = source === 'telegram';
+  const EFFECTIVE_DIR = isTelegramSource ? TELEGRAM_DIR : BATCH_DIR;
+
   try {
     if (String(batchScanStatus?.status || '').toLowerCase() === 'running') {
       return res.status(409).json({
@@ -738,14 +745,14 @@ export const scanLocalDirectory = async (req, res) => {
       try { clearInterval(watchdogId); } catch {}
     };
 
-    if (!fs.existsSync(BATCH_DIR)) {
-      fs.mkdirSync(BATCH_DIR, { recursive: true });
+    if (!fs.existsSync(EFFECTIVE_DIR)) {
+      fs.mkdirSync(EFFECTIVE_DIR, { recursive: true });
     }
 
     setBatchScanStatus(
       {
         phase: 'initializing',
-        message: 'Directorio batch_imports preparado.',
+        message: isTelegramSource ? 'Directorio telegram_downloads_organized preparado.' : 'Directorio batch_imports preparado.',
         current: 1,
         total: 1,
       },
@@ -753,7 +760,7 @@ export const scanLocalDirectory = async (req, res) => {
     );
 
     // ─── STEP 0: Auto-descomprimir archivos sueltos en batch_imports/ ───
-    const topEntries = fs.readdirSync(BATCH_DIR, { withFileTypes: true });
+    const topEntries = fs.readdirSync(EFFECTIVE_DIR, { withFileTypes: true });
     const topArchives = topEntries
       .filter(e => e.isFile() && ARCHIVE_EXTS.includes(path.extname(e.name).toLowerCase()));
 
@@ -772,7 +779,7 @@ export const scanLocalDirectory = async (req, res) => {
       { log: true }
     );
 
-    console.info(`[BATCH SCAN][START] batchDir=${BATCH_DIR} archives=${topArchives.length}`);
+    console.info(`[BATCH SCAN][START] batchDir=${EFFECTIVE_DIR} source=${isTelegramSource ? 'telegram' : 'scp'} archives=${topArchives.length}`);
 
     let archivesDone = 0;
     const rawExtractTimeout = Number(process.env.BATCH_SCAN_EXTRACT_TIMEOUT_MS || 0);
@@ -780,8 +787,8 @@ export const scanLocalDirectory = async (req, res) => {
 
     for (const arc of topArchives) {
       const arcStartedAt = Date.now();
-      const arcPath = path.join(BATCH_DIR, arc.name);
-      const extractDir = path.join(BATCH_DIR, path.parse(arc.name).name);
+      const arcPath = path.join(EFFECTIVE_DIR, arc.name);
+      const extractDir = path.join(EFFECTIVE_DIR, path.parse(arc.name).name);
       const extractDirExistedBefore = fs.existsSync(extractDir);
       const extractDirHasEntries = extractDirExistedBefore && directoryHasEntries(extractDir);
       let arcSizeMB = 0;
@@ -959,12 +966,12 @@ export const scanLocalDirectory = async (req, res) => {
     }
 
     // ─── STEP 1: Leer carpetas resultantes ───
-    const entries = fs.readdirSync(BATCH_DIR, { withFileTypes: true });
+    const entries = fs.readdirSync(EFFECTIVE_DIR, { withFileTypes: true });
     const folders = entries.filter(e => e.isDirectory()).map(e => e.name);
     console.info(`[BATCH SCAN][DISCOVERY] carpetas detectadas=${folders.length}`);
 
     const folderPlans = folders.map((folder) => {
-      const batchPath = path.join(BATCH_DIR, folder);
+      const batchPath = path.join(EFFECTIVE_DIR, folder);
       let subEntries = [];
       try {
         subEntries = fs.readdirSync(batchPath, { withFileTypes: true });
@@ -995,7 +1002,9 @@ export const scanLocalDirectory = async (req, res) => {
 
     if (folders.length === 0) {
       completeBatchScanStatus({
-        message: 'No se encontraron carpetas en batch_imports.',
+        message: isTelegramSource
+          ? 'No se encontraron carpetas en telegram_downloads_organized.'
+          : 'No se encontraron carpetas en batch_imports.',
         current: 1,
         total: 1,
         percent: 100,
@@ -1794,15 +1803,21 @@ export const deleteBatchItem = async (req, res) => {
 
     if (!item) return res.status(404).json({ success: false, message: 'Item no encontrado' });
 
-    // Borrar carpeta del disco
-    const folderPath = path.join(BATCH_DIR, item.batch.folderName, item.folderName);
-    try {
-      if (fs.existsSync(folderPath)) {
-        fs.rmSync(folderPath, { recursive: true, force: true });
-        console.log(`[BATCH DELETE] Carpeta borrada: ${folderPath}`);
+    // Borrar carpeta del disco (buscar en ambas fuentes: SCP y Telegram Organizer)
+    const candidates = [
+      path.join(BATCH_DIR, item.batch.folderName, item.folderName),
+      path.join(TELEGRAM_DIR, item.batch.folderName, item.folderName),
+    ];
+    for (const folderPath of candidates) {
+      try {
+        if (fs.existsSync(folderPath)) {
+          fs.rmSync(folderPath, { recursive: true, force: true });
+          console.log(`[BATCH DELETE] Carpeta borrada: ${folderPath}`);
+          break;
+        }
+      } catch (e) {
+        console.warn(`[BATCH DELETE] Warn al borrar carpeta: ${e.message}`);
       }
-    } catch (e) {
-      console.warn(`[BATCH DELETE] Warn al borrar carpeta: ${e.message}`);
     }
 
     // Borrar de BD
