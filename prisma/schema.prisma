@@ -637,3 +637,13 @@ enum BatchImportStatus {
   COMPLETED
   FAILED
 }
+
+// Global configurations editable from the dashboard
+model SystemSetting {
+  key         String   @id
+  value       String   @db.Text
+  description String?  @db.Text
+  updatedAt   DateTime @updatedAt
+
+  @@map("systemsetting")
+}

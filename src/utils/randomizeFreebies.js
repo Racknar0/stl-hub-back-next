@@ -25,13 +25,23 @@ export async function randomizeFreebies({
   prisma,
   where = { status: 'PUBLISHED' },
 } = {}) {
-  const n = parseCount(count);
-  const effectiveN = n == null ? 0 : n;
-
   const client = prisma || new PrismaClient();
   const ownsClient = !prisma;
 
   try {
+    let dbCount = null;
+    const setting = await client.systemSetting.findUnique({ where: { key: 'FREEBIES_DAILY_COUNT' } });
+    if (setting && setting.value) {
+      dbCount = parseCount(setting.value);
+    }
+
+    let effectiveN = 0;
+    if (dbCount != null) {
+      effectiveN = dbCount;
+    } else {
+      const n = parseCount(count);
+      effectiveN = n == null ? 0 : n;
+    }
     const total = await client.asset.count({ where });
     if (total === 0) return { total: 0, selected: 0, count: effectiveN };
 
