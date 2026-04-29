@@ -312,6 +312,22 @@ class TelegramDownloaderService {
         return name;
     }
 
+    isFileReferenceExpiredError(err) {
+        const msg = String(err?.message || '');
+        const errorMessage = String(err?.errorMessage || '');
+        return (
+            errorMessage === 'FILE_REFERENCE_EXPIRED' ||
+            msg.includes('FILE_REFERENCE_EXPIRED')
+        );
+    }
+
+    async refetchMessageById(channelName, msgId) {
+        const id = Number(msgId);
+        if (!Number.isFinite(id) || id <= 0) return null;
+        const res = await this.client.getMessages(channelName, { ids: id });
+        return Array.isArray(res) && res.length ? res[0] : null;
+    }
+
     async parallelDownloadToFile(client, fileLocation, { dcId, fileSizeBytes, outputFile, workers, partSizeKb, progressCallback }) {
         const partSize = Math.floor(partSizeKb * 1024);
         if (partSize % 4096 !== 0) throw new Error('partSizeKb debe ser divisible por 4KB');
@@ -537,16 +553,16 @@ class TelegramDownloaderService {
                     });
                 };
 
-                const isBigDocument = Boolean(item.msg?.media?.document) && Number(item.msg.media.document.size || 0) >= FAST_DOWNLOAD_MIN_BYTES;
+                const downloadOnce = async (msgToDownload) => {
+                    const isBigDocument = Boolean(msgToDownload?.media?.document) && Number(msgToDownload.media.document.size || 0) >= FAST_DOWNLOAD_MIN_BYTES;
 
-                try {
                     if (isBigDocument) {
                         let info;
-                        try { info = getFileInfo(item.msg.media); } catch (e) { info = undefined; }
+                        try { info = getFileInfo(msgToDownload.media); } catch (e) { info = undefined; }
 
                         if (info?.location && info?.dcId) {
                             const sizeBig = info.size;
-                            const size = sizeBig ? Number(sizeBig.toString()) : Number(item.msg.media.document.size || 0);
+                            const size = sizeBig ? Number(sizeBig.toString()) : Number(msgToDownload.media.document.size || 0);
                             await this.parallelDownloadToFile(this.client, info.location, {
                                 dcId: info.dcId,
                                 fileSizeBytes: size,
@@ -556,10 +572,10 @@ class TelegramDownloaderService {
                                 progressCallback,
                             });
                         } else {
-                            await this.client.downloadMedia(item.msg, { outputFile: tempPath, progressCallback });
+                            await this.client.downloadMedia(msgToDownload, { outputFile: tempPath, progressCallback });
                         }
                     } else {
-                        await this.client.downloadMedia(item.msg, { outputFile: tempPath, progressCallback });
+                        await this.client.downloadMedia(msgToDownload, { outputFile: tempPath, progressCallback });
                     }
 
                     if (!this.shouldCancel) {
@@ -568,7 +584,28 @@ class TelegramDownloaderService {
                         this.saveLastDownload(channelName, item.msg.id, finalFileName);
                         this.emitProgress({ type: 'file_done', fileName: finalFileName });
                     }
+                };
+
+                try {
+                    await downloadOnce(item.msg);
                 } catch (err) {
+                    if (this.isFileReferenceExpiredError(err)) {
+                        this.emitProgress({ type: 'info', message: `Referencia expirada en ${item.msg.id}. Reintentando...` });
+                        try {
+                            const fresh = await this.refetchMessageById(channelName, item.msg.id);
+                            if (fresh?.media) {
+                                item.msg = fresh;
+                                if (fs.existsSync(tempPath)) {
+                                    try { fs.unlinkSync(tempPath); } catch {}
+                                }
+                                await downloadOnce(fresh);
+                                continue;
+                            }
+                        } catch (retryErr) {
+                            err = retryErr;
+                        }
+                    }
+                    
                     this.emitProgress({ type: 'error', message: `Error en ${item.msg.id}: ${err.message}` });
                     if (fs.existsSync(tempPath)) {
                         try { fs.unlinkSync(tempPath); } catch {}
