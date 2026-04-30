@@ -1684,6 +1684,417 @@ export const syncMainToBackups = async (req, res) => {
   }
 };
 
+// ═══════════════════════════════════════════════════════════════════════
+// ALIGNMENT AUDIT — Verificar / Sincronizar / Limpiar Main ↔ Backup
+// ═══════════════════════════════════════════════════════════════════════
+
+/**
+ * POST /accounts/:id/alignment-audit
+ * Compara assets de la Main (BD) vs carpetas reales en el Backup (MEGA).
+ */
+export const alignmentAudit = async (req, res) => {
+  const mainId = Number(req.params.id);
+  try {
+    if (!mainId) return res.status(400).json({ message: 'Invalid id' });
+    const main = await prisma.megaAccount.findUnique({
+      where: { id: mainId },
+      include: {
+        credentials: true,
+        backups: { include: { backupAccount: { include: { credentials: true } } } },
+      },
+    });
+    if (!main) return res.status(404).json({ message: 'Cuenta main no encontrada' });
+    if (main.type !== 'main') return res.status(400).json({ message: 'La cuenta no es de tipo main' });
+
+    const backupAccount = (main.backups || [])
+      .map(b => b.backupAccount)
+      .find(a => a && a.type === 'backup' && a.credentials);
+
+    if (!backupAccount) {
+      return res.status(400).json({ message: 'La cuenta main no tiene backup vinculado con credenciales' });
+    }
+
+    // Assets publicados de esta main
+    const assets = await prisma.asset.findMany({
+      where: { accountId: mainId, status: 'PUBLISHED' },
+      select: { id: true, slug: true, archiveName: true, title: true, archiveSizeB: true },
+    });
+
+    console.log(`[ALIGNMENT][AUDIT] main=${mainId} backup=${backupAccount.id} assets=${assets.length}`);
+
+    const payloadB = decryptToJson(backupAccount.credentials.encData, backupAccount.credentials.encIv, backupAccount.credentials.encTag);
+    const baseB = (backupAccount.baseFolder || '/').replaceAll('\\', '/');
+
+    // Hacer mega-ls en la raíz del backup para listar TODAS las carpetas
+    let backupFolders = [];
+    await withMegaLock(async () => {
+      try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
+
+      if (payloadB?.type === 'session' && payloadB.session) {
+        await runCmdWithTimeout('mega-login', [payloadB.session], MEGA_LOGIN_TIMEOUT_MS);
+      } else if (payloadB?.username && payloadB?.password) {
+        await runCmdWithTimeout('mega-login', [payloadB.username, payloadB.password], MEGA_LOGIN_TIMEOUT_MS);
+      } else {
+        throw new Error('Credenciales backup inválidas');
+      }
+
+      try { await runCmdWithTimeout('mega-mkdir', ['-p', baseB], MEGA_MKDIR_TIMEOUT_MS); } catch {}
+
+      try {
+        const ls = await runCmdWithTimeout('mega-ls', [baseB], 60000);
+        backupFolders = (ls.out || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+      } catch (e) {
+        console.warn(`[ALIGNMENT][AUDIT] Error listando backup: ${e.message}`);
+      }
+
+      try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
+    }, `ALIGN-AUDIT-${backupAccount.id}`);
+
+    // Comparar: assets BD vs carpetas en backup
+    const assetSlugs = new Set(assets.map(a => a.slug));
+    const backupSet = new Set(backupFolders);
+
+    const synced = [];
+    const missingInBackup = [];
+    const orphansInBackup = [];
+
+    for (const asset of assets) {
+      if (backupSet.has(asset.slug)) {
+        synced.push({ assetId: asset.id, slug: asset.slug, title: asset.title });
+      } else {
+        const sizeMB = asset.archiveSizeB ? Number(Number(asset.archiveSizeB) / (1024 * 1024)).toFixed(2) : '0';
+        missingInBackup.push({
+          assetId: asset.id,
+          slug: asset.slug,
+          title: asset.title,
+          archiveName: asset.archiveName,
+          sizeMB: Number(sizeMB),
+        });
+      }
+    }
+
+    for (const folder of backupFolders) {
+      if (!assetSlugs.has(folder)) {
+        orphansInBackup.push({ folder });
+      }
+    }
+
+    console.log(`[ALIGNMENT][AUDIT][DONE] main=${mainId} synced=${synced.length} missing=${missingInBackup.length} orphans=${orphansInBackup.length}`);
+
+    return res.json({
+      ok: true,
+      mainId,
+      backupId: backupAccount.id,
+      backupAlias: backupAccount.alias,
+      totalAssetsInBD: assets.length,
+      totalFoldersInBackup: backupFolders.length,
+      synced,
+      missingInBackup,
+      orphansInBackup,
+    });
+  } catch (e) {
+    console.error('[ALIGNMENT][AUDIT][ERROR]', e);
+    return res.status(500).json({ message: 'Error en auditoría de alineación', error: e.message });
+  }
+};
+
+/**
+ * POST /accounts/:id/alignment-sync
+ * Sincroniza assets seleccionados: descarga de Main MEGA → sube a Backup MEGA.
+ * Body: { slugs: ['slug-1', 'slug-2'] }
+ */
+export const alignmentSync = async (req, res) => {
+  const mainId = Number(req.params.id);
+  try {
+    if (!mainId) return res.status(400).json({ message: 'Invalid id' });
+    const { slugs } = req.body || {};
+    if (!Array.isArray(slugs) || !slugs.length) {
+      return res.status(400).json({ message: 'slugs requerido (array de slugs a sincronizar)' });
+    }
+    const slugSet = new Set(slugs.map(s => String(s).trim()).filter(Boolean));
+    if (!slugSet.size) return res.status(400).json({ message: 'slugs vacío' });
+
+    const main = await prisma.megaAccount.findUnique({
+      where: { id: mainId },
+      include: {
+        credentials: true,
+        backups: { include: { backupAccount: { include: { credentials: true } } } },
+      },
+    });
+    if (!main) return res.status(404).json({ message: 'Cuenta main no encontrada' });
+    if (main.type !== 'main') return res.status(400).json({ message: 'La cuenta no es de tipo main' });
+
+    const backupAccount = (main.backups || [])
+      .map(b => b.backupAccount)
+      .find(a => a && a.type === 'backup' && a.credentials);
+    if (!backupAccount) return res.status(400).json({ message: 'Sin backup vinculado' });
+
+    const assets = await prisma.asset.findMany({
+      where: { accountId: mainId, slug: { in: Array.from(slugSet) }, status: 'PUBLISHED' },
+      select: { id: true, slug: true, archiveName: true },
+    });
+    if (!assets.length) return res.status(400).json({ message: 'No se encontraron assets publicados con esos slugs' });
+
+    console.log(`[ALIGNMENT][SYNC] main=${mainId} backup=${backupAccount.id} assets=${assets.length}`);
+
+    const proxies = listMegaProxies({});
+    if (!proxies.length) return res.status(500).json({ message: 'Sin proxies válidos' });
+    let proxyIndex = 0;
+    const getProxyIndex = () => proxyIndex;
+    const setProxyIndex = (v) => { proxyIndex = v; };
+
+    const SYNC_DIR = path.join(path.resolve('uploads'), 'sync-cache', `align-${mainId}`);
+    fs.mkdirSync(SYNC_DIR, { recursive: true });
+
+    const payloadMain = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag);
+    const payloadB = decryptToJson(backupAccount.credentials.encData, backupAccount.credentials.encIv, backupAccount.credentials.encTag);
+    const baseMain = (main.baseFolder || '/').replaceAll('\\', '/');
+    const baseB = (backupAccount.baseFolder || '/').replaceAll('\\', '/');
+
+    const results = [];
+    let okCount = 0;
+    let failCount = 0;
+
+    // FASE 1: Descargar desde Main MEGA
+    console.log(`[ALIGNMENT][SYNC][DOWNLOAD] Descargando ${assets.length} assets desde main ${mainId}...`);
+    await withMegaLock(async () => {
+      const ctxMain = `align-dl main=${mainId}`;
+      const reloginMain = async () => {
+        try { await runCmd('mega-logout', []); } catch {}
+        if (payloadMain?.type === 'session' && payloadMain.session) await runCmd('mega-login', [payloadMain.session]);
+        else if (payloadMain?.username && payloadMain?.password) await runCmd('mega-login', [payloadMain.username, payloadMain.password]);
+        else throw new Error('Credenciales main inválidas');
+      };
+
+      await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctxMain);
+      await reloginMain();
+
+      for (let i = 0; i < assets.length; i++) {
+        const a = assets[i];
+        if (!a.archiveName) continue;
+        const fileName = getArchiveFileName(a.archiveName);
+        const remoteFile = path.posix.join(baseMain, a.slug, fileName);
+        const slugDir = path.join(SYNC_DIR, a.slug);
+        fs.mkdirSync(slugDir, { recursive: true });
+        const destLocal = path.join(slugDir, fileName);
+
+        console.log(`[ALIGNMENT][SYNC][DL] ${i + 1}/${assets.length} slug=${a.slug} remote=${remoteFile}`);
+        try {
+          await megaGetWithStallRetry({
+            remoteFile,
+            destLocal,
+            ctx: `${ctxMain} asset=${a.id} slug=${a.slug}`,
+            proxies,
+            getProxyIndex,
+            setProxyIndex,
+            relogin: reloginMain,
+          });
+          console.log(`[ALIGNMENT][SYNC][DL][OK] ${i + 1}/${assets.length} slug=${a.slug}`);
+        } catch (e) {
+          console.error(`[ALIGNMENT][SYNC][DL][FAIL] slug=${a.slug}: ${e.message}`);
+          results.push({ slug: a.slug, assetId: a.id, status: 'DOWNLOAD_FAILED', error: e.message });
+          failCount++;
+        }
+      }
+      try { await runCmd('mega-logout', []); } catch {}
+    }, `ALIGN-DL-${mainId}`);
+
+    // FASE 2: Subir a Backup MEGA
+    const toUpload = assets.filter(a => !results.find(r => r.slug === a.slug));
+    if (toUpload.length > 0) {
+      console.log(`[ALIGNMENT][SYNC][UPLOAD] Subiendo ${toUpload.length} assets a backup ${backupAccount.id}...`);
+      await withMegaLock(async () => {
+        const ctxB = `align-up backup=${backupAccount.id}`;
+        const reloginB = async () => {
+          try { await runCmd('mega-logout', []); } catch {}
+          if (payloadB?.type === 'session' && payloadB.session) await runCmd('mega-login', [payloadB.session]);
+          else if (payloadB?.username && payloadB?.password) await runCmd('mega-login', [payloadB.username, payloadB.password]);
+          else throw new Error('Credenciales backup inválidas');
+        };
+
+        await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctxB);
+        await reloginB();
+
+        const safeMkdir = async remotePath => {
+          try { await runCmd('mega-mkdir', ['-p', remotePath]); }
+          catch (e) {
+            const msg = String(e.message || '');
+            if (!/54/.test(msg) && !/exists/i.test(msg)) throw e;
+          }
+        };
+        await safeMkdir(baseB);
+
+        for (let i = 0; i < toUpload.length; i++) {
+          const a = toUpload[i];
+          if (!a.archiveName) continue;
+          const fileName = getArchiveFileName(a.archiveName);
+          const localPath = path.join(SYNC_DIR, a.slug, fileName);
+          const remoteFolder = path.posix.join(baseB, a.slug);
+
+          if (!fs.existsSync(localPath)) {
+            console.warn(`[ALIGNMENT][SYNC][UPLOAD][SKIP] archivo no encontrado: ${localPath}`);
+            results.push({ slug: a.slug, assetId: a.id, status: 'TEMP_MISSING' });
+            failCount++;
+            continue;
+          }
+
+          await safeMkdir(remoteFolder);
+          console.log(`[ALIGNMENT][SYNC][UP] ${i + 1}/${toUpload.length} slug=${a.slug} -> backup ${backupAccount.id}`);
+          try {
+            await megaPutWithStallRetry({
+              localPath,
+              remoteFolderOrFile: remoteFolder,
+              ctx: `${ctxB} asset=${a.id} slug=${a.slug}`,
+              proxies,
+              getProxyIndex,
+              setProxyIndex,
+              relogin: reloginB,
+            });
+            console.log(`[ALIGNMENT][SYNC][UP][OK] ${i + 1}/${toUpload.length} slug=${a.slug}`);
+
+            // Crear/actualizar assetReplica
+            const existing = await prisma.assetReplica.findFirst({
+              where: { assetId: a.id, accountId: backupAccount.id },
+            });
+            if (!existing) {
+              await prisma.assetReplica.create({
+                data: {
+                  assetId: a.id,
+                  accountId: backupAccount.id,
+                  status: 'COMPLETED',
+                  remotePath: remoteFolder,
+                  startedAt: new Date(),
+                  finishedAt: new Date(),
+                },
+              });
+            } else {
+              await prisma.assetReplica.update({
+                where: { id: existing.id },
+                data: { status: 'COMPLETED', remotePath: remoteFolder, finishedAt: new Date() },
+              });
+            }
+
+            results.push({ slug: a.slug, assetId: a.id, status: 'OK' });
+            okCount++;
+          } catch (e) {
+            console.error(`[ALIGNMENT][SYNC][UP][FAIL] slug=${a.slug}: ${e.message}`);
+            results.push({ slug: a.slug, assetId: a.id, status: 'UPLOAD_FAILED', error: e.message });
+            failCount++;
+          }
+        }
+        try { await runCmd('mega-logout', []); } catch {}
+      }, `ALIGN-UP-${backupAccount.id}`);
+    }
+
+    // Limpieza cache
+    try {
+      if (fs.existsSync(SYNC_DIR)) {
+        fs.rmSync(SYNC_DIR, { recursive: true, force: true });
+        console.log(`[ALIGNMENT][SYNC] Cache temporal eliminado: ${SYNC_DIR}`);
+      }
+    } catch (e) {
+      console.warn(`[ALIGNMENT][SYNC] Error limpiando cache: ${e.message}`);
+    }
+
+    console.log(`[ALIGNMENT][SYNC][DONE] main=${mainId} ok=${okCount} fail=${failCount}`);
+    return res.json({ ok: true, okCount, failCount, results });
+  } catch (e) {
+    console.error('[ALIGNMENT][SYNC][ERROR]', e);
+    return res.status(500).json({ message: 'Error sincronizando alineación', error: e.message });
+  }
+};
+
+/**
+ * POST /accounts/:id/alignment-cleanup
+ * Elimina carpetas huérfanas del Backup MEGA (que no corresponden a ningún asset).
+ * Body: { folders: ['carpeta-1', 'carpeta-2'] }
+ */
+export const alignmentCleanup = async (req, res) => {
+  const mainId = Number(req.params.id);
+  try {
+    if (!mainId) return res.status(400).json({ message: 'Invalid id' });
+    const { folders } = req.body || {};
+    if (!Array.isArray(folders) || !folders.length) {
+      return res.status(400).json({ message: 'folders requerido (array de nombres de carpetas a eliminar)' });
+    }
+
+    const main = await prisma.megaAccount.findUnique({
+      where: { id: mainId },
+      include: {
+        credentials: true,
+        backups: { include: { backupAccount: { include: { credentials: true } } } },
+      },
+    });
+    if (!main) return res.status(404).json({ message: 'Cuenta main no encontrada' });
+    if (main.type !== 'main') return res.status(400).json({ message: 'La cuenta no es de tipo main' });
+
+    const backupAccount = (main.backups || [])
+      .map(b => b.backupAccount)
+      .find(a => a && a.type === 'backup' && a.credentials);
+    if (!backupAccount) return res.status(400).json({ message: 'Sin backup vinculado' });
+
+    // Validar que NINGUNA de las carpetas corresponda a un asset real
+    const existingAssets = await prisma.asset.findMany({
+      where: { accountId: mainId, slug: { in: folders } },
+      select: { slug: true },
+    });
+    const protectedSlugs = new Set(existingAssets.map(a => a.slug));
+    const safeToDelete = folders.filter(f => !protectedSlugs.has(f));
+    const blocked = folders.filter(f => protectedSlugs.has(f));
+
+    if (blocked.length > 0) {
+      console.warn(`[ALIGNMENT][CLEANUP] ${blocked.length} carpetas bloqueadas por tener assets asociados: ${blocked.join(', ')}`);
+    }
+
+    if (!safeToDelete.length) {
+      return res.json({ ok: true, deleted: 0, blocked: blocked.length, message: 'Todas las carpetas tienen assets asociados, nada fue eliminado.' });
+    }
+
+    console.log(`[ALIGNMENT][CLEANUP] main=${mainId} backup=${backupAccount.id} folders=${safeToDelete.length}`);
+
+    const payloadB = decryptToJson(backupAccount.credentials.encData, backupAccount.credentials.encIv, backupAccount.credentials.encTag);
+    const baseB = (backupAccount.baseFolder || '/').replaceAll('\\', '/');
+
+    const results = [];
+    let deletedCount = 0;
+
+    await withMegaLock(async () => {
+      try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
+
+      if (payloadB?.type === 'session' && payloadB.session) {
+        await runCmdWithTimeout('mega-login', [payloadB.session], MEGA_LOGIN_TIMEOUT_MS);
+      } else if (payloadB?.username && payloadB?.password) {
+        await runCmdWithTimeout('mega-login', [payloadB.username, payloadB.password], MEGA_LOGIN_TIMEOUT_MS);
+      } else {
+        throw new Error('Credenciales backup inválidas');
+      }
+
+      for (let i = 0; i < safeToDelete.length; i++) {
+        const folder = safeToDelete[i];
+        const remotePath = path.posix.join(baseB, folder);
+        console.log(`[ALIGNMENT][CLEANUP] ${i + 1}/${safeToDelete.length} Eliminando: ${remotePath}`);
+        try {
+          await runCmdWithTimeout('mega-rm', ['-rf', remotePath], 30000);
+          console.log(`[ALIGNMENT][CLEANUP][OK] ${folder}`);
+          results.push({ folder, status: 'DELETED' });
+          deletedCount++;
+        } catch (e) {
+          console.warn(`[ALIGNMENT][CLEANUP][FAIL] ${folder}: ${e.message}`);
+          results.push({ folder, status: 'FAILED', error: e.message });
+        }
+      }
+
+      try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
+    }, `ALIGN-CLEANUP-${backupAccount.id}`);
+
+    console.log(`[ALIGNMENT][CLEANUP][DONE] deleted=${deletedCount} failed=${safeToDelete.length - deletedCount} blocked=${blocked.length}`);
+    return res.json({ ok: true, deleted: deletedCount, failed: safeToDelete.length - deletedCount, blocked: blocked.length, results });
+  } catch (e) {
+    console.error('[ALIGNMENT][CLEANUP][ERROR]', e);
+    return res.status(500).json({ message: 'Error eliminando huérfanos', error: e.message });
+  }
+};
+
 // (Añadir cerca de otras constantes)
 const MEGA_EXPORT_ATTEMPTS = Number(process.env.MEGA_EXPORT_ATTEMPTS || 5);
 const MEGA_EXPORT_BASE_TIMEOUT_MS = Number(process.env.MEGA_EXPORT_BASE_TIMEOUT_MS || 20000);
