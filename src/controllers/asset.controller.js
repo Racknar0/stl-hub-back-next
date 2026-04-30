@@ -3147,33 +3147,30 @@ export const getAssetBySlug = async (req, res) => {
 
             function buildDescriptionEs() {
                 const titular = normTitleEs || safe.slug;
-                const intro = safe.isPremium
-                    ? `Descarga STL premium de "${titular}" vía MEGA (acceso rápido y seguro).`
-                    : `Descarga gratuita STL de "${titular}" vía MEGA al instante.`;
+                // Descripción ESTABLE: no depende de isPremium para evitar que el cron de
+                // freebies cause variación diaria de contenido (perjudica indexación SEO).
+                const intro = `Descarga el archivo STL de "${titular}" listo para impresión 3D.`;
                 const cat = primaryCategoryEs ? ` Categoría: ${primaryCategoryEs}.` : '';
-                const acceso = safe.isPremium
-                    ? ' Suscríbete para desbloquear la descarga y más modelos exclusivos.'
-                    : ' Imprime en 3D hoy mismo sin costo.';
                 const tags = tagsSnippetEs ? ` Tags: ${tagsSnippetEs}.` : '';
-                let full = intro + cat + acceso + tags;
+                const cierre = ' Compatible con impresoras FDM y de Resina. Disponible en STLHUB vía MEGA.';
+                let full = intro + cat + tags + cierre;
                 // Limitar a ~300 chars para evitar exceso en meta description
                 if (full.length > 300) full = full.slice(0, 297).replace(/[,.;:!\s]+$/,'') + '...';
                 return full;
             }
             function buildDescriptionEn() {
                 const titular = normTitleEn || safe.slug;
-                const intro = safe.isPremium
-                    ? `Premium STL download of "${titular}" via MEGA (fast & secure access).`
-                    : `Free STL download of "${titular}" via MEGA instantly.`;
+                // Stable description: does NOT depend on isPremium to avoid daily content
+                // changes caused by the freebies cron (which hurts SEO indexation).
+                const intro = `Download the STL file for "${titular}" ready for 3D printing.`;
                 const cat = primaryCategoryEn ? ` Category: ${primaryCategoryEn}.` : '';
-                const acceso = safe.isPremium
-                    ? ' Subscribe to unlock this model and more exclusive designs.'
-                    : ' Print it today at no cost.';
                 const tags = tagsSnippetEn ? ` Tags: ${tagsSnippetEn}.` : '';
-                let full = intro + cat + acceso + tags;
+                const cierre = ' Compatible with FDM and Resin printers. Available on STLHUB via MEGA.';
+                let full = intro + cat + tags + cierre;
                 if (full.length > 300) full = full.slice(0, 297).replace(/[,.;:!\s]+$/,'') + '...';
                 return full;
             }
+
 
             const autoDescriptionEs = hasDescriptionEs ? safe.description : buildDescriptionEs();
             const autoDescriptionEn = hasDescriptionEn ? safe.descriptionEn : buildDescriptionEn();
@@ -3201,11 +3198,12 @@ export const listPublishedSlugs = async (req, res) => {
             const d = new Date(updatedAfter);
             if (!isNaN(d.getTime())) where.updatedAt = { gt: d };
         }
+        const limit = req.query.limit ? Math.min(Number(req.query.limit) || 50000, 50000) : 50000;
         const rows = await prisma.asset.findMany({
             where,
             select: { slug: true, updatedAt: true },
-            orderBy: { updatedAt: 'desc' },
-            take: 50000, // límite amplio; si se supera, paginar
+            orderBy: { updatedAt: 'desc' }, // más recientes primero
+            take: limit,
         });
         return res.json(rows);
     } catch (e) {
