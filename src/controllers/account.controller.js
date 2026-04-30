@@ -1690,7 +1690,8 @@ export const syncMainToBackups = async (req, res) => {
 
 /**
  * POST /accounts/:id/alignment-audit
- * Compara assets de la Main (BD) vs carpetas reales en el Backup (MEGA).
+ * Compara assets de la BD vs carpetas reales en Main MEGA y Backup MEGA.
+ * Escanea AMBAS cuentas para detectar desalineaciones en cualquier dirección.
  */
 export const alignmentAudit = async (req, res) => {
   const mainId = Number(req.params.id);
@@ -1720,14 +1721,54 @@ export const alignmentAudit = async (req, res) => {
       select: { id: true, slug: true, archiveName: true, title: true, archiveSizeB: true },
     });
 
-    console.log(`[ALIGNMENT][AUDIT] main=${mainId} backup=${backupAccount.id} assets=${assets.length}`);
+    console.log(`[ALIGNMENT][AUDIT] main=${mainId} backup=${backupAccount.id} assets_en_BD=${assets.length}`);
 
+    const payloadMain = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag);
     const payloadB = decryptToJson(backupAccount.credentials.encData, backupAccount.credentials.encIv, backupAccount.credentials.encTag);
+    const baseMain = (main.baseFolder || '/').replaceAll('\\', '/');
     const baseB = (backupAccount.baseFolder || '/').replaceAll('\\', '/');
 
-    // Hacer mega-ls en la raíz del backup para listar TODAS las carpetas
-    let backupFolders = [];
+    // Proxy setup (obligatorio para evitar rate limiting)
+    const proxies = listMegaProxies({});
+    if (!proxies.length) return res.status(500).json({ message: 'Sin proxies válidos (no se permite IP directa)' });
+    let proxyIndex = 0;
+
+    // 1. Escanear MAIN MEGA
+    let mainFolders = [];
+    console.log(`[ALIGNMENT][AUDIT] Escaneando Main MEGA (cuenta ${mainId})...`);
     await withMegaLock(async () => {
+      await applyProxyByIndexOrThrow(proxies, proxyIndex, `align-audit main=${mainId}`);
+      try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
+
+      if (payloadMain?.type === 'session' && payloadMain.session) {
+        await runCmdWithTimeout('mega-login', [payloadMain.session], MEGA_LOGIN_TIMEOUT_MS);
+      } else if (payloadMain?.username && payloadMain?.password) {
+        await runCmdWithTimeout('mega-login', [payloadMain.username, payloadMain.password], MEGA_LOGIN_TIMEOUT_MS);
+      } else {
+        throw new Error('Credenciales main inválidas');
+      }
+
+      try { await runCmdWithTimeout('mega-mkdir', ['-p', baseMain], MEGA_MKDIR_TIMEOUT_MS); } catch {}
+
+      try {
+        const ls = await runCmdWithTimeout('mega-ls', [baseMain], 60000);
+        mainFolders = (ls.out || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+      } catch (e) {
+        console.warn(`[ALIGNMENT][AUDIT] Error listando main: ${e.message}`);
+      }
+
+      try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
+    }, `ALIGN-AUDIT-MAIN-${mainId}`);
+    console.log(`[ALIGNMENT][AUDIT] Main MEGA: ${mainFolders.length} carpetas encontradas`);
+
+    // Rotar proxy para el backup
+    proxyIndex = rotateIndex(proxyIndex, proxies.length);
+
+    // 2. Escanear BACKUP MEGA
+    let backupFolders = [];
+    console.log(`[ALIGNMENT][AUDIT] Escaneando Backup MEGA (cuenta ${backupAccount.id})...`);
+    await withMegaLock(async () => {
+      await applyProxyByIndexOrThrow(proxies, proxyIndex, `align-audit backup=${backupAccount.id}`);
       try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
 
       if (payloadB?.type === 'session' && payloadB.session) {
@@ -1748,28 +1789,38 @@ export const alignmentAudit = async (req, res) => {
       }
 
       try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
-    }, `ALIGN-AUDIT-${backupAccount.id}`);
+    }, `ALIGN-AUDIT-BACKUP-${backupAccount.id}`);
+    console.log(`[ALIGNMENT][AUDIT] Backup MEGA: ${backupFolders.length} carpetas encontradas`);
 
-    // Comparar: assets BD vs carpetas en backup
+    // 3. Comparar las 3 fuentes: BD vs Main MEGA vs Backup MEGA
     const assetSlugs = new Set(assets.map(a => a.slug));
+    const mainSet = new Set(mainFolders);
     const backupSet = new Set(backupFolders);
 
-    const synced = [];
-    const missingInBackup = [];
-    const orphansInBackup = [];
+    const synced = [];           // En BD + Main + Backup
+    const missingInMain = [];    // En BD pero NO en Main MEGA (archivo eliminado/DMCA)
+    const missingInBackup = [];  // En BD + Main pero NO en Backup
+    const orphansInMain = [];    // En Main MEGA pero NO en BD
+    const orphansInBackup = [];  // En Backup MEGA pero NO en BD
 
     for (const asset of assets) {
-      if (backupSet.has(asset.slug)) {
-        synced.push({ assetId: asset.id, slug: asset.slug, title: asset.title });
-      } else {
-        const sizeMB = asset.archiveSizeB ? Number(Number(asset.archiveSizeB) / (1024 * 1024)).toFixed(2) : '0';
-        missingInBackup.push({
-          assetId: asset.id,
-          slug: asset.slug,
-          title: asset.title,
-          archiveName: asset.archiveName,
-          sizeMB: Number(sizeMB),
-        });
+      const inMain = mainSet.has(asset.slug);
+      const inBackup = backupSet.has(asset.slug);
+      const sizeMB = asset.archiveSizeB ? Number((Number(asset.archiveSizeB) / (1024 * 1024)).toFixed(2)) : 0;
+      const item = { assetId: asset.id, slug: asset.slug, title: asset.title, archiveName: asset.archiveName, sizeMB };
+
+      if (inMain && inBackup) {
+        synced.push(item);
+      } else if (!inMain) {
+        missingInMain.push(item);
+      } else if (inMain && !inBackup) {
+        missingInBackup.push(item);
+      }
+    }
+
+    for (const folder of mainFolders) {
+      if (!assetSlugs.has(folder)) {
+        orphansInMain.push({ folder });
       }
     }
 
@@ -1779,17 +1830,25 @@ export const alignmentAudit = async (req, res) => {
       }
     }
 
-    console.log(`[ALIGNMENT][AUDIT][DONE] main=${mainId} synced=${synced.length} missing=${missingInBackup.length} orphans=${orphansInBackup.length}`);
+    console.log(
+      `[ALIGNMENT][AUDIT][DONE] main=${mainId} ` +
+      `synced=${synced.length} missingInMain=${missingInMain.length} missingInBackup=${missingInBackup.length} ` +
+      `orphansInMain=${orphansInMain.length} orphansInBackup=${orphansInBackup.length}`
+    );
 
     return res.json({
       ok: true,
       mainId,
+      mainAlias: main.alias,
       backupId: backupAccount.id,
       backupAlias: backupAccount.alias,
       totalAssetsInBD: assets.length,
+      totalFoldersInMain: mainFolders.length,
       totalFoldersInBackup: backupFolders.length,
       synced,
+      missingInMain,
       missingInBackup,
+      orphansInMain,
       orphansInBackup,
     });
   } catch (e) {
@@ -2055,10 +2114,14 @@ export const alignmentCleanup = async (req, res) => {
     const payloadB = decryptToJson(backupAccount.credentials.encData, backupAccount.credentials.encIv, backupAccount.credentials.encTag);
     const baseB = (backupAccount.baseFolder || '/').replaceAll('\\', '/');
 
+    const proxies = listMegaProxies({});
+    if (!proxies.length) return res.status(500).json({ message: 'Sin proxies válidos' });
+
     const results = [];
     let deletedCount = 0;
 
     await withMegaLock(async () => {
+      await applyProxyByIndexOrThrow(proxies, 0, `align-cleanup backup=${backupAccount.id}`);
       try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
 
       if (payloadB?.type === 'session' && payloadB.session) {
