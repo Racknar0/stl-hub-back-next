@@ -618,6 +618,12 @@ export const testAccount = async (req, res) => {
     const acc = await prisma.megaAccount.findUnique({ where: { id }, include: { credentials: true } });
     if (!acc) return res.status(404).json({ message: 'Account not found' });
     if (!acc.credentials) return res.status(400).json({ message: 'No credentials stored for this account' });
+    
+    let clientAborted = false;
+    req.on('close', () => {
+      clientAborted = true;
+    });
+
   // Datos básicos (una sola línea)
   log.verbose(`Cuenta alias=${acc.alias} email=${acc.email} base=${acc.baseFolder}`);
 
@@ -670,13 +676,25 @@ export const testAccount = async (req, res) => {
         throw new Error('Sin proxies válidos');
       }
 
-      const maxTries = MEGA_PROXY_ROTATE_MAX_TRIES > 0
-        ? Math.min(MEGA_PROXY_ROTATE_MAX_TRIES, proxies.length)
-        : Math.min(proxies.length, 50);
+      const reqMaxTries = Number(req.query?.maxTries ?? req.body?.maxTries);
+      let maxTries = 50;
+      if (reqMaxTries > 0) {
+        maxTries = Math.min(reqMaxTries, proxies.length);
+      } else {
+        maxTries = MEGA_PROXY_ROTATE_MAX_TRIES > 0
+          ? Math.min(MEGA_PROXY_ROTATE_MAX_TRIES, proxies.length)
+          : Math.min(proxies.length, 50);
+      }
 
       let loginOk = false;
       let lastErr = '';
+      let lastErrCategory = 'UNKNOWN';
       for (let i = 0; i < maxTries; i++) {
+        if (clientAborted) {
+          log.warn(`[ACCOUNTS][TEST] Abortado por el cliente accId=${id}`);
+          throw new Error('Test abortado por el cliente');
+        }
+
         const p = proxies[i];
         log.info(`[ACCOUNTS][TEST] Proxy try ${i + 1}/${maxTries} -> ${p.proxyUrl} ${ctx}`);
 
@@ -711,7 +729,21 @@ export const testAccount = async (req, res) => {
         } catch (e) {
           const msg = String(e.message || '').toLowerCase();
           lastErr = msg;
-          log.warn(`[ACCOUNTS][TEST] Login FAIL via proxy ${p.proxyUrl} err=${msg} ${ctx}`);
+          
+          // Clasificar el error para diagnóstico
+          let reason = 'UNKNOWN';
+          if (msg.includes('incorrect') || msg.includes('wrong') || msg.includes('invalid') || msg.includes('eacces') || msg.includes('credentials') || msg.includes('password')) {
+            reason = 'CREDENTIALS';
+          } else if (msg.includes('timeout') || msg.includes('timed out') || msg.includes('etimedout')) {
+            reason = 'TIMEOUT';
+          } else if (msg.includes('banned') || msg.includes('locked') || msg.includes('suspended') || msg.includes('blocked') || msg.includes('disabled')) {
+            reason = 'ACCOUNT_ISSUE';
+          } else if (msg.includes('proxy') || msg.includes('econnrefused') || msg.includes('enotfound') || msg.includes('socket')) {
+            reason = 'PROXY';
+          }
+          lastErrCategory = reason;
+          
+          log.warn(`[ACCOUNTS][TEST] Login FAIL via proxy ${p.proxyUrl} err=${reason}:${msg} ${ctx}`);
           if (msg.includes('already logged in')) {
             didLogin = true;
             loginOk = true;
@@ -724,8 +756,11 @@ export const testAccount = async (req, res) => {
       }
 
       if (!loginOk) {
-        log.error(`[ACCOUNTS][TEST] Ningún proxy conectó (tries=${maxTries}). lastErr=${String(lastErr).slice(0,200)} ${ctx}`);
-        throw new Error(`No se pudo conectar por proxies tras ${maxTries} intentos`);
+        log.error(`[ACCOUNTS][TEST] Ningún proxy conectó (tries=${maxTries}). category=${lastErrCategory} lastErr=${String(lastErr).slice(0,200)} ${ctx}`);
+        const errObj = new Error(`No se pudo conectar tras ${maxTries} intentos. Razón: ${lastErrCategory}. Detalle: ${String(lastErr).slice(0,150)}`);
+        errObj.errorCategory = lastErrCategory;
+        errObj.lastError = String(lastErr).slice(0, 200);
+        throw errObj;
       }
 
       if (base && base !== '/') {
@@ -869,7 +904,12 @@ export const testAccount = async (req, res) => {
       const id = Number(req.params.id);
       await prisma.megaAccount.update({ where: { id }, data: { status: 'ERROR', statusMessage: String(error.message).slice(0, 500), lastCheckAt: new Date() } });
     } catch {}
-    return res.status(500).json({ message: 'Error testing account', error: String(error.message) });
+    return res.status(500).json({ 
+      message: String(error.message).slice(0, 300), 
+      error: String(error.message),
+      errorCategory: error.errorCategory || null,
+      lastError: error.lastError || null,
+    });
   } finally {
     // Liberar el flag ANTES de decidir si hay subidas activas
     try { stopUploadsFlag && stopUploadsFlag() } catch {}
