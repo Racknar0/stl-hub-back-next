@@ -2041,6 +2041,14 @@ export const alignmentSync = async (req, res) => {
             failCount++;
           }
         }
+
+        // Refrescar métricas del backup tras subidas
+        try {
+          await refreshAccountStorageInCurrentSession(backupAccount.id, `align-sync backup=${backupAccount.id}`);
+        } catch (e) {
+          console.warn(`[ALIGNMENT][SYNC] No se pudieron refrescar métricas backup: ${String(e.message).slice(0, 200)}`);
+        }
+
         try { await runCmd('mega-logout', []); } catch {}
       }, `ALIGN-UP-${backupAccount.id}`);
     }
@@ -2145,6 +2153,13 @@ export const alignmentCleanup = async (req, res) => {
           console.warn(`[ALIGNMENT][CLEANUP][FAIL] ${folder}: ${e.message}`);
           results.push({ folder, status: 'FAILED', error: e.message });
         }
+      }
+
+      // Refrescar métricas del backup tras eliminación
+      try {
+        await refreshAccountStorageInCurrentSession(backupAccount.id, `align-cleanup backup=${backupAccount.id}`);
+      } catch (e) {
+        console.warn(`[ALIGNMENT][CLEANUP] No se pudieron refrescar métricas: ${String(e.message).slice(0, 200)}`);
       }
 
       try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
