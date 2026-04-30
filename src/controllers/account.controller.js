@@ -56,6 +56,41 @@ async function applyProxyByIndexOrThrow(proxies, idx, ctx){
   return p;
 }
 
+/**
+ * Helper: intenta login con rotación de proxy si falla/timeout.
+ * Rota proxy → logout → login. Reintenta hasta agotar todos los proxies.
+ * Retorna el proxyIndex final que funcionó.
+ */
+async function loginWithProxyRetry({ proxies, startProxyIndex, payload, ctx, maxAttempts }) {
+  const attempts = maxAttempts || Math.min(proxies.length, MEGA_PROXY_ROTATE_MAX_TRIES || proxies.length);
+  let proxyIdx = startProxyIndex;
+  let lastErr = null;
+
+  for (let i = 0; i < attempts; i++) {
+    try {
+      await applyProxyByIndexOrThrow(proxies, proxyIdx, ctx);
+      try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
+
+      if (payload?.type === 'session' && payload.session) {
+        await runCmdWithTimeout('mega-login', [payload.session], MEGA_LOGIN_TIMEOUT_MS);
+      } else if (payload?.username && payload?.password) {
+        await runCmdWithTimeout('mega-login', [payload.username, payload.password], MEGA_LOGIN_TIMEOUT_MS);
+      } else {
+        throw new Error('Credenciales inválidas');
+      }
+
+      log.info(`[LOGIN-RETRY][OK] intento=${i + 1}/${attempts} proxyIdx=${proxyIdx} ${ctx}`);
+      return proxyIdx; // éxito
+    } catch (e) {
+      lastErr = e;
+      log.warn(`[LOGIN-RETRY][FAIL] intento=${i + 1}/${attempts} proxyIdx=${proxyIdx} ${ctx}: ${String(e.message).slice(0, 200)}`);
+      proxyIdx = rotateIndex(proxyIdx, proxies.length);
+    }
+  }
+
+  throw new Error(`Login fallido tras ${attempts} intentos. Último error: ${lastErr?.message || 'desconocido'}`);
+}
+
 async function megaGetWithStallRetry({ remoteFile, destLocal, ctx, proxies, getProxyIndex, setProxyIndex, relogin }){
   let attempt = 0;
   while (true) {
@@ -1737,16 +1772,10 @@ export const alignmentAudit = async (req, res) => {
     let mainFolders = [];
     console.log(`[ALIGNMENT][AUDIT] Escaneando Main MEGA (cuenta ${mainId})...`);
     await withMegaLock(async () => {
-      await applyProxyByIndexOrThrow(proxies, proxyIndex, `align-audit main=${mainId}`);
-      try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
-
-      if (payloadMain?.type === 'session' && payloadMain.session) {
-        await runCmdWithTimeout('mega-login', [payloadMain.session], MEGA_LOGIN_TIMEOUT_MS);
-      } else if (payloadMain?.username && payloadMain?.password) {
-        await runCmdWithTimeout('mega-login', [payloadMain.username, payloadMain.password], MEGA_LOGIN_TIMEOUT_MS);
-      } else {
-        throw new Error('Credenciales main inválidas');
-      }
+      proxyIndex = await loginWithProxyRetry({
+        proxies, startProxyIndex: proxyIndex, payload: payloadMain,
+        ctx: `align-audit main=${mainId}`,
+      });
 
       try { await runCmdWithTimeout('mega-mkdir', ['-p', baseMain], MEGA_MKDIR_TIMEOUT_MS); } catch {}
 
@@ -1768,16 +1797,10 @@ export const alignmentAudit = async (req, res) => {
     let backupFolders = [];
     console.log(`[ALIGNMENT][AUDIT] Escaneando Backup MEGA (cuenta ${backupAccount.id})...`);
     await withMegaLock(async () => {
-      await applyProxyByIndexOrThrow(proxies, proxyIndex, `align-audit backup=${backupAccount.id}`);
-      try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
-
-      if (payloadB?.type === 'session' && payloadB.session) {
-        await runCmdWithTimeout('mega-login', [payloadB.session], MEGA_LOGIN_TIMEOUT_MS);
-      } else if (payloadB?.username && payloadB?.password) {
-        await runCmdWithTimeout('mega-login', [payloadB.username, payloadB.password], MEGA_LOGIN_TIMEOUT_MS);
-      } else {
-        throw new Error('Credenciales backup inválidas');
-      }
+      proxyIndex = await loginWithProxyRetry({
+        proxies, startProxyIndex: proxyIndex, payload: payloadB,
+        ctx: `align-audit backup=${backupAccount.id}`,
+      });
 
       try { await runCmdWithTimeout('mega-mkdir', ['-p', baseB], MEGA_MKDIR_TIMEOUT_MS); } catch {}
 
@@ -2138,16 +2161,10 @@ export const alignmentCleanup = async (req, res) => {
     let deletedCount = 0;
 
     await withMegaLock(async () => {
-      await applyProxyByIndexOrThrow(proxies, 0, `align-cleanup-${target} acc=${targetAccount.id}`);
-      try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
-
-      if (payloadTarget?.type === 'session' && payloadTarget.session) {
-        await runCmdWithTimeout('mega-login', [payloadTarget.session], MEGA_LOGIN_TIMEOUT_MS);
-      } else if (payloadTarget?.username && payloadTarget?.password) {
-        await runCmdWithTimeout('mega-login', [payloadTarget.username, payloadTarget.password], MEGA_LOGIN_TIMEOUT_MS);
-      } else {
-        throw new Error(`Credenciales ${target} inválidas`);
-      }
+      await loginWithProxyRetry({
+        proxies, startProxyIndex: 0, payload: payloadTarget,
+        ctx: `align-cleanup-${target} acc=${targetAccount.id}`,
+      });
 
       for (let i = 0; i < safeToDelete.length; i++) {
         const folder = safeToDelete[i];
