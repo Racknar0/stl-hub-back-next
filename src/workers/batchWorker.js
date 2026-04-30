@@ -1036,6 +1036,12 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
       if (/BATCH_STOP_REQUESTED/i.test(msg)) {
         throw new Error('BATCH_STOP_REQUESTED')
       }
+      // Storage limit es condición permanente — reintentar no sirve de nada
+      if (/ACCOUNT_STORAGE_LIMIT_REACHED/i.test(msg)) {
+        console.warn(`[BATCH][${role.toUpperCase()}] Storage limit reached, skipping retries accId=${account.id}`)
+        preferredProxyByAccountId.delete(accountIdNum)
+        throw e
+      }
       if (/FORCE_PROXY_SWITCH_REQUESTED/i.test(msg)) {
         // Reintento inmediato, sin consumir cupo por acción manual de "otro proxy".
         attempt -= 1
@@ -1154,20 +1160,28 @@ async function prepareItemForMain(item, updateItem) {
   const stagingArchivePath = packed.outputPath
   const archiveSizeBytes = fs.statSync(stagingArchivePath).size
 
-  // -- NEW AUTO DISTRIBUTION LOGIC --
+  // -- SMART AUTO DISTRIBUTION: reasignación en bloque con validación de backups --
   const archiveSizeMb = archiveSizeBytes / (1024 * 1024)
   const usedMb = toSafeNumber(mainAccount.storageUsedMB, 0)
   const sessionUploadedMb = getSessionUploadedMb(mainAccount.id)
   const projectedMb = usedMb + sessionUploadedMb + archiveSizeMb
 
   if (projectedMb > MAX_ACCOUNT_UPLOAD_MB) {
-    console.warn(`[BATCH][MAIN] Cuenta original ${mainAccount.id} llena (Proyectado: ${projectedMb.toFixed(2)} MB). Buscando alternativa...`)
-    const batchItems = await prisma.batchImportItem.findMany({
-      where: { batchId: item.batchId },
-      select: { targetAccount: true }
+    const originalAccountId = item.targetAccount
+    console.warn(`[BATCH][MAIN] Cuenta original ${originalAccountId} llena (Proyectado: ${projectedMb.toFixed(2)} MB). Buscando alternativa con backups saludables...`)
+
+    // Buscar TODOS los items pendientes de la misma cuenta para reasignar en bloque
+    const remainingItems = await prisma.batchImportItem.findMany({
+      where: {
+        targetAccount: originalAccountId,
+        status: 'QUEUED',
+        id: { not: item.id },
+      },
+      select: { id: true, pesoMB: true },
     })
-    const preferredIds = Array.from(new Set(batchItems.map(i => i.targetAccount).filter(Boolean)))
-    
+    const totalRemainingMb = archiveSizeMb + remainingItems.reduce((sum, i) => sum + toSafeNumber(i.pesoMB, 0), 0)
+
+    // Buscar cuentas alternativas que tengan espacio en MAIN y en al menos 1 BACKUP vinculado
     const candidates = await prisma.megaAccount.findMany({
       where: { type: 'main', status: 'CONNECTED', suspended: false, ignoreInUploadBatch: false },
       include: {
@@ -1175,32 +1189,50 @@ async function prepareItemForMain(item, updateItem) {
         backups: { include: { backupAccount: { include: { credentials: true } } } },
       },
     })
-    
-    const accountsWithSpace = candidates.map(acc => {
-      const u = toSafeNumber(acc.storageUsedMB, 0)
-      const s = getSessionUploadedMb(acc.id)
-      const p = u + s + archiveSizeMb
-      return { acc, p, isPreferred: preferredIds.includes(acc.id) }
-    }).filter(x => x.p <= MAX_ACCOUNT_UPLOAD_MB)
-    
-    if (accountsWithSpace.length > 0) {
-      accountsWithSpace.sort((a, b) => {
-        if (a.isPreferred && !b.isPreferred) return -1
-        if (!a.isPreferred && b.isPreferred) return 1
-        return a.p - b.p // Escoger la de menor espacio ocupado
+
+    const accountsWithSpace = candidates
+      .map(acc => {
+        const u = toSafeNumber(acc.storageUsedMB, 0)
+        const s = getSessionUploadedMb(acc.id)
+        const mainProjected = u + s + totalRemainingMb
+
+        // Validar que al menos 1 backup vinculado tenga espacio
+        const linkedBackups = (acc.backups || []).map(b => b.backupAccount).filter(b => b && b.type === 'backup')
+        const hasHealthyBackup = linkedBackups.some(backup => {
+          const backupUsed = toSafeNumber(backup.storageUsedMB, 0)
+          return (backupUsed + totalRemainingMb) <= MAX_ACCOUNT_UPLOAD_MB
+        })
+
+        return { acc, mainProjected, hasHealthyBackup, backupCount: linkedBackups.length }
       })
+      .filter(x => x.mainProjected <= MAX_ACCOUNT_UPLOAD_MB && x.hasHealthyBackup)
+
+    if (accountsWithSpace.length > 0) {
+      // Priorizar la que tenga más espacio libre (menor projected)
+      accountsWithSpace.sort((a, b) => a.mainProjected - b.mainProjected)
       const newAccount = accountsWithSpace[0].acc
-      console.log(`[BATCH][MAIN] Reasignando item ${item.id} a cuenta alternativa ${newAccount.id} (${newAccount.alias})`)
-      
-      await updateItem({ targetAccount: newAccount.id })
+
+      // Reasignar TODOS los items pendientes de la cuenta original en bloque
+      const allItemIds = [item.id, ...remainingItems.map(i => i.id)]
+      await prisma.batchImportItem.updateMany({
+        where: { id: { in: allItemIds } },
+        data: { targetAccount: newAccount.id },
+      })
+
+      console.log(`[BATCH][MAIN][BULK_REASSIGN] ${allItemIds.length} items reasignados: cuenta ${originalAccountId} → ${newAccount.id} (${newAccount.alias}) | totalMB=${totalRemainingMb.toFixed(2)}`)
+
       item.targetAccount = newAccount.id
       mainAccount = newAccount
       backupAccounts = (mainAccount.backups || []).map((b) => b.backupAccount).filter((b) => b && b.type === 'backup')
     } else {
-      console.warn(`[BATCH][MAIN] No se encontraron cuentas alternativas con espacio suficiente para ${archiveSizeMb.toFixed(2)} MB.`)
+      throw new Error(
+        `NO_ACCOUNTS_WITH_SPACE_AND_HEALTHY_BACKUPS: cuenta original ${originalAccountId} llena. ` +
+        `Necesita ${totalRemainingMb.toFixed(2)}MB en main + backup. ` +
+        `No hay cuentas alternativas con espacio suficiente y backups saludables.`
+      )
     }
   }
-  // -- END NEW LOGIC --
+  // -- END SMART AUTO DISTRIBUTION --
 
   const archDir = path.join(ARCHIVES_DIR, slug)
   fs.mkdirSync(archDir, { recursive: true })
@@ -1421,17 +1453,20 @@ async function processBackupsForCompletedItem(item) {
         .map((f) => `${f.alias}(${f.id})`) 
         .join(', ')
 
+      // Main ya subió correctamente — NO marcar como FAILED, solo backup en error
       await updateItem({
-        status: 'FAILED',
+        status: 'COMPLETED',
         backupStatus: 'ERROR',
-        error: truncateText(`Backups con fallo: ${summary}`, 500),
+        error: truncateText(`Main OK. Backups con fallo: ${summary}`, 500),
       })
 
       await notifyAutomation({
         title: `Batch BACKUP con fallos (item #${item.id})`,
-        body: `asset=${asset.id} slug=${asset.slug} fallos=${failedBackups.length} cuentas=[${summary}]`,
-        typeStatus: 'ERROR',
+        body: `asset=${asset.id} slug=${asset.slug} fallos=${failedBackups.length} cuentas=[${summary}] (Main OK, solo backup falló)`,
+        typeStatus: 'WARNING',
       })
+
+      // No borrar archivo local — se podría reintentar backup manualmente
       return
     }
 
