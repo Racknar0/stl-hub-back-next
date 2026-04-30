@@ -19,6 +19,7 @@ import aiRoutes from './ai/index.js';
 import telegramRoutes from './telegram/index.js';
 import fileExplorerRoutes from './fileExplorer/fileExplorer.routes.js';
 import settingsRoutes from './settings/index.js';
+import notesRoutes from './notes/index.js';
 
 const router = express.Router();
 
@@ -36,6 +37,7 @@ router.use('/admin/notifications', notificationsRoutes);
 router.use('/admin/ops', adminOpsRoutes);
 router.use('/admin/marketing', marketingRoutes);
 router.use('/admin/settings', settingsRoutes);
+router.use('/admin/notes', notesRoutes);
 
 router.use('/downloads', downloadsRoutes);
 router.use('/me', meRoutes);
