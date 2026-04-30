@@ -2073,16 +2073,19 @@ export const alignmentSync = async (req, res) => {
 
 /**
  * POST /accounts/:id/alignment-cleanup
- * Elimina carpetas huérfanas del Backup MEGA (que no corresponden a ningún asset).
- * Body: { folders: ['carpeta-1', 'carpeta-2'] }
+ * Elimina carpetas huérfanas del Main o Backup MEGA (que no corresponden a ningún asset).
+ * Body: { folders: ['carpeta-1', 'carpeta-2'], target: 'main' | 'backup' }
  */
 export const alignmentCleanup = async (req, res) => {
   const mainId = Number(req.params.id);
   try {
     if (!mainId) return res.status(400).json({ message: 'Invalid id' });
-    const { folders } = req.body || {};
+    const { folders, target = 'backup' } = req.body || {};
     if (!Array.isArray(folders) || !folders.length) {
       return res.status(400).json({ message: 'folders requerido (array de nombres de carpetas a eliminar)' });
+    }
+    if (!['main', 'backup'].includes(target)) {
+      return res.status(400).json({ message: 'target debe ser "main" o "backup"' });
     }
 
     const main = await prisma.megaAccount.findUnique({
@@ -2095,10 +2098,16 @@ export const alignmentCleanup = async (req, res) => {
     if (!main) return res.status(404).json({ message: 'Cuenta main no encontrada' });
     if (main.type !== 'main') return res.status(400).json({ message: 'La cuenta no es de tipo main' });
 
-    const backupAccount = (main.backups || [])
-      .map(b => b.backupAccount)
-      .find(a => a && a.type === 'backup' && a.credentials);
-    if (!backupAccount) return res.status(400).json({ message: 'Sin backup vinculado' });
+    // Determinar cuenta objetivo
+    let targetAccount;
+    if (target === 'backup') {
+      targetAccount = (main.backups || [])
+        .map(b => b.backupAccount)
+        .find(a => a && a.type === 'backup' && a.credentials);
+      if (!targetAccount) return res.status(400).json({ message: 'Sin backup vinculado' });
+    } else {
+      targetAccount = main;
+    }
 
     // Validar que NINGUNA de las carpetas corresponda a un asset real
     const existingAssets = await prisma.asset.findMany({
@@ -2110,17 +2119,17 @@ export const alignmentCleanup = async (req, res) => {
     const blocked = folders.filter(f => protectedSlugs.has(f));
 
     if (blocked.length > 0) {
-      console.warn(`[ALIGNMENT][CLEANUP] ${blocked.length} carpetas bloqueadas por tener assets asociados: ${blocked.join(', ')}`);
+      console.warn(`[ALIGNMENT][CLEANUP][${target.toUpperCase()}] ${blocked.length} carpetas bloqueadas: ${blocked.join(', ')}`);
     }
 
     if (!safeToDelete.length) {
       return res.json({ ok: true, deleted: 0, blocked: blocked.length, message: 'Todas las carpetas tienen assets asociados, nada fue eliminado.' });
     }
 
-    console.log(`[ALIGNMENT][CLEANUP] main=${mainId} backup=${backupAccount.id} folders=${safeToDelete.length}`);
+    console.log(`[ALIGNMENT][CLEANUP][${target.toUpperCase()}] mainId=${mainId} targetAccId=${targetAccount.id} folders=${safeToDelete.length}`);
 
-    const payloadB = decryptToJson(backupAccount.credentials.encData, backupAccount.credentials.encIv, backupAccount.credentials.encTag);
-    const baseB = (backupAccount.baseFolder || '/').replaceAll('\\', '/');
+    const payloadTarget = decryptToJson(targetAccount.credentials.encData, targetAccount.credentials.encIv, targetAccount.credentials.encTag);
+    const baseTarget = (targetAccount.baseFolder || '/').replaceAll('\\', '/');
 
     const proxies = listMegaProxies({});
     if (!proxies.length) return res.status(500).json({ message: 'Sin proxies válidos' });
@@ -2129,43 +2138,43 @@ export const alignmentCleanup = async (req, res) => {
     let deletedCount = 0;
 
     await withMegaLock(async () => {
-      await applyProxyByIndexOrThrow(proxies, 0, `align-cleanup backup=${backupAccount.id}`);
+      await applyProxyByIndexOrThrow(proxies, 0, `align-cleanup-${target} acc=${targetAccount.id}`);
       try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
 
-      if (payloadB?.type === 'session' && payloadB.session) {
-        await runCmdWithTimeout('mega-login', [payloadB.session], MEGA_LOGIN_TIMEOUT_MS);
-      } else if (payloadB?.username && payloadB?.password) {
-        await runCmdWithTimeout('mega-login', [payloadB.username, payloadB.password], MEGA_LOGIN_TIMEOUT_MS);
+      if (payloadTarget?.type === 'session' && payloadTarget.session) {
+        await runCmdWithTimeout('mega-login', [payloadTarget.session], MEGA_LOGIN_TIMEOUT_MS);
+      } else if (payloadTarget?.username && payloadTarget?.password) {
+        await runCmdWithTimeout('mega-login', [payloadTarget.username, payloadTarget.password], MEGA_LOGIN_TIMEOUT_MS);
       } else {
-        throw new Error('Credenciales backup inválidas');
+        throw new Error(`Credenciales ${target} inválidas`);
       }
 
       for (let i = 0; i < safeToDelete.length; i++) {
         const folder = safeToDelete[i];
-        const remotePath = path.posix.join(baseB, folder);
-        console.log(`[ALIGNMENT][CLEANUP] ${i + 1}/${safeToDelete.length} Eliminando: ${remotePath}`);
+        const remotePath = path.posix.join(baseTarget, folder);
+        console.log(`[ALIGNMENT][CLEANUP][${target.toUpperCase()}] ${i + 1}/${safeToDelete.length} Eliminando: ${remotePath}`);
         try {
           await runCmdWithTimeout('mega-rm', ['-rf', remotePath], 30000);
-          console.log(`[ALIGNMENT][CLEANUP][OK] ${folder}`);
+          console.log(`[ALIGNMENT][CLEANUP][${target.toUpperCase()}][OK] ${folder}`);
           results.push({ folder, status: 'DELETED' });
           deletedCount++;
         } catch (e) {
-          console.warn(`[ALIGNMENT][CLEANUP][FAIL] ${folder}: ${e.message}`);
+          console.warn(`[ALIGNMENT][CLEANUP][${target.toUpperCase()}][FAIL] ${folder}: ${e.message}`);
           results.push({ folder, status: 'FAILED', error: e.message });
         }
       }
 
-      // Refrescar métricas del backup tras eliminación
+      // Refrescar métricas tras eliminación
       try {
-        await refreshAccountStorageInCurrentSession(backupAccount.id, `align-cleanup backup=${backupAccount.id}`);
+        await refreshAccountStorageInCurrentSession(targetAccount.id, `align-cleanup-${target} acc=${targetAccount.id}`);
       } catch (e) {
         console.warn(`[ALIGNMENT][CLEANUP] No se pudieron refrescar métricas: ${String(e.message).slice(0, 200)}`);
       }
 
       try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
-    }, `ALIGN-CLEANUP-${backupAccount.id}`);
+    }, `ALIGN-CLEANUP-${target.toUpperCase()}-${targetAccount.id}`);
 
-    console.log(`[ALIGNMENT][CLEANUP][DONE] deleted=${deletedCount} failed=${safeToDelete.length - deletedCount} blocked=${blocked.length}`);
+    console.log(`[ALIGNMENT][CLEANUP][${target.toUpperCase()}][DONE] deleted=${deletedCount} failed=${safeToDelete.length - deletedCount} blocked=${blocked.length}`);
     return res.json({ ok: true, deleted: deletedCount, failed: safeToDelete.length - deletedCount, blocked: blocked.length, results });
   } catch (e) {
     console.error('[ALIGNMENT][CLEANUP][ERROR]', e);
