@@ -1956,7 +1956,7 @@ export const alignmentSync = async (req, res) => {
     if (!backupAccount) return res.status(400).json({ message: 'Sin backup vinculado' });
 
     const assets = await prisma.asset.findMany({
-      where: { accountId: mainId, slug: { in: Array.from(slugSet) }, status: 'PUBLISHED' },
+      where: { accountId: mainId, slug: { in: Array.from(slugSet) } },
       select: { id: true, slug: true, archiveName: true },
     });
     if (!assets.length) return res.status(400).json({ message: 'No se encontraron assets publicados con esos slugs' });
