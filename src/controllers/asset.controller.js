@@ -711,7 +711,7 @@ function toJsonSafe(value) {
 /** Listar assets con paginación, filtros y ordenamiento. GET /api/assets */
 export const listAssets = async (req, res) => {
     try {
-    const { q = '', pageIndex, pageSize, plan, isPremium, accountId, accountAlias, is_ai_search, categorySlug, tagSlug } = req.query;
+    const { q = '', pageIndex, pageSize, plan, isPremium, accountId, accountAlias, is_ai_search, categorySlug, tagSlug, status } = req.query;
         const hasPagination = pageIndex !== undefined && pageSize !== undefined;
 
         // Construir filtro dinámico
@@ -769,6 +769,11 @@ export const listAssets = async (req, res) => {
         // Filtro por tag (slug)
         if (tagSlug && String(tagSlug).trim()) {
             where.tags = { some: { slug: String(tagSlug).trim() } };
+        }
+
+        // Filtro por estado
+        if (status && String(status).trim()) {
+            where.status = String(status).trim().toUpperCase();
         }
 
         if (hasPagination) {
