@@ -697,6 +697,7 @@ async function generateUniqueSlug(base, maxTries = 50) {
 /** Serializar a JSON de forma segura (retorna null si falla). */
 function toJsonSafe(value) {
     if (typeof value === 'bigint') return Number(value);
+    if (value instanceof Date) return value.toISOString();
     if (Array.isArray(value)) return value.map((v) => toJsonSafe(v));
     if (value && typeof value === 'object') {
         const out = {};
@@ -710,7 +711,7 @@ function toJsonSafe(value) {
 /** Listar assets con paginación, filtros y ordenamiento. GET /api/assets */
 export const listAssets = async (req, res) => {
     try {
-    const { q = '', pageIndex, pageSize, plan, isPremium, accountId, accountAlias, is_ai_search } = req.query;
+    const { q = '', pageIndex, pageSize, plan, isPremium, accountId, accountAlias, is_ai_search, categorySlug, tagSlug } = req.query;
         const hasPagination = pageIndex !== undefined && pageSize !== undefined;
 
         // Construir filtro dinámico
@@ -759,6 +760,16 @@ export const listAssets = async (req, res) => {
             } catch {}
         }
         if (accIdFilter) where.accountId = accIdFilter;
+
+        // Filtro por categoría (slug)
+        if (categorySlug && String(categorySlug).trim()) {
+            where.categories = { some: { slug: String(categorySlug).trim() } };
+        }
+
+        // Filtro por tag (slug)
+        if (tagSlug && String(tagSlug).trim()) {
+            where.tags = { some: { slug: String(tagSlug).trim() } };
+        }
 
         if (hasPagination) {
             const take = Math.max(1, Math.min(1000, Number(pageSize) || 50));
