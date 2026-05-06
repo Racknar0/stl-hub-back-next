@@ -2244,6 +2244,152 @@ export const alignmentCleanup = async (req, res) => {
 };
 
 /**
+ * POST /accounts/:id/alignment-cleanup-unified
+ * Elimina carpetas huérfanas de Main Y Backup MEGA en un solo request (2 logins en vez de 2+2).
+ * Body: { mainFolders: ['a','b'], backupFolders: ['c','d'] }
+ */
+export const alignmentCleanupUnified = async (req, res) => {
+  const mainId = Number(req.params.id);
+  try {
+    if (!mainId) return res.status(400).json({ message: 'Invalid id' });
+    const { mainFolders = [], backupFolders = [] } = req.body || {};
+
+    if (!mainFolders.length && !backupFolders.length) {
+      return res.status(400).json({ message: 'mainFolders o backupFolders requerido (al menos uno debe tener carpetas)' });
+    }
+
+    const main = await prisma.megaAccount.findUnique({
+      where: { id: mainId },
+      include: {
+        credentials: true,
+        backups: { include: { backupAccount: { include: { credentials: true } } } },
+      },
+    });
+    if (!main) return res.status(404).json({ message: 'Cuenta main no encontrada' });
+    if (main.type !== 'main') return res.status(400).json({ message: 'La cuenta no es de tipo main' });
+
+    const backupAccount = (main.backups || [])
+      .map(b => b.backupAccount)
+      .find(a => a && a.type === 'backup' && a.credentials);
+
+    if (backupFolders.length && !backupAccount) {
+      return res.status(400).json({ message: 'Sin backup vinculado para limpiar carpetas backup' });
+    }
+
+    // Validar que NINGUNA carpeta corresponda a un asset real
+    const allFolders = [...mainFolders, ...backupFolders];
+    const existingAssets = await prisma.asset.findMany({
+      where: { accountId: mainId, slug: { in: allFolders } },
+      select: { slug: true },
+    });
+    const protectedSlugs = new Set(existingAssets.map(a => a.slug));
+
+    const safeMainFolders = mainFolders.filter(f => !protectedSlugs.has(f));
+    const safeBackupFolders = backupFolders.filter(f => !protectedSlugs.has(f));
+    const blocked = allFolders.filter(f => protectedSlugs.has(f));
+
+    if (blocked.length > 0) {
+      console.warn(`[ALIGNMENT][CLEANUP-UNIFIED] ${blocked.length} carpetas bloqueadas: ${blocked.join(', ')}`);
+    }
+
+    if (!safeMainFolders.length && !safeBackupFolders.length) {
+      return res.json({ ok: true, mainDeleted: 0, backupDeleted: 0, blocked: blocked.length, message: 'Todas las carpetas tienen assets asociados.' });
+    }
+
+    const proxies = listMegaProxies({});
+    if (!proxies.length) return res.status(500).json({ message: 'Sin proxies válidos' });
+
+    const mainResults = [];
+    const backupResults = [];
+    let mainDeleted = 0, mainFailed = 0;
+    let backupDeleted = 0, backupFailed = 0;
+
+    // FASE 1: Limpiar Main MEGA
+    if (safeMainFolders.length) {
+      const baseMain = (main.baseFolder || '/').replaceAll('\\', '/');
+      console.log(`[ALIGNMENT][CLEANUP-UNIFIED][MAIN] mainId=${mainId} folders=${safeMainFolders.length}`);
+
+      await withMegaLock(async () => {
+        await loginWithProxyRetry({
+          proxies, startProxyIndex: 0, payload: decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag),
+          ctx: `align-cleanup-unified-main acc=${mainId}`,
+        });
+
+        for (let i = 0; i < safeMainFolders.length; i++) {
+          const folder = safeMainFolders[i];
+          const remotePath = path.posix.join(baseMain, folder);
+          console.log(`[ALIGNMENT][CLEANUP-UNIFIED][MAIN] ${i + 1}/${safeMainFolders.length} Eliminando: ${remotePath}`);
+          try {
+            await runCmdWithTimeout('mega-rm', ['-rf', remotePath], 30000);
+            mainResults.push({ folder, status: 'DELETED' });
+            mainDeleted++;
+          } catch (e) {
+            console.warn(`[ALIGNMENT][CLEANUP-UNIFIED][MAIN][FAIL] ${folder}: ${e.message}`);
+            mainResults.push({ folder, status: 'FAILED', error: e.message });
+            mainFailed++;
+          }
+        }
+
+        try {
+          await refreshAccountStorageInCurrentSession(mainId, `align-cleanup-unified main=${mainId}`);
+        } catch (e) {
+          console.warn(`[ALIGNMENT][CLEANUP-UNIFIED] No se pudieron refrescar métricas main: ${String(e.message).slice(0, 200)}`);
+        }
+
+        try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
+      }, `ALIGN-CLEANUP-UNIFIED-MAIN-${mainId}`);
+    }
+
+    // FASE 2: Limpiar Backup MEGA
+    if (safeBackupFolders.length && backupAccount) {
+      const baseB = (backupAccount.baseFolder || '/').replaceAll('\\', '/');
+      console.log(`[ALIGNMENT][CLEANUP-UNIFIED][BACKUP] backupId=${backupAccount.id} folders=${safeBackupFolders.length}`);
+
+      await withMegaLock(async () => {
+        await loginWithProxyRetry({
+          proxies, startProxyIndex: 0, payload: decryptToJson(backupAccount.credentials.encData, backupAccount.credentials.encIv, backupAccount.credentials.encTag),
+          ctx: `align-cleanup-unified-backup acc=${backupAccount.id}`,
+        });
+
+        for (let i = 0; i < safeBackupFolders.length; i++) {
+          const folder = safeBackupFolders[i];
+          const remotePath = path.posix.join(baseB, folder);
+          console.log(`[ALIGNMENT][CLEANUP-UNIFIED][BACKUP] ${i + 1}/${safeBackupFolders.length} Eliminando: ${remotePath}`);
+          try {
+            await runCmdWithTimeout('mega-rm', ['-rf', remotePath], 30000);
+            backupResults.push({ folder, status: 'DELETED' });
+            backupDeleted++;
+          } catch (e) {
+            console.warn(`[ALIGNMENT][CLEANUP-UNIFIED][BACKUP][FAIL] ${folder}: ${e.message}`);
+            backupResults.push({ folder, status: 'FAILED', error: e.message });
+            backupFailed++;
+          }
+        }
+
+        try {
+          await refreshAccountStorageInCurrentSession(backupAccount.id, `align-cleanup-unified backup=${backupAccount.id}`);
+        } catch (e) {
+          console.warn(`[ALIGNMENT][CLEANUP-UNIFIED] No se pudieron refrescar métricas backup: ${String(e.message).slice(0, 200)}`);
+        }
+
+        try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
+      }, `ALIGN-CLEANUP-UNIFIED-BACKUP-${backupAccount.id}`);
+    }
+
+    console.log(`[ALIGNMENT][CLEANUP-UNIFIED][DONE] mainDeleted=${mainDeleted} mainFailed=${mainFailed} backupDeleted=${backupDeleted} backupFailed=${backupFailed} blocked=${blocked.length}`);
+    return res.json({
+      ok: true,
+      mainDeleted, mainFailed, mainResults,
+      backupDeleted, backupFailed, backupResults,
+      blocked: blocked.length,
+    });
+  } catch (e) {
+    console.error('[ALIGNMENT][CLEANUP-UNIFIED][ERROR]', e);
+    return res.status(500).json({ message: 'Error eliminando huérfanos', error: e.message });
+  }
+};
+
+/**
  * POST /accounts/:id/alignment-restore
  * Restaura carpetas faltantes en Main descargándolas desde Backup.
  * Body: { slugs: ['slug-1', 'slug-2'] }
