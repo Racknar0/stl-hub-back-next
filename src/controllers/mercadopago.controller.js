@@ -432,6 +432,8 @@ async function captureMercadoPagoPayment(req, res) {
       rawStatus: processed.rawStatus,
       activated: processed.activated,
       paymentId,
+      amount: processed.paymentRecord?.amount || 0,
+      currency: processed.paymentRecord?.currency || 'USD',
     });
   } catch (error) {
     console.error('Error confirmando pago de MercadoPago:', error?.details || error);

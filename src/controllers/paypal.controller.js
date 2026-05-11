@@ -194,7 +194,12 @@ async function capturePayPalOrder(req, res) {
                 // No interrumpimos el flujo por un fallo en el envío de emails
             }
 
-            return res.json({ success: true, capture: captureResult });
+            return res.json({ 
+                success: true, 
+                capture: captureResult,
+                amount: paymentAmount,
+                currency: paymentCurrency
+            });
         } else {
             return res.status(400).json({ error: 'El pago no fue completado por PayPal.' });
         }
