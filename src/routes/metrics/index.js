@@ -5,7 +5,7 @@ import { getDownloadMetrics } from '../../controllers/metrics.controller.js'
 import { getRegistrationMetrics } from '../../controllers/metrics.controller.js'
 import { getTopDownloads } from '../../controllers/metrics.controller.js'
 import { getTaxonomyCounts } from '../../controllers/metrics.controller.js'
-import { recordSearchEvent, recordSearchClick, getSearchInsights, getSiteVisitsMetrics, getSiteVisitsTimeseries, getTopPages } from '../../controllers/metrics.controller.js'
+import { recordSearchEvent, recordSearchClick, getSearchInsights, getSiteVisitsMetrics, getSiteVisitsTimeseries, getTopPages, recordPlanClick, getPlanClickTimeseries } from '../../controllers/metrics.controller.js'
 import { recordCampaignVisit } from '../../controllers/metrics.controller.js'
 import { getSalesMetrics } from '../../controllers/metrics.controller.js'
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
@@ -29,5 +29,7 @@ router.post('/search', recordSearchEvent)
 router.post('/search/:id/click', recordSearchClick)
 router.get('/search-insights', getSearchInsights)
 router.post('/campaign-visit', recordCampaignVisit)
+router.post('/plan-click', recordPlanClick)
+router.get('/plan-clicks/timeseries', getPlanClickTimeseries)
 
 export default router

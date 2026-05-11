@@ -454,7 +454,7 @@ export async function getTopDownloads(req, res) {
 
 export async function recordSearchEvent(req, res) {
   try {
-    const { query, resultCount } = req.body || {}
+    const { query, resultCount, isAiSearch } = req.body || {}
     const { original, norm, normNoAccents } = normalizeSearchQuery(query)
     if (!norm) return res.status(200).json({ ok: true, ignored: true })
 
@@ -469,6 +469,7 @@ export async function recordSearchEvent(req, res) {
         queryNorm: norm.slice(0, 191),
         queryNormNoAccents: normNoAccents.slice(0, 191),
         resultCount: safeResultCount,
+        isAiSearch: !!isAiSearch,
       },
       select: { id: true },
     })
@@ -583,6 +584,7 @@ export async function getSearchInsights(req, res) {
         totalSearches,
         totalClicks,
         topClicked,
+        aiSearches,
       ] = await Promise.all([
         prisma.searchEvent.groupBy({
           by: ['queryNormNoAccents'],
@@ -609,9 +611,19 @@ export async function getSearchInsights(req, res) {
           orderBy: { _count: { id: 'desc' } },
           take: 30,
         }),
+        // AI search counts per query
+        prisma.searchEvent.groupBy({
+          by: ['queryNormNoAccents'],
+          where: { ...(whereEvents || {}), isAiSearch: true },
+          _count: { id: true },
+          orderBy: { _count: { id: 'desc' } },
+          take: 60,
+        }),
       ])
 
       const zeroMap = new Map((zeroQueries || []).map((z) => [z.queryNormNoAccents, z._count?.id || 0]))
+
+      const aiMap = new Map((aiSearches || []).map((a) => [a.queryNormNoAccents, a._count?.id || 0]))
 
       const topQueriesOut = (topQueries || []).map((r) => ({
         query: r.queryNormNoAccents,
@@ -619,6 +631,7 @@ export async function getSearchInsights(req, res) {
         zeroCount: zeroMap.get(r.queryNormNoAccents) || 0,
         avgResults: r._avg?.resultCount != null ? Math.round(Number(r._avg.resultCount) * 10) / 10 : 0,
         clicks: r._sum?.clickCount || 0,
+        aiCount: aiMap.get(r.queryNormNoAccents) || 0,
       }))
 
       const zeroQueriesOut = (zeroQueries || []).map((r) => ({
@@ -639,8 +652,10 @@ export async function getSearchInsights(req, res) {
         count: r._count?.id || 0,
       }))
 
+      const totalAiSearches = aiSearches.reduce((sum, a) => sum + (a._count?.id || 0), 0)
+
       return {
-        totals: { searches: totalSearches, clicks: totalClicks },
+        totals: { searches: totalSearches, clicks: totalClicks, aiSearches: totalAiSearches },
         topQueries: topQueriesOut,
         zeroQueries: zeroQueriesOut,
         topClickedAssets,
@@ -873,6 +888,98 @@ export async function getTopPages(req, res) {
     })
   } catch (e) {
     console.error('getTopPages error', e)
+    return res.status(500).json({ error: 'internal' })
+  }
+}
+
+export async function recordPlanClick(req, res) {
+  try {
+    const planId = String(req.body?.planId || '').trim().slice(0, 10)
+    if (!planId) return res.status(200).json({ ok: true, ignored: true })
+
+    const userId = getUserIdFromAuthHeader(req)
+
+    await prisma.planClickEvent.create({
+      data: {
+        planId,
+        userId: userId || null,
+      },
+      select: { id: true },
+    })
+
+    return res.status(201).json({ ok: true })
+  } catch (e) {
+    console.error('recordPlanClick error', e)
+    return res.status(200).json({ ok: false })
+  }
+}
+
+export async function getPlanClickTimeseries(req, res) {
+  try {
+    const now = new Date()
+    const fromRaw = String(req.query.from || '').trim()
+    const toRaw = String(req.query.to || '').trim()
+
+    const toDate = toRaw ? new Date(`${toRaw}T23:59:59`) : now
+    const fromDate = fromRaw ? new Date(`${fromRaw}T00:00:00`) : new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+
+    if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+      return res.status(400).json({ error: 'invalid-dates' })
+    }
+
+    const diffMs = toDate.getTime() - fromDate.getTime()
+    const diffDays = diffMs / (24 * 60 * 60 * 1000)
+
+    let granularity, dateExpr
+    if (diffDays <= 1) {
+      granularity = 'hour'
+      dateExpr = "DATE_FORMAT(createdAt, '%Y-%m-%d %H:00:00')"
+    } else if (diffDays <= 60) {
+      granularity = 'day'
+      dateExpr = 'DATE(createdAt)'
+    } else {
+      granularity = 'week'
+      dateExpr = "DATE(DATE_SUB(createdAt, INTERVAL WEEKDAY(createdAt) DAY))"
+    }
+
+    const query = `
+      SELECT ${dateExpr} as bucket,
+             planId,
+             COUNT(*) as cnt
+      FROM planclickevent
+      WHERE createdAt >= ? AND createdAt <= ?
+      GROUP BY bucket, planId
+      ORDER BY bucket ASC
+    `
+
+    const rows = await prisma.$queryRawUnsafe(query, fromDate, toDate)
+
+    // Build series: one entry per bucket with counts per plan
+    const bucketMap = new Map()
+    for (const r of (rows || [])) {
+      const dateKey = r.bucket instanceof Date
+        ? r.bucket.toISOString().slice(0, granularity === 'hour' ? 16 : 10)
+        : String(r.bucket || '').slice(0, granularity === 'hour' ? 16 : 10)
+      if (!bucketMap.has(dateKey)) {
+        bucketMap.set(dateKey, { date: dateKey, '1m': 0, '3m': 0, '6m': 0, '12m': 0, total: 0 })
+      }
+      const entry = bucketMap.get(dateKey)
+      const plan = String(r.planId || '')
+      const cnt = Number(r.cnt || 0)
+      if (entry[plan] !== undefined) entry[plan] += cnt
+      entry.total += cnt
+    }
+
+    const series = Array.from(bucketMap.values())
+
+    return res.json({
+      from: fromDate.toISOString().slice(0, 10),
+      to: toDate.toISOString().slice(0, 10),
+      granularity,
+      series,
+    })
+  } catch (e) {
+    console.error('getPlanClickTimeseries error', e)
     return res.status(500).json({ error: 'internal' })
   }
 }

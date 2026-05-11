@@ -100,21 +100,106 @@ export const getUsers = async (req, res) => {
   }
 };
 
-// Get user by id (omit password)
+// Get user by id — enriched for admin user detail modal
 export const getUserById = async (req, res) => {
   const { id } = req.params;
 
   try {
     const user = await prisma.user.findUnique({
       where: { id: parseInt(id) },
-      select: { id: true, email: true, isActive: true, createdAt: true, updatedAt: true, roleId: true },
+      select: {
+        id: true,
+        email: true,
+        isActive: true,
+        language: true,
+        lastLogin: true,
+        createdAt: true,
+        updatedAt: true,
+        roleId: true,
+        // Attribution
+        utmSource: true,
+        utmMedium: true,
+        utmCampaign: true,
+        utmContent: true,
+        utmTerm: true,
+        utmLandingUrl: true,
+        utmReferrer: true,
+        // Subscription
+        subscriptions: {
+          where: { status: 'ACTIVE' },
+          orderBy: { startedAt: 'desc' },
+          take: 1,
+          select: { id: true, status: true, startedAt: true, currentPeriodEnd: true },
+        },
+      },
     });
 
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    res.status(200).json(user);
+    // Compute subscription info
+    const sub = user.subscriptions?.[0] || null;
+    const now = new Date();
+    const subEnd = sub ? new Date(sub.currentPeriodEnd) : null;
+    const daysRemaining = subEnd ? Math.max(0, Math.ceil((subEnd - now) / (1000 * 60 * 60 * 24))) : 0;
+
+    // Download history (last 20)
+    const downloads = await prisma.downloadHistory.findMany({
+      where: { userId: user.id },
+      orderBy: { downloadedAt: 'desc' },
+      take: 20,
+    });
+
+    // Enrich downloads with asset images
+    const assetIds = [...new Set(downloads.map((d) => d.assetId).filter(Boolean))];
+    const assets = assetIds.length
+      ? await prisma.asset.findMany({
+          where: { id: { in: assetIds } },
+          select: { id: true, title: true, slug: true, images: true },
+        })
+      : [];
+    const assetMap = new Map(assets.map((a) => [a.id, a]));
+    const enrichedDownloads = downloads.map((d) => {
+      const asset = assetMap.get(d.assetId);
+      const images = Array.isArray(asset?.images) ? asset.images : [];
+      return {
+        assetId: d.assetId,
+        title: d.assetTitle || asset?.title || `#${d.assetId}`,
+        slug: asset?.slug || null,
+        image: images[0] || null,
+        downloadedAt: d.downloadedAt,
+      };
+    });
+
+    // Download count total
+    const totalDownloads = await prisma.downloadHistory.count({ where: { userId: user.id } });
+
+    // Top categories from downloads
+    const topCatsRaw = assetIds.length
+      ? await prisma.category.findMany({
+          where: { assets: { some: { id: { in: assetIds } } } },
+          select: { id: true, name: true, _count: { select: { assets: true } } },
+          orderBy: { name: 'asc' },
+          take: 10,
+        })
+      : [];
+    const topCategories = topCatsRaw.map((c) => ({
+      id: c.id,
+      name: c.name,
+      count: c._count?.assets || 0,
+    }));
+
+    // Build response
+    const { subscriptions, ...userData } = user;
+    return res.status(200).json({
+      ...userData,
+      subscription: sub
+        ? { status: sub.status, startedAt: sub.startedAt, currentPeriodEnd: sub.currentPeriodEnd, daysRemaining }
+        : null,
+      stats: { totalDownloads, topCategories },
+      downloads: enrichedDownloads,
+    });
   } catch (error) {
     console.log('Error getting user: ', error);
     res.status(500).json({ message: 'Error getting user' });
