@@ -400,19 +400,21 @@ export async function getRegistrationMetrics(req, res) {
   try {
     const now = new Date()
     const oneDayAgo = new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000)
+    const threeDaysAgo = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000)
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
     const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
     const threeSixtyFiveDaysAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000)
 
-    const [d1, d7, d30, d365, total] = await Promise.all([
+    const [d1, d3, d7, d30, d365, total] = await Promise.all([
       prisma.user.count({ where: { createdAt: { gte: oneDayAgo } } }),
+      prisma.user.count({ where: { createdAt: { gte: threeDaysAgo } } }),
       prisma.user.count({ where: { createdAt: { gte: sevenDaysAgo } } }),
       prisma.user.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
       prisma.user.count({ where: { createdAt: { gte: threeSixtyFiveDaysAgo } } }),
       prisma.user.count(),
     ])
 
-    return res.json({ '1d': d1, '1w': d7, '1m': d30, '1y': d365, all: total })
+    return res.json({ '1d': d1, '3d': d3, '1w': d7, '1m': d30, '1y': d365, all: total })
   } catch (e) {
     console.error('getRegistrationMetrics error', e)
     return res.status(500).json({ error: 'internal' })

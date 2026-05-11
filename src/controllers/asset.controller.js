@@ -2552,48 +2552,53 @@ export const getMegaMenuData = async (_req, res) => {
         let seasonalCollections = seasonalBase;
 
         if (seasonalBase.length) {
-            const seasonalQuery = seasonalBase
-                .map((it) => `${it.labelEs} ${it.labelEn} ${it.slug}`)
-                .join(' | ');
+            try {
+                const seasonalQuery = seasonalBase
+                    .map((it) => `${it.labelEs} ${it.labelEn} ${it.slug}`)
+                    .join(' | ');
 
-            const aiResults = await qdrantMultimodalService.searchByImage(null, null, seasonalQuery, 60);
-            const idsOrdered = [];
-            const seen = new Set();
+                const aiResults = await qdrantMultimodalService.searchByImage(null, null, seasonalQuery, 60);
+                const idsOrdered = [];
+                const seen = new Set();
 
-            for (const hit of aiResults || []) {
-                const id = Number(hit?.id);
-                if (!Number.isFinite(id) || id <= 0 || seen.has(id)) continue;
-                seen.add(id);
-                idsOrdered.push(id);
-                if (idsOrdered.length >= 60) break;
-            }
+                for (const hit of aiResults || []) {
+                    const id = Number(hit?.id);
+                    if (!Number.isFinite(id) || id <= 0 || seen.has(id)) continue;
+                    seen.add(id);
+                    idsOrdered.push(id);
+                    if (idsOrdered.length >= 60) break;
+                }
 
-            if (idsOrdered.length) {
-                const assets = await prisma.asset.findMany({
-                    where: { id: { in: idsOrdered }, status: 'PUBLISHED' },
-                    select: {
-                        id: true,
-                        categories: {
-                            select: {
-                                slug: true,
-                                slugEn: true,
+                if (idsOrdered.length) {
+                    const assets = await prisma.asset.findMany({
+                        where: { id: { in: idsOrdered }, status: 'PUBLISHED' },
+                        select: {
+                            id: true,
+                            categories: {
+                                select: {
+                                    slug: true,
+                                    slugEn: true,
+                                },
+                            },
+                            tags: {
+                                select: {
+                                    slug: true,
+                                    slugEn: true,
+                                },
                             },
                         },
-                        tags: {
-                            select: {
-                                slug: true,
-                                slugEn: true,
-                            },
-                        },
-                    },
-                });
+                    });
 
-                const byId = new Map(assets.map((a) => [Number(a.id), a]));
-                const orderedAssets = idsOrdered
-                    .map((id) => byId.get(id))
-                    .filter(Boolean);
+                    const byId = new Map(assets.map((a) => [Number(a.id), a]));
+                    const orderedAssets = idsOrdered
+                        .map((id) => byId.get(id))
+                        .filter(Boolean);
 
-                seasonalCollections = buildSeasonalCollectionsFromQdrant(seasonalBase, orderedAssets);
+                    seasonalCollections = buildSeasonalCollectionsFromQdrant(seasonalBase, orderedAssets);
+                }
+            } catch (qdrantErr) {
+                // Qdrant unavailable — degrade gracefully, return seasonal base without AI enrichment
+                console.warn('[ASSETS] megaMenu: Qdrant unavailable, skipping seasonal enrichment:', qdrantErr.message);
             }
         }
 
@@ -3027,6 +3032,35 @@ export const requestDownload = async (req, res) => {
       if (roleId === 2) {
         allowed = true;
       } else {
+        // 3.2.1) 🚀 Launch Promo: check systemSetting
+        const promoSetting = await prisma.systemSetting.findUnique({ where: { key: 'LAUNCH_PROMO_ACTIVE' } });
+        const promoActive = promoSetting?.value === 'true';
+
+        if (promoActive) {
+          const promoDaysSetting = await prisma.systemSetting.findUnique({ where: { key: 'LAUNCH_PROMO_DAYS' } });
+          const promoDays = Number(promoDaysSetting?.value || 0);
+
+          if (promoDays <= 0) {
+            // 0 or empty = unlimited (all free)
+            allowed = true;
+          } else {
+            // Check if promo start date is within the configured days
+            const promoStartSetting = await prisma.systemSetting.findUnique({ where: { key: 'LAUNCH_PROMO_START' } });
+            const promoStart = promoStartSetting?.value ? new Date(promoStartSetting.value) : null;
+
+            if (promoStart && !Number.isNaN(promoStart.getTime())) {
+              const elapsed = (Date.now() - promoStart.getTime()) / (24 * 60 * 60 * 1000);
+              if (elapsed <= promoDays) {
+                allowed = true;
+              }
+            } else {
+              // No start date set yet, treat as unlimited
+              allowed = true;
+            }
+          }
+        }
+
+        if (!allowed) {
         // 3.3) Auditar la suscripción más reciente
         const now = new Date();
         const lastSub = await prisma.subscription.findFirst({
@@ -3059,6 +3093,7 @@ export const requestDownload = async (req, res) => {
         }
 
         allowed = true;
+        }
       }
     }
 

@@ -49,4 +49,32 @@ router.use('/ai', aiRoutes);
 router.use('/file-explorer', fileExplorerRoutes);
 router.use('/', telegramRoutes);
 
+// Public promo status (no auth)
+router.get('/promo/status', async (req, res) => {
+  try {
+    const { PrismaClient } = await import('@prisma/client');
+    const prisma = new PrismaClient();
+    const active = await prisma.systemSetting.findUnique({ where: { key: 'LAUNCH_PROMO_ACTIVE' } });
+    const isActive = active?.value === 'true';
+
+    if (!isActive) return res.json({ active: false });
+
+    const daysSetting = await prisma.systemSetting.findUnique({ where: { key: 'LAUNCH_PROMO_DAYS' } });
+    const startSetting = await prisma.systemSetting.findUnique({ where: { key: 'LAUNCH_PROMO_START' } });
+    const days = Number(daysSetting?.value || 0);
+    const start = startSetting?.value ? new Date(startSetting.value) : null;
+
+    if (days > 0 && start && !Number.isNaN(start.getTime())) {
+      const elapsed = (Date.now() - start.getTime()) / (24 * 60 * 60 * 1000);
+      if (elapsed > days) return res.json({ active: false });
+      return res.json({ active: true, daysLeft: Math.ceil(days - elapsed) });
+    }
+
+    return res.json({ active: true, daysLeft: null }); // unlimited
+  } catch (e) {
+    console.error('promo/status error', e);
+    return res.json({ active: false });
+  }
+});
+
 export default router;
