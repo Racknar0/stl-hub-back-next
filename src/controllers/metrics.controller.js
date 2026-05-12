@@ -595,7 +595,7 @@ export async function getSearchInsights(req, res) {
           _avg: { resultCount: true },
           _sum: { clickCount: true },
           orderBy: { _count: { id: 'desc' } },
-          take: 30,
+          take: 100,
         }),
         prisma.searchEvent.groupBy({
           by: ['queryNormNoAccents'],
