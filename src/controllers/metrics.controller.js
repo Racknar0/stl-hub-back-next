@@ -457,6 +457,9 @@ export async function getTopDownloads(req, res) {
     const responseData = {}
     results.forEach(r => { responseData[r.key] = r.data })
 
+    responseData['1d'] = responseData['hoy']
+    responseData['1w'] = responseData['7d']
+
     return res.json(responseData)
   } catch (e) {
     console.error('getTopDownloads error', e)
@@ -682,6 +685,9 @@ export async function getSearchInsights(req, res) {
       // eslint-disable-next-line no-await-in-loop
       out[k] = await buildFor(gte)
     }
+
+    out['1d'] = out['hoy']
+    out['1w'] = out['7d']
 
     return res.json(out)
   } catch (e) {
