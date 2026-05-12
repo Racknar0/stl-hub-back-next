@@ -850,6 +850,16 @@ export async function getSiteVisitsTimeseries(req, res) {
       dateFormat = '%Y-%m-01'
     }
 
+    if (granularity === 'week') {
+      const day = fromDate.getDay();
+      const diff = fromDate.getDate() - day + (day === 0 ? -6 : 1); // Lunes
+      fromDate.setDate(diff);
+      fromDate.setHours(0, 0, 0, 0);
+    } else if (granularity === 'month') {
+      fromDate.setDate(1);
+      fromDate.setHours(0, 0, 0, 0);
+    }
+
     const query = `
       SELECT ${dateExpr} as bucket,
              COUNT(*) as pv,
@@ -975,6 +985,16 @@ export async function getPlanClickTimeseries(req, res) {
       dateExpr = "DATE_FORMAT(DATE_SUB(createdAt, INTERVAL 5 HOUR), '%Y-%m-01')"
     }
 
+    if (granularity === 'week') {
+      const day = fromDate.getDay();
+      const diff = fromDate.getDate() - day + (day === 0 ? -6 : 1); // Lunes
+      fromDate.setDate(diff);
+      fromDate.setHours(0, 0, 0, 0);
+    } else if (granularity === 'month') {
+      fromDate.setDate(1);
+      fromDate.setHours(0, 0, 0, 0);
+    }
+
     const query = `
       SELECT ${dateExpr} as bucket,
              planId,
@@ -1046,6 +1066,16 @@ export async function getRegistrationTimeseries(req, res) {
     } else {
       granularity = 'month'
       dateExpr = "DATE_FORMAT(DATE_SUB(createdAt, INTERVAL 5 HOUR), '%Y-%m-01')"
+    }
+
+    if (granularity === 'week') {
+      const day = fromDate.getDay();
+      const diff = fromDate.getDate() - day + (day === 0 ? -6 : 1); // Lunes
+      fromDate.setDate(diff);
+      fromDate.setHours(0, 0, 0, 0);
+    } else if (granularity === 'month') {
+      fromDate.setDate(1);
+      fromDate.setHours(0, 0, 0, 0);
     }
 
     const query = `
