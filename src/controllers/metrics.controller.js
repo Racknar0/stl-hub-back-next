@@ -1132,4 +1132,35 @@ export async function getRegistrationTimeseries(req, res) {
   }
 }
 
+export async function getRecentDownloads(req, res) {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 50, 100)
+
+    const downloads = await prisma.downloadHistory.findMany({
+      orderBy: { downloadedAt: 'desc' },
+      take: limit,
+      include: {
+        user: { select: { id: true, email: true, isActive: true } },
+        asset: { select: { id: true, title: true, slug: true } }
+      }
+    })
+
+    const formatted = downloads.map(d => ({
+      id: d.id,
+      downloadedAt: d.downloadedAt,
+      assetId: d.asset?.id || d.assetId,
+      assetTitle: d.asset?.title || d.assetTitle || `#${d.assetId}`,
+      assetSlug: d.asset?.slug || null,
+      userId: d.user?.id || d.userId,
+      userEmail: d.user?.email || `Usuario #${d.userId || 'Desconocido'}`,
+      userActive: d.user?.isActive ?? true
+    }))
+
+    return res.json({ data: formatted })
+  } catch (e) {
+    console.error('getRecentDownloads error', e)
+    return res.status(500).json({ error: 'internal' })
+  }
+}
+
 

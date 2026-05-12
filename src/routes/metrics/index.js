@@ -5,6 +5,7 @@ import { getDownloadMetrics } from '../../controllers/metrics.controller.js'
 import { getRegistrationMetrics, getRegistrationTimeseries } from '../../controllers/metrics.controller.js'
 import { getTopDownloads } from '../../controllers/metrics.controller.js'
 import { getTaxonomyCounts } from '../../controllers/metrics.controller.js'
+import { getRecentDownloads } from '../../controllers/metrics.controller.js'
 import { recordSearchEvent, recordSearchClick, getSearchInsights, getSiteVisitsMetrics, getSiteVisitsTimeseries, getTopPages, recordPlanClick, getPlanClickTimeseries } from '../../controllers/metrics.controller.js'
 import { recordCampaignVisit } from '../../controllers/metrics.controller.js'
 import { getSalesMetrics } from '../../controllers/metrics.controller.js'
@@ -20,6 +21,7 @@ router.get('/downloads', getDownloadMetrics)
 router.get('/registrations', getRegistrationMetrics)
 router.get('/registrations/timeseries', getRegistrationTimeseries)
 router.get('/top-downloads', getTopDownloads)
+router.get('/recent-downloads', getRecentDownloads)
 router.get('/taxonomy-counts', getTaxonomyCounts)
 router.get('/sales', requireAuth, requireAdmin, getSalesMetrics)
 router.get('/site-visits', getSiteVisitsMetrics)
