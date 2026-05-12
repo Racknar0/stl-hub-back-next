@@ -20,6 +20,11 @@ import telegramRoutes from './telegram/index.js';
 import fileExplorerRoutes from './fileExplorer/fileExplorer.routes.js';
 import settingsRoutes from './settings/index.js';
 import notesRoutes from './notes/index.js';
+import { requireAuth, requireAdmin } from '../middlewares/auth.js';
+import {
+  createGiftCode, listGiftCodes, updateGiftCode, deleteGiftCode,
+  validateGiftCode, redeemGiftCode,
+} from '../controllers/giftCode.controller.js';
 
 const router = express.Router();
 
@@ -48,6 +53,14 @@ router.use('/batch-imports', batchImportsRoutes);
 router.use('/ai', aiRoutes);
 router.use('/file-explorer', fileExplorerRoutes);
 router.use('/', telegramRoutes);
+
+// ─── Gift Codes ────────────────────────────────────────
+router.post('/admin/gift-codes', requireAuth, requireAdmin, createGiftCode);
+router.get('/admin/gift-codes', requireAuth, requireAdmin, listGiftCodes);
+router.patch('/admin/gift-codes/:id', requireAuth, requireAdmin, updateGiftCode);
+router.delete('/admin/gift-codes/:id', requireAuth, requireAdmin, deleteGiftCode);
+router.get('/gift-codes/validate', validateGiftCode);          // public - for registration form
+router.post('/gift-codes/redeem', requireAuth, redeemGiftCode); // auth - for logged-in users
 
 // Public promo status (no auth)
 router.get('/promo/status', async (req, res) => {

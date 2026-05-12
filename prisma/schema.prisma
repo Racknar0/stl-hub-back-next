@@ -59,6 +59,9 @@ model user {
   // Métricas de búsquedas
   searchEvents SearchEvent[]
 
+  // Gift code redemptions
+  giftRedemptions GiftRedemption[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -659,4 +662,37 @@ model SystemSetting {
   updatedAt   DateTime @updatedAt
 
   @@map("systemsetting")
+}
+
+// Gift codes for promotional premium days
+model GiftCode {
+  id        Int       @id @default(autoincrement())
+  code      String    @unique
+  days      Int                        // days of premium granted
+  maxUses   Int       @default(1)      // 1 = single use, N = campaign
+  usedCount Int       @default(0)
+  expiresAt DateTime?                  // null = never expires
+  isActive  Boolean   @default(true)
+  note      String?   @db.Text         // admin notes (e.g. "TikTok campaign")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  redemptions GiftRedemption[]
+
+  @@map("giftcode")
+}
+
+model GiftRedemption {
+  id         Int      @id @default(autoincrement())
+  codeId     Int
+  userId     Int
+  daysGiven  Int                        // days granted at redemption time
+  redeemedAt DateTime @default(now())
+
+  code GiftCode @relation(fields: [codeId], references: [id], onDelete: Cascade)
+  user user     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([codeId, userId])            // one redemption per user per code
+  @@index([userId])
+  @@map("giftredemption")
 }

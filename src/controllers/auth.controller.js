@@ -663,8 +663,8 @@ export const register = async (req, res) => {
 
 // Activar cuenta con activationToken
 export const activateAccount = async (req, res) => {
-    const { token, language } = req.body;
-    console.log('Activation request - token:', token, 'language:', language);
+    const { token, language, giftCode } = req.body;
+    console.log('Activation request - token:', token, 'language:', language, 'giftCode:', giftCode || 'none');
     if (!token) {
         return res
             .status(401)
@@ -697,6 +697,53 @@ export const activateAccount = async (req, res) => {
             where: { id: user.id },
             data: { isActive: true, activationToken: null },
         });
+
+        // Auto-redeem gift code if provided
+        let giftRedeemed = false;
+        let giftDays = 0;
+        if (giftCode && typeof giftCode === 'string' && giftCode.trim()) {
+            try {
+                const gc = await prisma.giftCode.findUnique({
+                    where: { code: giftCode.trim().toUpperCase() },
+                });
+                if (gc && gc.isActive && gc.usedCount < gc.maxUses
+                    && (!gc.expiresAt || new Date() <= gc.expiresAt)) {
+                    // Check not already redeemed
+                    const existing = await prisma.giftRedemption.findUnique({
+                        where: { codeId_userId: { codeId: gc.id, userId: user.id } },
+                    });
+                    if (!existing) {
+                        const now = new Date();
+                        const endDate = new Date(now);
+                        endDate.setDate(endDate.getDate() + gc.days);
+                        await prisma.$transaction([
+                            prisma.subscription.create({
+                                data: {
+                                    userId: user.id,
+                                    status: 'ACTIVE',
+                                    startedAt: now,
+                                    currentPeriodEnd: endDate,
+                                },
+                            }),
+                            prisma.giftRedemption.create({
+                                data: { codeId: gc.id, userId: user.id, daysGiven: gc.days },
+                            }),
+                            prisma.giftCode.update({
+                                where: { id: gc.id },
+                                data: { usedCount: { increment: 1 } },
+                            }),
+                        ]);
+                        giftRedeemed = true;
+                        giftDays = gc.days;
+                        console.log(`[GIFT-CODE] Auto-redeemed "${gc.code}" for user ${user.id} — ${gc.days} days`);
+                    }
+                }
+            } catch (gcErr) {
+                console.error('[GIFT-CODE] Auto-redeem error during activation:', gcErr);
+                // Don't fail the activation for gift code errors
+            }
+        }
+
         return res
             .status(200)
             .json({
@@ -705,6 +752,8 @@ export const activateAccount = async (req, res) => {
                         ? 'Account activated successfully'
                         : 'Cuenta activada con éxito'
                 }`,
+                giftRedeemed,
+                giftDays,
             });
     } catch (error) {
         console.error('Error in activateAccount:', error);
