@@ -752,8 +752,22 @@ export async function recordSiteVisit(req, res) {
 export async function getSiteVisitsMetrics(req, res) {
   try {
     const now = new Date()
-    const oneDayAgo = new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000)
+    
+    // Colombia is UTC-5. Get start of today in UTC-5
+    const utc5Date = new Date(now.getTime() - 5 * 60 * 60 * 1000)
+    utc5Date.setUTCHours(0, 0, 0, 0)
+    const todayStartUtc5 = new Date(utc5Date.getTime() + 5 * 60 * 60 * 1000)
+
+    const thirtyMinAgo = new Date(now.getTime() - 30 * 60 * 1000)
+    const oneHourAgo = new Date(now.getTime() - 1 * 60 * 60 * 1000)
+    const threeHoursAgo = new Date(now.getTime() - 3 * 60 * 60 * 1000)
+    const sixHoursAgo = new Date(now.getTime() - 6 * 60 * 60 * 1000)
+    const twelveHoursAgo = new Date(now.getTime() - 12 * 60 * 60 * 1000)
+    
+    const twoDaysAgo = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000)
+    const threeDaysAgo = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000)
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+    const fifteenDaysAgo = new Date(now.getTime() - 15 * 24 * 60 * 60 * 1000)
     const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
     const threeSixtyFiveDaysAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000)
 
@@ -772,18 +786,28 @@ export async function getSiteVisitsMetrics(req, res) {
       };
     };
 
-    const [d1, d7, d30, d365, all] = await Promise.all([
-      getStats(oneDayAgo),
+    const [
+      m30, h1, h3, h6, h12, hoy, d2, d3, d7, d15, m1, y1, all
+    ] = await Promise.all([
+      getStats(thirtyMinAgo),
+      getStats(oneHourAgo),
+      getStats(threeHoursAgo),
+      getStats(sixHoursAgo),
+      getStats(twelveHoursAgo),
+      getStats(todayStartUtc5),
+      getStats(twoDaysAgo),
+      getStats(threeDaysAgo),
       getStats(sevenDaysAgo),
+      getStats(fifteenDaysAgo),
       getStats(thirtyDaysAgo),
       getStats(threeSixtyFiveDaysAgo),
       getStats(null)
     ]);
 
     return res.json({
-      pv: { '1d': d1.pv, '1w': d7.pv, '1m': d30.pv, '1y': d365.pv, all: all.pv },
-      sessions: { '1d': d1.sessions, '1w': d7.sessions, '1m': d30.sessions, '1y': d365.sessions, all: all.sessions },
-      visitors: { '1d': d1.visitors, '1w': d7.visitors, '1m': d30.visitors, '1y': d365.visitors, all: all.visitors },
+      pv: { '30m': m30.pv, '1h': h1.pv, '3h': h3.pv, '6h': h6.pv, '12h': h12.pv, 'hoy': hoy.pv, '2d': d2.pv, '3d': d3.pv, '7d': d7.pv, '15d': d15.pv, '1m': m1.pv, '1y': y1.pv, all: all.pv },
+      sessions: { '30m': m30.sessions, '1h': h1.sessions, '3h': h3.sessions, '6h': h6.sessions, '12h': h12.sessions, 'hoy': hoy.sessions, '2d': d2.sessions, '3d': d3.sessions, '7d': d7.sessions, '15d': d15.sessions, '1m': m1.sessions, '1y': y1.sessions, all: all.sessions },
+      visitors: { '30m': m30.visitors, '1h': h1.visitors, '3h': h3.visitors, '6h': h6.visitors, '12h': h12.visitors, 'hoy': hoy.visitors, '2d': d2.visitors, '3d': d3.visitors, '7d': d7.visitors, '15d': d15.visitors, '1m': m1.visitors, '1y': y1.visitors, all: all.visitors },
     })
   } catch (e) {
     console.error('getSiteVisitsMetrics error', e)
