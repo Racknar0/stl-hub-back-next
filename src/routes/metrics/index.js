@@ -2,7 +2,7 @@ import express from 'express'
 import { getUploadsMetrics, getConnectionsToday, getVpsMemoryMetrics } from '../../controllers/metrics.controller.js'
 import { getUsersCount } from '../../controllers/metrics.controller.js'
 import { getDownloadMetrics } from '../../controllers/metrics.controller.js'
-import { getRegistrationMetrics } from '../../controllers/metrics.controller.js'
+import { getRegistrationMetrics, getRegistrationTimeseries } from '../../controllers/metrics.controller.js'
 import { getTopDownloads } from '../../controllers/metrics.controller.js'
 import { getTaxonomyCounts } from '../../controllers/metrics.controller.js'
 import { recordSearchEvent, recordSearchClick, getSearchInsights, getSiteVisitsMetrics, getSiteVisitsTimeseries, getTopPages, recordPlanClick, getPlanClickTimeseries } from '../../controllers/metrics.controller.js'
@@ -18,6 +18,7 @@ router.get('/connections-today', getConnectionsToday)
 router.get('/users', getUsersCount)
 router.get('/downloads', getDownloadMetrics)
 router.get('/registrations', getRegistrationMetrics)
+router.get('/registrations/timeseries', getRegistrationTimeseries)
 router.get('/top-downloads', getTopDownloads)
 router.get('/taxonomy-counts', getTaxonomyCounts)
 router.get('/sales', requireAuth, requireAdmin, getSalesMetrics)
