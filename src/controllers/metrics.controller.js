@@ -443,7 +443,7 @@ export async function getTopDownloads(req, res) {
       where: gte ? { downloadedAt: { gte } } : undefined,
       _count: { id: true },
       orderBy: { _count: { id: 'desc' } },
-      take: 30,
+      take: 100,
     })
 
     const mapGroup = (arr) => arr.map(r => ({ name: r.assetTitle || `#${r.assetId}`, count: r._count?.id || 0 }))
@@ -924,7 +924,7 @@ export async function getTopPages(req, res) {
        WHERE createdAt >= ? AND createdAt <= ? AND path IS NOT NULL AND path != ''
        GROUP BY path
        ORDER BY cnt DESC
-       LIMIT 15`,
+       LIMIT 50`,
       fromDate,
       toDate
     )
