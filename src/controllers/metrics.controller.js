@@ -81,8 +81,11 @@ const salesProviderLabel = (providerRaw) => {
 };
 
 const buildSalesRangeBoundaries = (now = new Date()) => ({
-  '1d': new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000),
-  '1w': new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000),
+  'hoy': new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000),
+  '2d': new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000),
+  '3d': new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000),
+  '7d': new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000),
+  '15d': new Date(now.getTime() - 15 * 24 * 60 * 60 * 1000),
   '1m': new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000),
   '1y': new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000),
 });
@@ -338,8 +341,8 @@ export async function getSalesMetrics(req, res) {
       },
     });
 
-    const totals = { '1d': 0, '1w': 0, '1m': 0, '1y': 0, all: 0 };
-    const items = { '1d': [], '1w': [], '1m': [], '1y': [], all: [] };
+    const totals = { 'hoy': 0, '2d': 0, '3d': 0, '7d': 0, '15d': 0, '1m': 0, '1y': 0, all: 0 };
+    const items = { 'hoy': [], '2d': [], '3d': [], '7d': [], '15d': [], '1m': [], '1y': [], all: [] };
 
     for (const payment of completedPayments) {
       const paymentDate = payment?.createdAt ? new Date(payment.createdAt) : null;
@@ -424,10 +427,16 @@ export async function getRegistrationMetrics(req, res) {
 export async function getTopDownloads(req, res) {
   try {
     const now = new Date()
-    const oneDayAgo = new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000)
-    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
-    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
-    const threeSixtyFiveDaysAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000)
+    const ranges = {
+      'hoy': new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000),
+      '2d': new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000),
+      '3d': new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000),
+      '7d': new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000),
+      '15d': new Date(now.getTime() - 15 * 24 * 60 * 60 * 1000),
+      '1m': new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000),
+      '1y': new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000),
+      'all': undefined,
+    }
 
     const opts = (gte) => ({
       by: ['assetId', 'assetTitle'],
@@ -437,17 +446,18 @@ export async function getTopDownloads(req, res) {
       take: 30,
     })
 
-    const [d1, d7, d30, d365, all] = await Promise.all([
-      prisma.downloadHistory.groupBy(opts(oneDayAgo)),
-      prisma.downloadHistory.groupBy(opts(sevenDaysAgo)),
-      prisma.downloadHistory.groupBy(opts(thirtyDaysAgo)),
-      prisma.downloadHistory.groupBy(opts(threeSixtyFiveDaysAgo)),
-      prisma.downloadHistory.groupBy(opts(undefined)),
-    ])
+    const mapGroup = (arr) => arr.map(r => ({ name: r.assetTitle || `#${r.assetId}`, count: r._count?.id || 0 }))
 
-  const mapGroup = (arr) => arr.map(r => ({ name: r.assetTitle || `#${r.assetId}`, count: r._count?.id || 0 }))
+    const promises = Object.entries(ranges).map(async ([key, date]) => {
+      const res = await prisma.downloadHistory.groupBy(opts(date))
+      return { key, data: mapGroup(res) }
+    })
+    
+    const results = await Promise.all(promises)
+    const responseData = {}
+    results.forEach(r => { responseData[r.key] = r.data })
 
-    return res.json({ '1d': mapGroup(d1), '1w': mapGroup(d7), '1m': mapGroup(d30), '1y': mapGroup(d365), all: mapGroup(all) })
+    return res.json(responseData)
   } catch (e) {
     console.error('getTopDownloads error', e)
     return res.status(500).json({ error: 'internal' })
@@ -569,8 +579,11 @@ export async function getSearchInsights(req, res) {
     const now = Date.now()
     const mk = (ms) => new Date(now - ms)
     const ranges = {
-      '1d': mk(1 * 24 * 60 * 60 * 1000),
-      '1w': mk(7 * 24 * 60 * 60 * 1000),
+      'hoy': mk(1 * 24 * 60 * 60 * 1000),
+      '2d': mk(2 * 24 * 60 * 60 * 1000),
+      '3d': mk(3 * 24 * 60 * 60 * 1000),
+      '7d': mk(7 * 24 * 60 * 60 * 1000),
+      '15d': mk(15 * 24 * 60 * 60 * 1000),
       '1m': mk(30 * 24 * 60 * 60 * 1000),
       '1y': mk(365 * 24 * 60 * 60 * 1000),
       all: null,
