@@ -810,19 +810,19 @@ export async function getSiteVisitsTimeseries(req, res) {
     let granularity, dateExpr, dateFormat
     if (diffDays <= 1) {
       granularity = 'hour'
-      dateExpr = "DATE_FORMAT(createdAt, '%Y-%m-%d %H:00:00')"
+      dateExpr = "DATE_FORMAT(DATE_SUB(createdAt, INTERVAL 5 HOUR), '%Y-%m-%d %H:00:00')"
       dateFormat = '%Y-%m-%d %H:00'
     } else if (diffDays <= 20) {
       granularity = 'day'
-      dateExpr = 'DATE(createdAt)'
+      dateExpr = 'DATE(DATE_SUB(createdAt, INTERVAL 5 HOUR))'
       dateFormat = '%Y-%m-%d'
     } else if (diffDays <= 100) {
       granularity = 'week'
-      dateExpr = "DATE(DATE_SUB(createdAt, INTERVAL WEEKDAY(createdAt) DAY))"
+      dateExpr = "DATE(DATE_SUB(DATE_SUB(createdAt, INTERVAL 5 HOUR), INTERVAL WEEKDAY(DATE_SUB(createdAt, INTERVAL 5 HOUR)) DAY))"
       dateFormat = '%Y-%m-%d'
     } else {
       granularity = 'month'
-      dateExpr = "DATE_FORMAT(createdAt, '%Y-%m-01')"
+      dateExpr = "DATE_FORMAT(DATE_SUB(createdAt, INTERVAL 5 HOUR), '%Y-%m-01')"
       dateFormat = '%Y-%m-01'
     }
 
@@ -939,16 +939,16 @@ export async function getPlanClickTimeseries(req, res) {
     let granularity, dateExpr
     if (diffDays <= 1) {
       granularity = 'hour'
-      dateExpr = "DATE_FORMAT(createdAt, '%Y-%m-%d %H:00:00')"
+      dateExpr = "DATE_FORMAT(DATE_SUB(createdAt, INTERVAL 5 HOUR), '%Y-%m-%d %H:00:00')"
     } else if (diffDays <= 20) {
       granularity = 'day'
-      dateExpr = 'DATE(createdAt)'
+      dateExpr = 'DATE(DATE_SUB(createdAt, INTERVAL 5 HOUR))'
     } else if (diffDays <= 100) {
       granularity = 'week'
-      dateExpr = "DATE(DATE_SUB(createdAt, INTERVAL WEEKDAY(createdAt) DAY))"
+      dateExpr = "DATE(DATE_SUB(DATE_SUB(createdAt, INTERVAL 5 HOUR), INTERVAL WEEKDAY(DATE_SUB(createdAt, INTERVAL 5 HOUR)) DAY))"
     } else {
       granularity = 'month'
-      dateExpr = "DATE_FORMAT(createdAt, '%Y-%m-01')"
+      dateExpr = "DATE_FORMAT(DATE_SUB(createdAt, INTERVAL 5 HOUR), '%Y-%m-01')"
     }
 
     const query = `
@@ -1012,16 +1012,16 @@ export async function getRegistrationTimeseries(req, res) {
     let granularity, dateExpr
     if (diffDays <= 1) {
       granularity = 'hour'
-      dateExpr = "DATE_FORMAT(createdAt, '%Y-%m-%d %H:00:00')"
+      dateExpr = "DATE_FORMAT(DATE_SUB(createdAt, INTERVAL 5 HOUR), '%Y-%m-%d %H:00:00')"
     } else if (diffDays <= 20) {
       granularity = 'day'
-      dateExpr = 'DATE(createdAt)'
+      dateExpr = 'DATE(DATE_SUB(createdAt, INTERVAL 5 HOUR))'
     } else if (diffDays <= 100) {
       granularity = 'week'
-      dateExpr = "DATE(DATE_SUB(createdAt, INTERVAL WEEKDAY(createdAt) DAY))"
+      dateExpr = "DATE(DATE_SUB(DATE_SUB(createdAt, INTERVAL 5 HOUR), INTERVAL WEEKDAY(DATE_SUB(createdAt, INTERVAL 5 HOUR)) DAY))"
     } else {
       granularity = 'month'
-      dateExpr = "DATE_FORMAT(createdAt, '%Y-%m-01')"
+      dateExpr = "DATE_FORMAT(DATE_SUB(createdAt, INTERVAL 5 HOUR), '%Y-%m-01')"
     }
 
     const query = `
