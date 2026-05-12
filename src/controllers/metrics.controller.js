@@ -1152,23 +1152,39 @@ export async function getRecentDownloads(req, res) {
 
     const downloads = await prisma.downloadHistory.findMany({
       orderBy: { downloadedAt: 'desc' },
-      take: limit,
-      include: {
-        user: { select: { id: true, email: true, isActive: true } },
-        asset: { select: { id: true, title: true, slug: true } }
-      }
+      take: limit
     })
 
-    const formatted = downloads.map(d => ({
-      id: d.id,
-      downloadedAt: d.downloadedAt,
-      assetId: d.asset?.id || d.assetId,
-      assetTitle: d.asset?.title || d.assetTitle || `#${d.assetId}`,
-      assetSlug: d.asset?.slug || null,
-      userId: d.user?.id || d.userId,
-      userEmail: d.user?.email || `Usuario #${d.userId || 'Desconocido'}`,
-      userActive: d.user?.isActive ?? true
-    }))
+    const userIds = [...new Set(downloads.map(d => d.userId).filter(Boolean))]
+    const users = await prisma.user.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, email: true, isActive: true }
+    })
+    const userMap = {}
+    users.forEach(u => { userMap[u.id] = u })
+
+    const assetIds = [...new Set(downloads.map(d => d.assetId).filter(Boolean))]
+    const assets = await prisma.asset.findMany({
+      where: { id: { in: assetIds } },
+      select: { id: true, title: true, slug: true }
+    })
+    const assetMap = {}
+    assets.forEach(a => { assetMap[a.id] = a })
+
+    const formatted = downloads.map(d => {
+      const u = userMap[d.userId] || {}
+      const a = assetMap[d.assetId] || {}
+      return {
+        id: d.id,
+        downloadedAt: d.downloadedAt,
+        assetId: a.id || d.assetId,
+        assetTitle: a.title || d.assetTitle || `#${d.assetId}`,
+        assetSlug: a.slug || null,
+        userId: u.id || d.userId,
+        userEmail: u.email || `Usuario #${d.userId || 'Desconocido'}`,
+        userActive: u.isActive ?? true
+      }
+    })
 
     return res.json({ data: formatted })
   } catch (e) {
