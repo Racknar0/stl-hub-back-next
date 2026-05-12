@@ -924,15 +924,22 @@ export async function getTopPages(req, res) {
        WHERE createdAt >= ? AND createdAt <= ? AND path IS NOT NULL AND path != ''
        GROUP BY path
        ORDER BY cnt DESC
-       LIMIT 50`,
+       LIMIT 150`,
       fromDate,
       toDate
     )
 
-    const pages = (rows || []).map((r) => ({
+    let pages = (rows || []).map((r) => ({
       path: String(r.path || '/'),
       count: Number(r.cnt || 0),
     }))
+
+    // Filter out common non-content routes (ignoring locale prefixes)
+    pages = pages.filter(p => {
+      const cleanPath = p.path.replace(/^\/(en|es)/i, '')
+      const ignored = ['/', '', '/search', '/login', '/register', '/suscripcion', '/account', '/dashboard']
+      return !ignored.includes(cleanPath)
+    }).slice(0, 50)
 
     return res.json({
       from: fromDate.toISOString().slice(0, 10),
