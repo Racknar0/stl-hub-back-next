@@ -823,10 +823,24 @@ export async function getSiteVisitsMetrics(req, res) {
       getStats(null)
     ]);
 
+    const pvMap = { '30m': m30.pv, '1h': h1.pv, '3h': h3.pv, '6h': h6.pv, '12h': h12.pv, 'hoy': hoy.pv, '2d': d2.pv, '3d': d3.pv, '7d': d7.pv, '15d': d15.pv, '1m': m1.pv, '1y': y1.pv, all: all.pv }
+    const sessionMap = { '30m': m30.sessions, '1h': h1.sessions, '3h': h3.sessions, '6h': h6.sessions, '12h': h12.sessions, 'hoy': hoy.sessions, '2d': d2.sessions, '3d': d3.sessions, '7d': d7.sessions, '15d': d15.sessions, '1m': m1.sessions, '1y': y1.sessions, all: all.sessions }
+    const visitorMap = { '30m': m30.visitors, '1h': h1.visitors, '3h': h3.visitors, '6h': h6.visitors, '12h': h12.visitors, 'hoy': hoy.visitors, '2d': d2.visitors, '3d': d3.visitors, '7d': d7.visitors, '15d': d15.visitors, '1m': m1.visitors, '1y': y1.visitors, all: all.visitors }
+
+    // Backward compatibility aliases for dashboard widgets
+    pvMap['1d'] = pvMap['hoy']
+    pvMap['1w'] = pvMap['7d']
+    
+    sessionMap['1d'] = sessionMap['hoy']
+    sessionMap['1w'] = sessionMap['7d']
+
+    visitorMap['1d'] = visitorMap['hoy']
+    visitorMap['1w'] = visitorMap['7d']
+
     return res.json({
-      pv: { '30m': m30.pv, '1h': h1.pv, '3h': h3.pv, '6h': h6.pv, '12h': h12.pv, 'hoy': hoy.pv, '2d': d2.pv, '3d': d3.pv, '7d': d7.pv, '15d': d15.pv, '1m': m1.pv, '1y': y1.pv, all: all.pv },
-      sessions: { '30m': m30.sessions, '1h': h1.sessions, '3h': h3.sessions, '6h': h6.sessions, '12h': h12.sessions, 'hoy': hoy.sessions, '2d': d2.sessions, '3d': d3.sessions, '7d': d7.sessions, '15d': d15.sessions, '1m': m1.sessions, '1y': y1.sessions, all: all.sessions },
-      visitors: { '30m': m30.visitors, '1h': h1.visitors, '3h': h3.visitors, '6h': h6.visitors, '12h': h12.visitors, 'hoy': hoy.visitors, '2d': d2.visitors, '3d': d3.visitors, '7d': d7.visitors, '15d': d15.visitors, '1m': m1.visitors, '1y': y1.visitors, all: all.visitors },
+      pv: pvMap,
+      sessions: sessionMap,
+      visitors: visitorMap,
     })
   } catch (e) {
     console.error('getSiteVisitsMetrics error', e)
