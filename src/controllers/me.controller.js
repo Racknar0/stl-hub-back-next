@@ -138,16 +138,22 @@ export const getMyDownloads = async (req, res) => {
     const userId = Number(req.user?.id);
     if (!userId) return res.status(401).json({ message: 'Unauthorized' });
 
-    // Traer más de 20 para filtrar no disponibles y aún retornar 20
-    const history = await prisma.downloadHistory.findMany({
-      where: { userId },
-      orderBy: { downloadedAt: 'desc' },
-      take: 100,
-      select: { assetId: true, downloadedAt: true }
-    });
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize) || 20, 1), 100);
+
+    const [total, history] = await prisma.$transaction([
+      prisma.downloadHistory.count({ where: { userId } }),
+      prisma.downloadHistory.findMany({
+        where: { userId },
+        orderBy: { downloadedAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        select: { assetId: true, downloadedAt: true }
+      }),
+    ]);
 
     const ids = Array.from(new Set(history.map(h => h.assetId)));
-    if (!ids.length) return res.json([]);
+    if (!ids.length) return res.json({ data: [], total, page, pageSize });
 
     const assets = await prisma.asset.findMany({
       where: { id: { in: ids }, status: 'PUBLISHED' },
@@ -165,10 +171,9 @@ export const getMyDownloads = async (req, res) => {
         thumb = imgs && imgs.length ? imgs[0] : null;
       } catch {}
       items.push({ id: a.id, title: a.title, slug: a.slug, image: thumb, downloadedAt: h.downloadedAt });
-      if (items.length >= 20) break;
     }
 
-    return res.json(items);
+    return res.json({ data: items, total, page, pageSize });
   } catch (e) {
     console.error('[ME] getMyDownloads error:', e);
     return res.status(500).json({ message: 'Error getting downloads' });

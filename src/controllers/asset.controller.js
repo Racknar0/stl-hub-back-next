@@ -3128,22 +3128,6 @@ export const requestDownload = async (req, res) => {
       await prisma.downloadHistory.create({
         data: { userId, assetId: id, assetTitle },
       });
-
-      // Mantener sólo las 20 más recientes por usuario
-      const count = await prisma.downloadHistory.count({ where: { userId } });
-      if (count > 20) {
-        const old = await prisma.downloadHistory.findMany({
-          where: { userId },
-          orderBy: { downloadedAt: 'desc' },
-          skip: 20,
-          select: { id: true },
-        });
-        if (old.length) {
-          await prisma.downloadHistory.deleteMany({
-            where: { id: { in: old.map((o) => o.id) } },
-          });
-        }
-      }
     }
 
     // 6) Devolver el link

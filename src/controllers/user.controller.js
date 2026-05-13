@@ -144,11 +144,14 @@ export const getUserById = async (req, res) => {
     const subEnd = sub ? new Date(sub.currentPeriodEnd) : null;
     const daysRemaining = subEnd ? Math.max(0, Math.ceil((subEnd - now) / (1000 * 60 * 60 * 24))) : 0;
 
-    // Download history (last 20)
+    // Download history (paginated)
+    const dlPage = Math.max(parseInt(req.query.dlPage) || 1, 1);
+    const dlPageSize = Math.min(Math.max(parseInt(req.query.dlPageSize) || 20, 1), 100);
     const downloads = await prisma.downloadHistory.findMany({
       where: { userId: user.id },
       orderBy: { downloadedAt: 'desc' },
-      take: 20,
+      skip: (dlPage - 1) * dlPageSize,
+      take: dlPageSize,
     });
 
     // Enrich downloads with asset images
@@ -199,6 +202,9 @@ export const getUserById = async (req, res) => {
         : null,
       stats: { totalDownloads, topCategories },
       downloads: enrichedDownloads,
+      dlPage,
+      dlPageSize,
+      dlTotal: totalDownloads,
     });
   } catch (error) {
     console.log('Error getting user: ', error);
