@@ -2858,56 +2858,126 @@ export const searchAssets = async (req, res) => {
         // 3) coincidencias por categories
         // Además calculamos `total` con un count que engloba las 3 condiciones.
 
-        // Condiciones específicas
-        const titleCond = {
-            OR: [
-                { title: { contains: qStr } },
-                { titleEn: { contains: qStr } },
-                { archiveName: { contains: qStr } },
-            ],
-        };
+        // Tokenizar query en palabras individuales para matching flexible
+        const qWords = qStr.split(/\s+/).filter((w) => w.length >= 2);
+        // Fallback: si el query tiene 1 sola palabra corta, usar el string completo
+        const searchTokens = qWords.length > 0 ? qWords : (qStr.length > 0 ? [qStr] : []);
 
-        const tagsCond = {
-            tags: {
-                some: {
+        // Cada palabra debe matchear en al menos uno de los campos del título
+        const titleCond = searchTokens.length > 0
+            ? {
+                AND: searchTokens.map((word) => ({
                     OR: [
-                        { slug: { contains: qStr } },
-                        { slugEn: { contains: qStr } },
-                        { name: { contains: qStr } },
-                        { nameEn: { contains: qStr } },
+                        { title: { contains: word } },
+                        { titleEn: { contains: word } },
+                        { archiveName: { contains: word } },
                     ],
-                },
-            },
-        };
+                })),
+            }
+            : {
+                OR: [
+                    { title: { contains: qStr } },
+                    { titleEn: { contains: qStr } },
+                    { archiveName: { contains: qStr } },
+                ],
+            };
 
-        const catsCond = {
-            categories: {
-                some: {
-                    OR: [
-                        { slug: { contains: qStr } },
-                        { slugEn: { contains: qStr } },
-                        { name: { contains: qStr } },
-                        { nameEn: { contains: qStr } },
-                    ],
+        // Para tags: matchear si algún tag contiene ALGUNA de las palabras
+        // (usar OR aquí porque un solo tag relevante ya es señal suficiente)
+        const tagsTokenConditions = searchTokens.length > 0
+            ? searchTokens.map((word) => ({
+                tags: {
+                    some: {
+                        OR: [
+                            { slug: { contains: word } },
+                            { slugEn: { contains: word } },
+                            { name: { contains: word } },
+                            { nameEn: { contains: word } },
+                        ],
+                    },
                 },
-            },
-        };
+            }))
+            : [];
+
+        const tagsCond = tagsTokenConditions.length > 0
+            ? { AND: tagsTokenConditions }
+            : {
+                tags: {
+                    some: {
+                        OR: [
+                            { slug: { contains: qStr } },
+                            { slugEn: { contains: qStr } },
+                            { name: { contains: qStr } },
+                            { nameEn: { contains: qStr } },
+                        ],
+                    },
+                },
+            };
+
+        // Para categorías: igual, matchear si alguna categoría contiene alguna palabra
+        const catsTokenConditions = searchTokens.length > 0
+            ? searchTokens.map((word) => ({
+                categories: {
+                    some: {
+                        OR: [
+                            { slug: { contains: word } },
+                            { slugEn: { contains: word } },
+                            { name: { contains: word } },
+                            { nameEn: { contains: word } },
+                        ],
+                    },
+                },
+            }))
+            : [];
+
+        const catsCond = catsTokenConditions.length > 0
+            ? { AND: catsTokenConditions }
+            : {
+                categories: {
+                    some: {
+                        OR: [
+                            { slug: { contains: qStr } },
+                            { slugEn: { contains: qStr } },
+                            { name: { contains: qStr } },
+                            { nameEn: { contains: qStr } },
+                        ],
+                    },
+                },
+            };
+
+        // Para descripciones: matchear si todas las palabras aparecen
+        const descCond = searchTokens.length > 0
+            ? {
+                AND: searchTokens.map((word) => ({
+                    OR: [
+                        { description: { contains: word } },
+                        { descriptionEn: { contains: word } },
+                    ],
+                })),
+            }
+            : {
+                OR: [
+                    { description: { contains: qStr } },
+                    { descriptionEn: { contains: qStr } },
+                ],
+            };
 
         // count total de coincidencias únicas (DB)
         const matchAnyWhere = { ...where };
         // asegurarnos de mantener AND existente
         matchAnyWhere.AND = Array.isArray(matchAnyWhere.AND) ? [...matchAnyWhere.AND] : [];
-        matchAnyWhere.AND.push({ OR: [titleCond, tagsCond, catsCond] });
+        matchAnyWhere.AND.push({ OR: [titleCond, tagsCond, catsCond, descCond] });
 
         const total = await prisma.asset.count({ where: matchAnyWhere });
 
         // límite razonable en memoria (igual que antes)
         const MEM_LIMIT = 1000;
 
-        // Ejecutar 3 consultas separadas manteniendo orden por createdAt desc
+        // Ejecutar 4 consultas separadas manteniendo orden por createdAt desc
         const titleItems = await prisma.asset.findMany({ where: { ...where, AND: [...(where.AND || []), titleCond] }, orderBy, take: MEM_LIMIT, select });
         const tagItems = await prisma.asset.findMany({ where: { ...where, AND: [...(where.AND || []), tagsCond] }, orderBy, take: MEM_LIMIT, select });
         const catItems = await prisma.asset.findMany({ where: { ...where, AND: [...(where.AND || []), catsCond] }, orderBy, take: MEM_LIMIT, select });
+        const descItems = await prisma.asset.findMany({ where: { ...where, AND: [...(where.AND || []), descCond] }, orderBy, take: MEM_LIMIT, select });
 
         // Concatenar en el orden deseado y eliminar duplicados
         const seen = new Set();
@@ -2930,11 +3000,64 @@ export const searchAssets = async (req, res) => {
                 combined.push(it);
             }
         }
+        for (const it of descItems) {
+            if (!seen.has(it.id)) {
+                seen.add(it.id);
+                combined.push(it);
+            }
+        }
 
         // Paginación en memoria sobre la lista combinada
         const start = page * size;
         const end = start + size;
         const outFull = combined.slice(0, MEM_LIMIT); // respetar límite
+
+        // --- AI FALLBACK: si la búsqueda normal devuelve muy pocos resultados ---
+        const AI_FALLBACK_THRESHOLD = 3;
+        if (combined.length < AI_FALLBACK_THRESHOLD && qLower && page === 0) {
+            try {
+                const FB_LIMIT = 300;
+                const aiResults = await qdrantMultimodalService.searchByImage(null, null, qStr, FB_LIMIT);
+                const aiIdsOrdered = [];
+                const aiSeen = new Set(combined.map((it) => it.id)); // excluir los que ya tenemos
+
+                for (const hit of aiResults || []) {
+                    const id = Number(hit?.id);
+                    if (!Number.isFinite(id) || id <= 0 || aiSeen.has(id)) continue;
+                    aiSeen.add(id);
+                    aiIdsOrdered.push(id);
+                    if (aiIdsOrdered.length >= FB_LIMIT) break;
+                }
+
+                if (aiIdsOrdered.length) {
+                    const aiWhere = { ...where, id: { in: aiIdsOrdered } };
+                    const aiItemsDb = await prisma.asset.findMany({ where: aiWhere, select });
+                    const aiById = new Map(aiItemsDb.map((it) => [Number(it.id), it]));
+                    const aiFallbackItems = [];
+                    for (const id of aiIdsOrdered) {
+                        const row = aiById.get(id);
+                        if (row) aiFallbackItems.push(row);
+                    }
+
+                    // Prepend original results, then AI results
+                    const merged = [...combined, ...aiFallbackItems];
+                    const mergedTotal = merged.length;
+                    const mergedOut = merged.slice(0, size);
+                    const mergedHasMore = size < mergedTotal;
+
+                    const items = mergedOut.map((it) => {
+                        const tagsEs = Array.isArray(it.tags) ? it.tags.map((t) => t.slug) : [];
+                        const tagsEn = Array.isArray(it.tags) ? it.tags.map((t) => t.nameEn || t.name || t.slug) : [];
+                        return { ...it, tagsEs, tagsEn };
+                    });
+
+                    return res.json({ items, total: mergedTotal, page, pageSize: size, hasMore: mergedHasMore, aiFallback: true });
+                }
+            } catch (fbErr) {
+                console.warn('[ASSETS] AI fallback error (degrading gracefully):', fbErr?.message || fbErr);
+            }
+        }
+
         const out = start < outFull.length ? outFull.slice(start, end) : [];
         const hasMore = end < combined.length;
 

@@ -696,6 +696,56 @@ export async function getSearchInsights(req, res) {
   }
 }
 
+export async function getRecentSearches(req, res) {
+  try {
+    const limit = Math.min(Math.max(1, Number(req.query?.limit) || 50), 100)
+
+    const rows = await prisma.searchEvent.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: {
+        id: true,
+        queryOriginal: true,
+        resultCount: true,
+        isAiSearch: true,
+        clickCount: true,
+        createdAt: true,
+        userId: true,
+      },
+    })
+
+    // Resolve user emails for rows that have a userId
+    const userIds = [...new Set(rows.filter((r) => r.userId).map((r) => r.userId))]
+    const users = userIds.length
+      ? await prisma.user.findMany({
+          where: { id: { in: userIds } },
+          select: { id: true, email: true, isActive: true },
+        })
+      : []
+    const userMap = new Map(users.map((u) => [u.id, u]))
+
+    const data = rows.map((r) => {
+      const user = r.userId ? userMap.get(r.userId) : null
+      return {
+        id: r.id,
+        query: r.queryOriginal,
+        resultCount: r.resultCount,
+        isAiSearch: r.isAiSearch,
+        clickCount: r.clickCount || 0,
+        createdAt: r.createdAt,
+        userId: r.userId || null,
+        userEmail: user?.email || null,
+        userActive: user?.isActive ?? null,
+      }
+    })
+
+    return res.json({ data })
+  } catch (e) {
+    console.error('getRecentSearches error', e)
+    return res.status(500).json({ error: 'internal' })
+  }
+}
+
 export async function getTaxonomyCounts(req, res) {
   try {
     const [categoriesRaw, tagsRaw] = await Promise.all([
