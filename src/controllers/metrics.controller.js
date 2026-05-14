@@ -746,6 +746,31 @@ export async function getRecentSearches(req, res) {
   }
 }
 
+export async function getTopSearchQueries(req, res) {
+  try {
+    const limit = Math.min(Math.max(1, Number(req.query?.limit) || 300), 500)
+    const minCount = Math.max(1, Number(req.query?.minCount) || 2)
+
+    const rows = await prisma.searchEvent.groupBy({
+      by: ['queryNormNoAccents'],
+      _count: { id: true },
+      having: { id: { _count: { gte: minCount } } },
+      orderBy: { _count: { id: 'desc' } },
+      take: limit,
+    })
+
+    const queries = (rows || []).map((r) => ({
+      query: r.queryNormNoAccents,
+      count: r._count?.id || 0,
+    }))
+
+    return res.json({ queries })
+  } catch (e) {
+    console.error('getTopSearchQueries error', e)
+    return res.status(500).json({ error: 'internal' })
+  }
+}
+
 export async function getTaxonomyCounts(req, res) {
   try {
     const [categoriesRaw, tagsRaw] = await Promise.all([

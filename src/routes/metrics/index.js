@@ -6,7 +6,7 @@ import { getRegistrationMetrics, getRegistrationTimeseries } from '../../control
 import { getTopDownloads } from '../../controllers/metrics.controller.js'
 import { getTaxonomyCounts } from '../../controllers/metrics.controller.js'
 import { getRecentDownloads } from '../../controllers/metrics.controller.js'
-import { recordSearchEvent, recordSearchClick, getSearchInsights, getRecentSearches, getSiteVisitsMetrics, getSiteVisitsTimeseries, getTopPages, recordPlanClick, getPlanClickTimeseries } from '../../controllers/metrics.controller.js'
+import { recordSearchEvent, recordSearchClick, getSearchInsights, getRecentSearches, getTopSearchQueries, getSiteVisitsMetrics, getSiteVisitsTimeseries, getTopPages, recordPlanClick, getPlanClickTimeseries } from '../../controllers/metrics.controller.js'
 import { recordCampaignVisit } from '../../controllers/metrics.controller.js'
 import { getSalesMetrics } from '../../controllers/metrics.controller.js'
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
@@ -32,6 +32,7 @@ router.post('/search', recordSearchEvent)
 router.post('/search/:id/click', recordSearchClick)
 router.get('/search-insights', getSearchInsights)
 router.get('/recent-searches', getRecentSearches)
+router.get('/top-search-queries', getTopSearchQueries)
 router.post('/campaign-visit', recordCampaignVisit)
 router.post('/plan-click', recordPlanClick)
 router.get('/plan-clicks/timeseries', getPlanClickTimeseries)
