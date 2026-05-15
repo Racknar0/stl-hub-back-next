@@ -317,7 +317,7 @@ export const searchByImage = async (imageBuffer, mimeType, textContext = '', lim
     // Query Qdrant
     const results = await qdrant.search(qdrantCollection, {
       vector: queryVector,
-      limit: Math.min(200, Math.max(1, Number(limit) || 20)),
+      limit: Math.min(500, Math.max(1, Number(limit) || 20)),
       with_payload: true,
       score_threshold: scoreThreshold
     });

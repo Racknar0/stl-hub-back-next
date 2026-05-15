@@ -2831,13 +2831,13 @@ export const searchAssets = async (req, res) => {
             // --- AI Suggestions: second query with lower threshold ---
             let suggestions = [];
             try {
-                const sugResults = await qdrantMultimodalService.searchByImage(null, null, qStr, 72, 0.1);
+                const sugResults = await qdrantMultimodalService.searchByImage(null, null, qStr, 300, 0.1);
                 const sugIds = [];
                 for (const hit of sugResults || []) {
                     const id = Number(hit?.id);
                     if (!Number.isFinite(id) || id <= 0 || aiSeen.has(id)) continue;
                     sugIds.push(id);
-                    if (sugIds.length >= 48) break;
+                    if (sugIds.length >= 200) break;
                 }
                 if (sugIds.length > 0) {
                     const sugDb = await prisma.asset.findMany({
@@ -3117,13 +3117,13 @@ export const searchAssets = async (req, res) => {
         if (qStr && page === 0) {
             try {
                 const mainIds = new Set(combined.map((it) => Number(it.id)));
-                const sugResults = await qdrantMultimodalService.searchByImage(null, null, qStr, 72, 0.15);
+                const sugResults = await qdrantMultimodalService.searchByImage(null, null, qStr, 300, 0.15);
                 const sugIds = [];
                 for (const hit of sugResults || []) {
                     const id = Number(hit?.id);
                     if (!Number.isFinite(id) || id <= 0 || mainIds.has(id)) continue;
                     sugIds.push(id);
-                    if (sugIds.length >= 48) break;
+                    if (sugIds.length >= 200) break;
                 }
                 if (sugIds.length > 0) {
                     const sugDb = await prisma.asset.findMany({
