@@ -154,6 +154,12 @@ export async function getVpsMemoryMetrics(req, res) {
     usedBytes = Math.max(0, Math.min(totalBytes, usedBytes || (totalBytes - availableBytes)))
     const usagePct = totalBytes > 0 ? Math.round((usedBytes / totalBytes) * 1000) / 10 : 0
 
+    const os = await import('os')
+    const ramTotalBytes = os.totalmem()
+    const ramFreeBytes = os.freemem()
+    const ramUsedBytes = ramTotalBytes - ramFreeBytes
+    const ramUsagePct = ramTotalBytes > 0 ? Math.round((ramUsedBytes / ramTotalBytes) * 1000) / 10 : 0
+
     return res.json({
       supported: true,
       platform,
@@ -164,6 +170,10 @@ export async function getVpsMemoryMetrics(req, res) {
       usedBytes,
       usagePct,
       dangerThresholdPct: 90,
+      ramTotalBytes,
+      ramFreeBytes,
+      ramUsedBytes,
+      ramUsagePct,
     })
   } catch (e) {
     console.error('getVpsMemoryMetrics error', e)

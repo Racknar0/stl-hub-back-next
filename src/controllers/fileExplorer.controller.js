@@ -1,23 +1,31 @@
 import fs from 'fs';
 import path from 'path';
+import { exec } from 'child_process';
+import util from 'util';
 
+const execAsync = util.promisify(exec);
 const UPLOADS_DIR = path.resolve('uploads');
 
-// Helper para asegurar que el path siempre esté dentro de UPLOADS_DIR
+const getFolderSize = async (dirPath) => {
+    if (process.platform === 'win32') return 0; // Skip on Windows dev
+    try {
+        const { stdout } = await execAsync(`du -sb "${dirPath}"`);
+        return parseInt(stdout.split(/\s+/)[0], 10) || 0;
+    } catch (e) {
+        return 0;
+    }
+};
+
 const resolveSafePath = (relativePath) => {
-    // Evitar directorios nulos o undefined
     const safeRelativePath = relativePath || '/';
-    // Resolver la ruta absoluta
     const absolutePath = path.resolve(UPLOADS_DIR, `.${safeRelativePath}`);
-    // Verificar si sigue estando dentro de UPLOADS_DIR
     if (!absolutePath.startsWith(UPLOADS_DIR)) {
         throw new Error('Acceso denegado. Ruta fuera de los límites permitidos.');
     }
     return absolutePath;
 };
 
-// Map fs.Dirent to Chonky's FileData interface
-const mapToFileData = (dirent, currentPath) => {
+const mapToFileData = async (dirent, currentPath) => {
     const isDir = dirent.isDirectory();
     const filePath = path.join(resolveSafePath(currentPath), dirent.name);
     let size = 0;
@@ -27,14 +35,19 @@ const mapToFileData = (dirent, currentPath) => {
         const stats = fs.statSync(filePath);
         size = stats.size;
         modDate = stats.mtime;
-    } catch (err) {
-        // Ignorar si hay problemas leyendo los stats (e.g. archivos temporales que desaparecieron)
-    }
+
+        if (isDir && currentPath === '/') {
+            // Only calculate folder size deeply for root folders
+            size = await getFolderSize(filePath);
+        } else if (isDir) {
+            size = 0; // Don't show size for nested folders
+        }
+    } catch (err) {}
 
     const id = path.posix.join(currentPath === '/' ? '' : currentPath, dirent.name);
 
     return {
-        id, // Usamos la ruta relativa como ID único
+        id,
         name: dirent.name,
         isDir,
         size,
@@ -55,7 +68,7 @@ export const listDirectory = async (req, res) => {
 
         const entries = fs.readdirSync(absolutePath, { withFileTypes: true });
         
-        const files = entries.map(entry => mapToFileData(entry, folderPath));
+        const files = await Promise.all(entries.map(entry => mapToFileData(entry, folderPath)));
 
         res.json({ success: true, files });
     } catch (error) {
