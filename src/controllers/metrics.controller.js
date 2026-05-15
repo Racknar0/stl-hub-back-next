@@ -880,8 +880,19 @@ export async function getSiteVisitsMetrics(req, res) {
       };
     };
 
+    const getDownloads = async (gte) => {
+      let result;
+      if (gte) {
+        result = await prisma.$queryRaw`SELECT COUNT(*) as cnt FROM downloadhistory WHERE downloadedAt >= ${gte}`;
+      } else {
+        result = await prisma.$queryRaw`SELECT COUNT(*) as cnt FROM downloadhistory`;
+      }
+      return Number(result?.[0]?.cnt || 0);
+    };
+
     const [
-      m30, h1, h3, h6, h12, hoy, d2, d3, d7, d15, m1, y1, all
+      m30, h1, h3, h6, h12, hoy, d2, d3, d7, d15, m1, y1, all,
+      dl30m, dl1h, dl3h, dl6h, dl12h, dlHoy, dl2d, dl3d, dl7d, dl15d, dl1m, dl1y, dlAll
     ] = await Promise.all([
       getStats(thirtyMinAgo),
       getStats(oneHourAgo),
@@ -895,12 +906,26 @@ export async function getSiteVisitsMetrics(req, res) {
       getStats(fifteenDaysAgo),
       getStats(thirtyDaysAgo),
       getStats(threeSixtyFiveDaysAgo),
-      getStats(null)
+      getStats(null),
+      getDownloads(thirtyMinAgo),
+      getDownloads(oneHourAgo),
+      getDownloads(threeHoursAgo),
+      getDownloads(sixHoursAgo),
+      getDownloads(twelveHoursAgo),
+      getDownloads(todayStartUtc5),
+      getDownloads(twoDaysAgo),
+      getDownloads(threeDaysAgo),
+      getDownloads(sevenDaysAgo),
+      getDownloads(fifteenDaysAgo),
+      getDownloads(thirtyDaysAgo),
+      getDownloads(threeSixtyFiveDaysAgo),
+      getDownloads(null),
     ]);
 
     const pvMap = { '30m': m30.pv, '1h': h1.pv, '3h': h3.pv, '6h': h6.pv, '12h': h12.pv, 'hoy': hoy.pv, '2d': d2.pv, '3d': d3.pv, '7d': d7.pv, '15d': d15.pv, '1m': m1.pv, '1y': y1.pv, all: all.pv }
     const sessionMap = { '30m': m30.sessions, '1h': h1.sessions, '3h': h3.sessions, '6h': h6.sessions, '12h': h12.sessions, 'hoy': hoy.sessions, '2d': d2.sessions, '3d': d3.sessions, '7d': d7.sessions, '15d': d15.sessions, '1m': m1.sessions, '1y': y1.sessions, all: all.sessions }
     const visitorMap = { '30m': m30.visitors, '1h': h1.visitors, '3h': h3.visitors, '6h': h6.visitors, '12h': h12.visitors, 'hoy': hoy.visitors, '2d': d2.visitors, '3d': d3.visitors, '7d': d7.visitors, '15d': d15.visitors, '1m': m1.visitors, '1y': y1.visitors, all: all.visitors }
+    const downloadsMap = { '30m': dl30m, '1h': dl1h, '3h': dl3h, '6h': dl6h, '12h': dl12h, 'hoy': dlHoy, '2d': dl2d, '3d': dl3d, '7d': dl7d, '15d': dl15d, '1m': dl1m, '1y': dl1y, all: dlAll }
 
     // Backward compatibility aliases for dashboard widgets
     pvMap['1d'] = pvMap['hoy']
@@ -912,10 +937,14 @@ export async function getSiteVisitsMetrics(req, res) {
     visitorMap['1d'] = visitorMap['hoy']
     visitorMap['1w'] = visitorMap['7d']
 
+    downloadsMap['1d'] = downloadsMap['hoy']
+    downloadsMap['1w'] = downloadsMap['7d']
+
     return res.json({
       pv: pvMap,
       sessions: sessionMap,
       visitors: visitorMap,
+      downloads: downloadsMap,
     })
   } catch (e) {
     console.error('getSiteVisitsMetrics error', e)

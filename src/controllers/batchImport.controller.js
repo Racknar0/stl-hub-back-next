@@ -1874,11 +1874,35 @@ export const purgeCompleted = async (req, res) => {
   try {
     const completedItems = await prisma.batchImportItem.findMany({
       where: { status: 'COMPLETED' },
-      select: { id: true, batchId: true, folderName: true },
+      select: { id: true, batchId: true, folderName: true, batch: { select: { folderName: true } } },
     });
 
     if (!completedItems.length) {
       return res.json({ success: true, deletedCount: 0, message: 'No hay items completados para eliminar.' });
+    }
+
+    // Delete physical folders from disk
+    let foldersDeleted = 0;
+    for (const item of completedItems) {
+      const batchFolder = String(item?.batch?.folderName || '').trim();
+      const itemFolder = String(item?.folderName || '').trim();
+      if (!batchFolder) continue;
+
+      const candidates = [
+        path.join(BATCH_DIR, batchFolder, itemFolder),
+        path.join(TELEGRAM_DIR, batchFolder, itemFolder),
+      ];
+      for (const folderPath of candidates) {
+        try {
+          if (fs.existsSync(folderPath)) {
+            fs.rmSync(folderPath, { recursive: true, force: true });
+            foldersDeleted++;
+            console.log(`[BATCH PURGE] Carpeta borrada: ${folderPath}`);
+          }
+        } catch (fsErr) {
+          console.warn(`[BATCH PURGE] Error borrando carpeta ${folderPath}:`, fsErr.message);
+        }
+      }
     }
 
     const touchedBatchIds = Array.from(new Set(completedItems.map((i) => Number(i.batchId)).filter((n) => Number.isFinite(n) && n > 0)));
@@ -1890,17 +1914,34 @@ export const purgeCompleted = async (req, res) => {
     for (const batchId of touchedBatchIds) {
       const remaining = await prisma.batchImportItem.count({ where: { batchId } });
       if (remaining <= 0) {
+        // Also delete the batch folder itself if empty
+        const batch = await prisma.batchImport.findUnique({ where: { id: batchId }, select: { folderName: true } });
+        if (batch?.folderName) {
+          for (const baseDir of [BATCH_DIR, TELEGRAM_DIR]) {
+            const batchPath = path.join(baseDir, batch.folderName);
+            try {
+              if (fs.existsSync(batchPath)) {
+                const remaining = fs.readdirSync(batchPath);
+                if (remaining.length === 0) {
+                  fs.rmSync(batchPath, { recursive: true, force: true });
+                  console.log(`[BATCH PURGE] Carpeta batch vacía borrada: ${batchPath}`);
+                }
+              }
+            } catch {}
+          }
+        }
         await prisma.batchImport.delete({ where: { id: batchId } }).catch(() => {});
       } else {
         await prisma.batchImport.update({ where: { id: batchId }, data: { totalItems: remaining } }).catch(() => {});
       }
     }
 
-    console.log(`[BATCH PURGE COMPLETED] Eliminados ${completedItems.length} items COMPLETED.`);
+    console.log(`[BATCH PURGE COMPLETED] Eliminados ${completedItems.length} items, ${foldersDeleted} carpetas.`);
     return res.json({
       success: true,
       deletedCount: completedItems.length,
-      message: `Eliminados ${completedItems.length} items completados.`,
+      foldersDeleted,
+      message: `Eliminados ${completedItems.length} items y ${foldersDeleted} carpetas.`,
     });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
