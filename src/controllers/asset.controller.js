@@ -2522,7 +2522,7 @@ function buildSeasonalCollectionsFromQdrant(baseCollections, orderedAssets) {
 /** Datos para el mega menú: categorías con conteo de assets y assets destacados. GET /api/assets/menu/mega */
 export const getMegaMenuData = async (_req, res) => {
     try {
-        const [categories, mostDownloaded] = await Promise.all([
+        const [categories, mostDownloaded, totalAssets, sizeAgg] = await Promise.all([
             prisma.category.findMany({
                 orderBy: { name: 'asc' },
                 select: {
@@ -2546,7 +2546,13 @@ export const getMegaMenuData = async (_req, res) => {
                     isPremium: true,
                 },
             }),
+            prisma.asset.count({ where: { status: 'PUBLISHED' } }),
+            prisma.asset.aggregate({
+                where: { status: 'PUBLISHED' },
+                _sum: { fileSizeB: true },
+            }),
         ]);
+        const totalSizeBytes = Number(sizeAgg?._sum?.fileSizeB || 0);
 
         const seasonalBase = getSeasonalCollections(new Date().getMonth());
         let seasonalCollections = seasonalBase;
@@ -2602,7 +2608,7 @@ export const getMegaMenuData = async (_req, res) => {
             }
         }
 
-        return res.json({ categories, mostDownloaded, seasonalCollections });
+        return res.json({ categories, mostDownloaded, seasonalCollections, totalAssets, totalSizeBytes });
     } catch (e) {
         console.error('[ASSETS] megaMenuData error:', e);
         return res.status(500).json({ message: 'Error getting mega menu data' });
