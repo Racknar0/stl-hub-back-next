@@ -83,7 +83,12 @@ router.get('/public/plans', async (req, res) => {
       };
     }).filter(Boolean);
 
-    res.json({ success: true, plans: result });
+    // Fetch total assets for the glow effect
+    const { PrismaClient } = await import('@prisma/client');
+    const prisma = new PrismaClient();
+    const totalAssets = await prisma.asset.count();
+
+    res.json({ success: true, plans: result, totalAssets });
   } catch (error) {
     console.error('Error fetching public plans:', error);
     res.status(500).json({ error: 'Internal Server Error' });
