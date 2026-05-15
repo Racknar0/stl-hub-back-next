@@ -11,6 +11,7 @@ import { maybeCheckMegaOnVisit } from '../utils/megaCheckFiles/visitTriggeredMeg
 import { applyMegaProxy, listMegaProxies } from '../utils/megaProxy.js';
 import { createPartFromBase64, GoogleGenAI, PartMediaResolutionLevel } from '@google/genai';
 import qdrantMultimodalService from '../services/qdrantMultimodal.service.js';
+import { megaMenuCache } from '../utils/memoryCache.js';
 
 const prisma = new PrismaClient();
 import { randomizeFreebies, getRandomizeFreebiesCountFromEnv } from '../utils/randomizeFreebies.js';
@@ -2522,99 +2523,103 @@ function buildSeasonalCollectionsFromQdrant(baseCollections, orderedAssets) {
 /** Datos para el mega menú: categorías con conteo de assets y assets destacados. GET /api/assets/menu/mega */
 export const getMegaMenuData = async (_req, res) => {
     try {
-        const oneWeekAgo = new Date();
-        oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+        const data = await megaMenuCache.getOrSet('megaMenu', async () => {
+            const oneWeekAgo = new Date();
+            oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
 
-        const [categories, mostDownloaded, totalAssets, sizeAgg, weeklyAssets] = await Promise.all([
-            prisma.category.findMany({
-                orderBy: { name: 'asc' },
-                select: {
-                    id: true,
-                    name: true,
-                    nameEn: true,
-                    slug: true,
-                    slugEn: true,
-                },
-            }),
-            prisma.asset.findMany({
-                where: { status: 'PUBLISHED' },
-                orderBy: [{ downloads: 'desc' }, { id: 'desc' }],
-                take: 8,
-                select: {
-                    id: true,
-                    slug: true,
-                    title: true,
-                    titleEn: true,
-                    downloads: true,
-                    isPremium: true,
-                },
-            }),
-            prisma.asset.count({ where: { status: 'PUBLISHED' } }),
-            prisma.asset.aggregate({
-                where: { status: 'PUBLISHED' },
-                _sum: { fileSizeB: true },
-            }),
-            prisma.asset.count({
-                where: { status: 'PUBLISHED', createdAt: { gte: oneWeekAgo } },
-            }),
-        ]);
-        const totalSizeBytes = Number(sizeAgg?._sum?.fileSizeB || 0);
+            const [categories, mostDownloaded, totalAssets, sizeAgg, weeklyAssets] = await Promise.all([
+                prisma.category.findMany({
+                    orderBy: { name: 'asc' },
+                    select: {
+                        id: true,
+                        name: true,
+                        nameEn: true,
+                        slug: true,
+                        slugEn: true,
+                    },
+                }),
+                prisma.asset.findMany({
+                    where: { status: 'PUBLISHED' },
+                    orderBy: [{ downloads: 'desc' }, { id: 'desc' }],
+                    take: 8,
+                    select: {
+                        id: true,
+                        slug: true,
+                        title: true,
+                        titleEn: true,
+                        downloads: true,
+                        isPremium: true,
+                    },
+                }),
+                prisma.asset.count({ where: { status: 'PUBLISHED' } }),
+                prisma.asset.aggregate({
+                    where: { status: 'PUBLISHED' },
+                    _sum: { fileSizeB: true },
+                }),
+                prisma.asset.count({
+                    where: { status: 'PUBLISHED', createdAt: { gte: oneWeekAgo } },
+                }),
+            ]);
+            const totalSizeBytes = Number(sizeAgg?._sum?.fileSizeB || 0);
 
-        const seasonalBase = getSeasonalCollections(new Date().getMonth());
-        let seasonalCollections = seasonalBase;
+            const seasonalBase = getSeasonalCollections(new Date().getMonth());
+            let seasonalCollections = seasonalBase;
 
-        if (seasonalBase.length) {
-            try {
-                const seasonalQuery = seasonalBase
-                    .map((it) => `${it.labelEs} ${it.labelEn} ${it.slug}`)
-                    .join(' | ');
+            if (seasonalBase.length) {
+                try {
+                    const seasonalQuery = seasonalBase
+                        .map((it) => `${it.labelEs} ${it.labelEn} ${it.slug}`)
+                        .join(' | ');
 
-                const aiResults = await qdrantMultimodalService.searchByImage(null, null, seasonalQuery, 60);
-                const idsOrdered = [];
-                const seen = new Set();
+                    const aiResults = await qdrantMultimodalService.searchByImage(null, null, seasonalQuery, 60);
+                    const idsOrdered = [];
+                    const seen = new Set();
 
-                for (const hit of aiResults || []) {
-                    const id = Number(hit?.id);
-                    if (!Number.isFinite(id) || id <= 0 || seen.has(id)) continue;
-                    seen.add(id);
-                    idsOrdered.push(id);
-                    if (idsOrdered.length >= 60) break;
-                }
+                    for (const hit of aiResults || []) {
+                        const id = Number(hit?.id);
+                        if (!Number.isFinite(id) || id <= 0 || seen.has(id)) continue;
+                        seen.add(id);
+                        idsOrdered.push(id);
+                        if (idsOrdered.length >= 60) break;
+                    }
 
-                if (idsOrdered.length) {
-                    const assets = await prisma.asset.findMany({
-                        where: { id: { in: idsOrdered }, status: 'PUBLISHED' },
-                        select: {
-                            id: true,
-                            categories: {
-                                select: {
-                                    slug: true,
-                                    slugEn: true,
+                    if (idsOrdered.length) {
+                        const assets = await prisma.asset.findMany({
+                            where: { id: { in: idsOrdered }, status: 'PUBLISHED' },
+                            select: {
+                                id: true,
+                                categories: {
+                                    select: {
+                                        slug: true,
+                                        slugEn: true,
+                                    },
+                                },
+                                tags: {
+                                    select: {
+                                        slug: true,
+                                        slugEn: true,
+                                    },
                                 },
                             },
-                            tags: {
-                                select: {
-                                    slug: true,
-                                    slugEn: true,
-                                },
-                            },
-                        },
-                    });
+                        });
 
-                    const byId = new Map(assets.map((a) => [Number(a.id), a]));
-                    const orderedAssets = idsOrdered
-                        .map((id) => byId.get(id))
-                        .filter(Boolean);
+                        const byId = new Map(assets.map((a) => [Number(a.id), a]));
+                        const orderedAssets = idsOrdered
+                            .map((id) => byId.get(id))
+                            .filter(Boolean);
 
-                    seasonalCollections = buildSeasonalCollectionsFromQdrant(seasonalBase, orderedAssets);
+                        seasonalCollections = buildSeasonalCollectionsFromQdrant(seasonalBase, orderedAssets);
+                    }
+                } catch (qdrantErr) {
+                    // Qdrant unavailable — degrade gracefully, return seasonal base without AI enrichment
+                    console.warn('[ASSETS] megaMenu: Qdrant unavailable, skipping seasonal enrichment:', qdrantErr.message);
                 }
-            } catch (qdrantErr) {
-                // Qdrant unavailable — degrade gracefully, return seasonal base without AI enrichment
-                console.warn('[ASSETS] megaMenu: Qdrant unavailable, skipping seasonal enrichment:', qdrantErr.message);
             }
-        }
 
-        return res.json({ categories, mostDownloaded, seasonalCollections, totalAssets, totalSizeBytes, weeklyAssets });
+            return { categories, mostDownloaded, seasonalCollections, totalAssets, totalSizeBytes, weeklyAssets };
+        });
+
+        return res.json(data);
     } catch (e) {
         console.error('[ASSETS] megaMenuData error:', e);
         return res.status(500).json({ message: 'Error getting mega menu data' });
