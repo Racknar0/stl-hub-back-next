@@ -1,4 +1,6 @@
 import express from 'express';
+import fs from 'fs';
+import path from 'path';
 import { scanLocalDirectory, getScanStatus, getBatchQueue, retryBatchAiFailedItems, updateBatchItem, confirmBatchItems, stopAndResetBatchToDraft, deleteBatchItem, purgeAll, purgeCompleted, retryBatchItemWithAnotherProxy } from '../../controllers/batchImport.controller.js';
 import { requireAuth } from '../../middlewares/auth.js';
 
@@ -16,5 +18,26 @@ router.post('/items/:id/retry-proxy', requireAuth, retryBatchItemWithAnotherProx
 router.delete('/items/:id', requireAuth, deleteBatchItem);
 router.delete('/completed', requireAuth, purgeCompleted);
 router.delete('/purge-all', requireAuth, purgeAll);
+
+// Purge telegram_downloads_organized folder
+router.delete('/purge-organized', requireAuth, async (req, res) => {
+  const organizedDir = path.join(process.cwd(), 'uploads', 'telegram_downloads_organized');
+  try {
+    if (!fs.existsSync(organizedDir)) {
+      return res.json({ success: true, message: 'La carpeta organized ya estaba vacía.', deleted: 0 });
+    }
+    const entries = fs.readdirSync(organizedDir);
+    let deleted = 0;
+    for (const entry of entries) {
+      const entryPath = path.join(organizedDir, entry);
+      fs.rmSync(entryPath, { recursive: true, force: true });
+      deleted++;
+    }
+    res.json({ success: true, message: `Carpeta organized purgada: ${deleted} elementos eliminados.`, deleted });
+  } catch (error) {
+    console.error('Error purging organized directory:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
 
 export default router;
