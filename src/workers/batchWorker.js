@@ -478,6 +478,12 @@ async function ensureMegaSessionForAccount(payload, accountId, ctx, opts = {}) {
     activeMegaSessionAccountId = 0
   }
 
+  // Preemptive logout: if our tracker says 0 (unknown state) but a system-level
+  // session might be lingering, clear it to avoid "Already logged in" errors.
+  if (activeMegaSessionAccountId === 0) {
+    try { await megaLogout(`PREEMPTIVE_CLEAR before login accId=${accountId} ${ctx}`) } catch {}
+  }
+
   await megaLogin(payload, ctx)
   activeMegaSessionAccountId = Number(accountId) || 0
 }
@@ -1057,6 +1063,15 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
         forceSkipLastProxy = true
         forceReloginNextAttempt = true
         console.warn(`[BATCH][${role.toUpperCase()}][RECOVERY] stall/timeout detectado, forzando logout+relogin+proxy-rotate accId=${account.id}`)
+      }
+
+      // "Already logged in" → stale session, force logout+relogin on next attempt
+      const looksAlreadyLoggedIn = /already logged in/i.test(msg)
+      if (looksAlreadyLoggedIn) {
+        forceReloginNextAttempt = true
+        activeMegaSessionAccountId = 0 // reset tracker so ensureMegaSession does full logout→login
+        console.warn(`[BATCH][${role.toUpperCase()}][RECOVERY] 'Already logged in' detectado, forzando logout+relogin accId=${account.id}`)
+        try { await megaLogout(`ALREADY_LOGGED_IN_RECOVERY acc ${account.id}`) } catch {}
       }
 
       if (attempt >= MAX_STALL_RETRIES) {
