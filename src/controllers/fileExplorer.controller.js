@@ -17,7 +17,8 @@ const getFolderSize = async (dirPath) => {
 };
 
 const resolveSafePath = (relativePath) => {
-    const safeRelativePath = relativePath || '/';
+    let safeRelativePath = relativePath || '/';
+    if (!safeRelativePath.startsWith('/')) safeRelativePath = '/' + safeRelativePath;
     const absolutePath = path.resolve(UPLOADS_DIR, `.${safeRelativePath}`);
     if (!absolutePath.startsWith(UPLOADS_DIR)) {
         throw new Error('Acceso denegado. Ruta fuera de los límites permitidos.');
