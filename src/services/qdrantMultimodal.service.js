@@ -272,7 +272,7 @@ export const getMultimodalSyncStatus = async () => {
     }
 };
 
-export const searchByImage = async (imageBuffer, mimeType, textContext = '', limit = 20) => {
+export const searchByImage = async (imageBuffer, mimeType, textContext = '', limit = 20, scoreThreshold = 0.3) => {
   if (!ai) {
     throw new Error('GEMINI_API_KEY no configurada para búsqueda multimodal');
   }
@@ -319,7 +319,7 @@ export const searchByImage = async (imageBuffer, mimeType, textContext = '', lim
       vector: queryVector,
       limit: Math.min(200, Math.max(1, Number(limit) || 20)),
       with_payload: true,
-      score_threshold: 0.3
+      score_threshold: scoreThreshold
     });
 
     return (results || []).map(r => ({

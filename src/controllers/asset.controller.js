@@ -2822,7 +2822,39 @@ export const searchAssets = async (req, res) => {
                 return { ...rest, tagsEs, tagsEn };
             });
 
-            return res.json({ items, total, page, pageSize: size, hasMore });
+            // --- AI Suggestions: second query with lower threshold ---
+            let suggestions = [];
+            try {
+                const sugResults = await qdrantMultimodalService.searchByImage(null, null, qStr, 72, 0.1);
+                const sugIds = [];
+                for (const hit of sugResults || []) {
+                    const id = Number(hit?.id);
+                    if (!Number.isFinite(id) || id <= 0 || aiSeen.has(id)) continue;
+                    sugIds.push(id);
+                    if (sugIds.length >= 48) break;
+                }
+                if (sugIds.length > 0) {
+                    const sugDb = await prisma.asset.findMany({
+                        where: { id: { in: sugIds }, status: 'PUBLISHED' },
+                        select,
+                    });
+                    const sugById = new Map(sugDb.map((it) => [Number(it.id), it]));
+                    suggestions = sugIds
+                        .map((id) => sugById.get(id))
+                        .filter(Boolean)
+                        .map((it) => {
+                            const tagsEs = Array.isArray(it.tags) ? it.tags.map((t) => t.slug) : [];
+                            const tagsEn = Array.isArray(it.tags)
+                                ? it.tags.map((t) => t.nameEn || t.name || t.slug)
+                                : [];
+                            return { ...it, tagsEs, tagsEn };
+                        });
+                }
+            } catch (sugErr) {
+                console.warn('[SEARCH] AI suggestions error:', sugErr?.message);
+            }
+
+            return res.json({ items, total, page, pageSize: size, hasMore, suggestions });
         }
 
         // --- total + página ---
@@ -3074,7 +3106,42 @@ export const searchAssets = async (req, res) => {
             return { ...rest, tagsEs, tagsEn };
         });
 
-        return res.json({ items, total, page, pageSize: size, hasMore });
+        // --- AI Suggestions for normal text search ---
+        let suggestions = [];
+        if (qStr && page === 0) {
+            try {
+                const mainIds = new Set(combined.map((it) => Number(it.id)));
+                const sugResults = await qdrantMultimodalService.searchByImage(null, null, qStr, 72, 0.15);
+                const sugIds = [];
+                for (const hit of sugResults || []) {
+                    const id = Number(hit?.id);
+                    if (!Number.isFinite(id) || id <= 0 || mainIds.has(id)) continue;
+                    sugIds.push(id);
+                    if (sugIds.length >= 48) break;
+                }
+                if (sugIds.length > 0) {
+                    const sugDb = await prisma.asset.findMany({
+                        where: { id: { in: sugIds }, status: 'PUBLISHED' },
+                        select,
+                    });
+                    const sugById = new Map(sugDb.map((it) => [Number(it.id), it]));
+                    suggestions = sugIds
+                        .map((id) => sugById.get(id))
+                        .filter(Boolean)
+                        .map((it) => {
+                            const tagsEs = Array.isArray(it.tags) ? it.tags.map((t) => t.slug) : [];
+                            const tagsEn = Array.isArray(it.tags)
+                                ? it.tags.map((t) => t.nameEn || t.name || t.slug)
+                                : [];
+                            return { ...it, tagsEs, tagsEn };
+                        });
+                }
+            } catch (sugErr) {
+                console.warn('[SEARCH] AI suggestions error (normal):', sugErr?.message);
+            }
+        }
+
+        return res.json({ items, total, page, pageSize: size, hasMore, suggestions });
 
         // (la lógica de respuesta ya fue manejada en las ramas anteriores)
   } catch (e) {
