@@ -2840,11 +2840,26 @@ export const searchAssets = async (req, res) => {
                     if (sugIds.length >= 200) break;
                 }
                 if (sugIds.length > 0) {
-                    const sugDb = await prisma.asset.findMany({
-                        where: { id: { in: sugIds }, status: 'PUBLISHED' },
-                        select,
-                    });
-                    const sugById = new Map(sugDb.map((it) => [Number(it.id), it]));
+                    // Lightweight select for suggestions (no heavy JOINs)
+                    const sugSelect = {
+                        id: true, slug: true, title: true, titleEn: true,
+                        images: true, isPremium: true, downloads: true,
+                        createdAt: true, archiveName: true,
+                        categories: { select: { id: true, name: true, slug: true } },
+                        tags: { select: { slug: true, name: true, nameEn: true } },
+                    };
+                    // Process in batches of 50 to avoid MySQL optimizer choking
+                    const BATCH = 50;
+                    const allSugDb = [];
+                    for (let i = 0; i < sugIds.length; i += BATCH) {
+                        const chunk = sugIds.slice(i, i + BATCH);
+                        const batch = await prisma.asset.findMany({
+                            where: { id: { in: chunk }, status: 'PUBLISHED' },
+                            select: sugSelect,
+                        });
+                        allSugDb.push(...batch);
+                    }
+                    const sugById = new Map(allSugDb.map((it) => [Number(it.id), it]));
                     suggestions = sugIds
                         .map((id) => sugById.get(id))
                         .filter(Boolean)
@@ -3126,11 +3141,24 @@ export const searchAssets = async (req, res) => {
                     if (sugIds.length >= 200) break;
                 }
                 if (sugIds.length > 0) {
-                    const sugDb = await prisma.asset.findMany({
-                        where: { id: { in: sugIds }, status: 'PUBLISHED' },
-                        select,
-                    });
-                    const sugById = new Map(sugDb.map((it) => [Number(it.id), it]));
+                    const sugSelect = {
+                        id: true, slug: true, title: true, titleEn: true,
+                        images: true, isPremium: true, downloads: true,
+                        createdAt: true, archiveName: true,
+                        categories: { select: { id: true, name: true, slug: true } },
+                        tags: { select: { slug: true, name: true, nameEn: true } },
+                    };
+                    const BATCH = 50;
+                    const allSugDb = [];
+                    for (let i = 0; i < sugIds.length; i += BATCH) {
+                        const chunk = sugIds.slice(i, i + BATCH);
+                        const batch = await prisma.asset.findMany({
+                            where: { id: { in: chunk }, status: 'PUBLISHED' },
+                            select: sugSelect,
+                        });
+                        allSugDb.push(...batch);
+                    }
+                    const sugById = new Map(allSugDb.map((it) => [Number(it.id), it]));
                     suggestions = sugIds
                         .map((id) => sugById.get(id))
                         .filter(Boolean)
