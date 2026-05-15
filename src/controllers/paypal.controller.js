@@ -1,5 +1,5 @@
 import paypal from '@paypal/checkout-server-sdk';
-import plans from '../config/plans.js';
+import { getPlans } from '../config/plans.js';
 import { PrismaClient } from '@prisma/client';
 import {
     PAYMENT_USER_TRACKING_SELECT,
@@ -36,7 +36,8 @@ async function createPayPalOrder(req, res) {
         return res.status(400).json({ error: 'Faltan datos para crear la orden (planId, userId)' });
     }
 
-    // 1. Búsqueda eficiente y segura en el objeto de planes
+    // 1. Búsqueda eficiente y segura en el objeto de planes (precios dinámicos)
+    const plans = await getPlans();
     const selectedPlan = plans[planId];
     
     if (!selectedPlan) {
@@ -92,6 +93,7 @@ async function capturePayPalOrder(req, res) {
         if (captureResult.status === 'COMPLETED') {
             
             // 3. GUARDAR el pago en nuestra base de datos
+            const plans = await getPlans();
             const selectedPlan = plans[planId];
             const parsedUserId = parseInt(userId);
 

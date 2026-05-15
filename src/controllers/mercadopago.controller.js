@@ -1,4 +1,4 @@
-import plans from '../config/plans.js';
+import { getPlans } from '../config/plans.js';
 import { PrismaClient } from '@prisma/client';
 import {
   extractGatewayTrackingFromMetadata,
@@ -197,6 +197,7 @@ const processMercadoPagoPayment = async ({ paymentData, req }) => {
     };
   }
 
+  const plans = await getPlans();
   const selectedPlan = plans[planId];
   if (!selectedPlan) {
     return { ok: false, statusCode: 404, message: `Plan '${planId}' no encontrado` };
@@ -303,6 +304,7 @@ async function createMercadoPagoPreference(req, res) {
     return res.status(400).json({ error: 'Faltan datos para crear preferencia (planId, userId)' });
   }
 
+  const plans = await getPlans();
   const selectedPlan = plans[planId];
   if (!selectedPlan) {
     return res.status(404).json({ error: `Plan '${planId}' no encontrado` });
