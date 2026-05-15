@@ -3,6 +3,7 @@ import {
     listDirectory,
     createFolder,
     deleteFiles,
+    purgeFolder,
     moveFiles,
     renameFile,
     previewFile
@@ -14,6 +15,7 @@ router.get('/list', listDirectory);
 router.get('/preview', previewFile);
 router.post('/create-folder', createFolder);
 router.post('/delete', deleteFiles);
+router.post('/purge', purgeFolder);
 router.post('/move', moveFiles);
 router.post('/rename', renameFile);
 

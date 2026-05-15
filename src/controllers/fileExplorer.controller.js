@@ -99,15 +99,63 @@ export const deleteFiles = async (req, res) => {
         const { files } = req.body; // array of paths (ids)
         if (!Array.isArray(files)) throw new Error('Se requiere un array de archivos');
 
+        const errors = [];
         for (const fileId of files) {
-            const absolutePath = resolveSafePath(fileId);
-            if (fs.existsSync(absolutePath)) {
-                fs.rmSync(absolutePath, { recursive: true, force: true });
+            try {
+                const absolutePath = resolveSafePath(fileId);
+                if (fs.existsSync(absolutePath)) {
+                    fs.rmSync(absolutePath, { recursive: true, force: true });
+                }
+            } catch (e) {
+                errors.push(`${fileId}: ${e.message}`);
             }
         }
 
+        if (errors.length) {
+            return res.status(207).json({ success: false, message: `Errores: ${errors.join('; ')}` });
+        }
         res.json({ success: true, message: 'Archivos eliminados' });
     } catch (error) {
+        console.error('[FileExplorer] Error deleteFiles:', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+export const purgeFolder = async (req, res) => {
+    try {
+        const { folder } = req.body;
+        if (!folder) throw new Error('Se requiere la ruta de la carpeta');
+
+        const absolutePath = resolveSafePath(folder);
+        if (!fs.existsSync(absolutePath)) {
+            return res.status(404).json({ success: false, message: 'Carpeta no encontrada' });
+        }
+
+        const stat = fs.statSync(absolutePath);
+        if (!stat.isDirectory()) {
+            return res.status(400).json({ success: false, message: 'La ruta no es una carpeta' });
+        }
+
+        const entries = fs.readdirSync(absolutePath);
+        let deleted = 0;
+        const errors = [];
+
+        for (const entry of entries) {
+            try {
+                const entryPath = path.join(absolutePath, entry);
+                fs.rmSync(entryPath, { recursive: true, force: true });
+                deleted++;
+            } catch (e) {
+                errors.push(`${entry}: ${e.message}`);
+            }
+        }
+
+        res.json({
+            success: true,
+            message: `Carpeta purgada: ${deleted} elementos eliminados${errors.length ? `. Errores: ${errors.join('; ')}` : ''}`,
+        });
+    } catch (error) {
+        console.error('[FileExplorer] Error purgeFolder:', error);
         res.status(500).json({ success: false, message: error.message });
     }
 };
