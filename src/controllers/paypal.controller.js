@@ -10,6 +10,7 @@ import {
     buildCopSnapshot,
 } from '../utils/paymentCurrency.js';
 import { dispatchSaleNotification } from '../utils/saleNotifications.js';
+import { sendTikTokEvent } from '../utils/tiktokCapi.js';
 
 const prisma = new PrismaClient();
 
@@ -195,6 +196,17 @@ async function capturePayPalOrder(req, res) {
                 console.error('Error enviando correos tras la captura de PayPal:', mailErr);
                 // No interrumpimos el flujo por un fallo en el envío de emails
             }
+
+            // Evento de Servidor: TikTok CAPI (CompletePayment)
+            sendTikTokEvent({
+                eventName: 'CompletePayment',
+                eventId: captureResult.id,
+                userEmail: user?.email,
+                userIp: req.ip,
+                userAgent: req.headers['user-agent'],
+                value: paymentAmount,
+                currency: paymentCurrency
+            });
 
             return res.json({ 
                 success: true, 

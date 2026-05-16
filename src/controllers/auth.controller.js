@@ -4,6 +4,7 @@ import { comparePassword, hashPassword } from '../utils/bcryptUtils.js';
 import { generateRandomToken } from '../utils/cryptoUtils.js';
 import { generateJWT } from '../utils/jwtUtils.js';
 import { pickTrackingForDb, resolveMarketingCampaignId, resolveTrackingForRequest } from '../utils/attribution.js';
+import { sendTikTokEvent } from '../utils/tiktokCapi.js';
 
 const prisma = new PrismaClient();
 
@@ -483,9 +484,8 @@ export const registerUserSale = async (req, res) => {
     }
 };
 
-// Registro de usuario con activationToken
 export const register = async (req, res) => {
-    const { email, password, language = 'es' } = req.body;
+    const { email, password, language = 'es', eventId } = req.body;
     const trackingResolved = await resolveTrackingForRequest(prisma, req, 'first');
     const tracking = trackingResolved?.tracking || null;
 
@@ -529,6 +529,15 @@ export const register = async (req, res) => {
                 utmFirstAt: trackingNow,
                 utmLastAt: trackingNow,
             },
+        });
+
+        // Evento de Servidor: TikTok CAPI (CompleteRegistration)
+        sendTikTokEvent({
+            eventName: 'CompleteRegistration',
+            eventId: eventId || `reg-${user.id}`,
+            userEmail: email,
+            userIp: req.ip,
+            userAgent: req.headers['user-agent']
         });
 
         // crear logica de envio de email

@@ -10,6 +10,7 @@ import {
   buildCopSnapshot,
 } from '../utils/paymentCurrency.js';
 import { dispatchSaleNotification } from '../utils/saleNotifications.js';
+import { sendTikTokEvent } from '../utils/tiktokCapi.js';
 
 const prisma = new PrismaClient();
 
@@ -277,6 +278,17 @@ const processMercadoPagoPayment = async ({ paymentData, req }) => {
       amount: dbData.amount,
       currency: dbData.currency,
       userLanguage: user?.language || 'es',
+    });
+
+    // Evento de Servidor: TikTok CAPI (CompletePayment)
+    sendTikTokEvent({
+      eventName: 'CompletePayment',
+      eventId: externalOrderId,
+      userEmail: user?.email,
+      userIp: req.ip,
+      userAgent: req.headers['user-agent'],
+      value: dbData.amount,
+      currency: dbData.currency
     });
   }
 
