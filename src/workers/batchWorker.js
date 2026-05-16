@@ -1344,6 +1344,32 @@ async function processMainQueueItem(item) {
     try { if (fs.existsSync(ctx.stagingArchivePath)) fs.unlinkSync(ctx.stagingArchivePath) } catch {}
     try { if (fs.existsSync(ctx.folderPath)) fs.rmSync(ctx.folderPath, { recursive: true, force: true }) } catch {}
     console.log(`[BATCH][MAIN][OK] item=${item.id} asset=${asset.id}`)
+
+    // ── AUTO-CLEANUP si no hay fase backup ──
+    if (!hasBackups) {
+      try {
+        const batchRecord = await prisma.batchImport.findUnique({
+          where: { id: item.batchId },
+          select: { folderName: true },
+        })
+        const batchFolder = String(batchRecord?.folderName || '').trim()
+        const itemFolder = String(item.folderName || '').trim()
+
+        if (batchFolder && itemFolder) {
+          for (const baseDir of [BATCH_DIR, TELEGRAM_DIR]) {
+            const fp = path.join(baseDir, batchFolder, itemFolder)
+            try {
+              if (fs.existsSync(fp)) fs.rmSync(fp, { recursive: true, force: true })
+            } catch {}
+          }
+        }
+
+        await prisma.batchImportItem.delete({ where: { id: item.id } })
+        console.log(`[BATCH][AUTO-CLEANUP] Item #${item.id} eliminado de BD (Main OK, sin backups)`)
+      } catch (cleanupErr) {
+        console.warn(`[BATCH][AUTO-CLEANUP] Error: ${cleanupErr.message}`)
+      }
+    }
   } catch (err) {
     const msg = String(err?.message || err).slice(0, 500)
     const manualStop = /BATCH_STOP_REQUESTED/i.test(msg)
@@ -1491,6 +1517,51 @@ async function processBackupsForCompletedItem(item) {
     deleteLocalArchiveBestEffort(archivePath, `item=${item.id} phase=backup completed`)
 
     console.log(`[BATCH][BACKUP][OK] item=${item.id} asset=${asset.id}`)
+
+    // ── AUTO-CLEANUP: eliminar item completado de la BD y carpetas fuente ──
+    try {
+      const batchRecord = await prisma.batchImport.findUnique({
+        where: { id: item.batchId },
+        select: { folderName: true },
+      })
+      const batchFolder = String(batchRecord?.folderName || '').trim()
+      const itemFolder = String(item.folderName || '').trim()
+
+      if (batchFolder && itemFolder) {
+        for (const baseDir of [BATCH_DIR, TELEGRAM_DIR]) {
+          const folderPath = path.join(baseDir, batchFolder, itemFolder)
+          try {
+            if (fs.existsSync(folderPath)) {
+              fs.rmSync(folderPath, { recursive: true, force: true })
+              console.log(`[BATCH][AUTO-CLEANUP] Carpeta borrada: ${folderPath}`)
+            }
+          } catch (e) {
+            console.warn(`[BATCH][AUTO-CLEANUP] Error borrando carpeta: ${e.message}`)
+          }
+        }
+      }
+
+      await prisma.batchImportItem.delete({ where: { id: item.id } })
+      console.log(`[BATCH][AUTO-CLEANUP] Item #${item.id} eliminado de BD (Main+Backup OK)`)
+
+      // Si el batch padre queda vacío, limpiar carpeta padre
+      if (item.batchId && batchFolder) {
+        const remaining = await prisma.batchImportItem.count({ where: { batchId: item.batchId } })
+        if (remaining <= 0) {
+          for (const baseDir of [BATCH_DIR, TELEGRAM_DIR]) {
+            const parentPath = path.join(baseDir, batchFolder)
+            try {
+              if (fs.existsSync(parentPath) && fs.readdirSync(parentPath).length === 0) {
+                fs.rmSync(parentPath, { recursive: true, force: true })
+                console.log(`[BATCH][AUTO-CLEANUP] Carpeta batch vacía borrada: ${parentPath}`)
+              }
+            } catch {}
+          }
+        }
+      }
+    } catch (cleanupErr) {
+      console.warn(`[BATCH][AUTO-CLEANUP] Error limpiando item #${item.id}: ${cleanupErr.message}`)
+    }
   } catch (err) {
     const msg = String(err?.message || err).slice(0, 500)
     const manualStop = /BATCH_STOP_REQUESTED/i.test(msg)
