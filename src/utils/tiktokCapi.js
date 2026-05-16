@@ -79,6 +79,10 @@ export const sendTikTokEvent = async ({
             payload.test_event_code = process.env.TIKTOK_TEST_EVENT_CODE;
         }
 
+        console.log("\n=============================================");
+        console.log("[TikTok CAPI] ENVIANDO EVENTO:", eventName);
+        console.log("PAYLOAD COMPLETO:", JSON.stringify(payload, null, 2));
+
         const response = await fetch('https://business-api.tiktok.com/open_api/v1.3/event/track/', {
             method: 'POST',
             headers: {
@@ -89,6 +93,8 @@ export const sendTikTokEvent = async ({
         });
 
         const result = await response.json();
+        console.log("RESPUESTA TIKTOK:", result);
+        console.log("=============================================\n");
 
         if (result.code === 0) {
             console.log(`[TikTok CAPI] Evento ${eventName} (ID: ${eventId}) enviado correctamente.`);
