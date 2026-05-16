@@ -43,29 +43,21 @@ export const sendTikTokEvent = async ({
 
         const hashedEmail = hashData(userEmail);
 
-        // Construimos el payload base
-        const payload = {
-            pixel_code: pixelId,
+        // Construimos el payload de acuerdo a la API de Eventos v1.3 de TikTok
+        const eventData = {
             event: eventName,
+            event_time: Math.floor(Date.now() / 1000), // Timestamp en segundos
             event_id: eventId,
-            timestamp: new Date().toISOString(),
-            context: {
-                user: {
-                    email: hashedEmail,
-                },
+            user: {
+                email: hashedEmail,
                 ip: userIp || '127.0.0.1',
                 user_agent: userAgent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
             }
         };
 
-        // Si hay un código de prueba configurado (solo para depuración), lo añadimos
-        if (process.env.TIKTOK_TEST_EVENT_CODE) {
-            payload.test_event_code = process.env.TIKTOK_TEST_EVENT_CODE;
-        }
-
         // Si es un evento de valor (compra), añadimos las propiedades de e-commerce
         if (value !== undefined && value !== null) {
-            payload.properties = {
+            eventData.properties = {
                 contents: [{
                     price: Number(value),
                     quantity: 1,
@@ -76,7 +68,18 @@ export const sendTikTokEvent = async ({
             };
         }
 
-        const response = await fetch('https://business-api.tiktok.com/open_api/v1.3/pixel/track/', {
+        const payload = {
+            event_source: "web",
+            event_source_id: pixelId,
+            data: [eventData]
+        };
+
+        // Si hay un código de prueba configurado (solo para depuración), lo añadimos a la raíz
+        if (process.env.TIKTOK_TEST_EVENT_CODE) {
+            payload.test_event_code = process.env.TIKTOK_TEST_EVENT_CODE;
+        }
+
+        const response = await fetch('https://business-api.tiktok.com/open_api/v1.3/event/track/', {
             method: 'POST',
             headers: {
                 'Access-Token': accessToken,
