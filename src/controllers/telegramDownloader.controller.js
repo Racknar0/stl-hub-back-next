@@ -138,8 +138,8 @@ export const quickScan = async (req, res) => {
         const { channelName } = req.query;
         if (!channelName) return res.status(400).json({ success: false, message: 'channelName required' });
 
-        const info = await telegramDownloaderService.getChannelInfo(channelName, 999);
-        res.json({ success: true, maxId: info.maxId, newMessages: info.newMessages, suggestedStart: info.suggestedStart });
+        const result = await telegramDownloaderService.quickScanFiles(channelName);
+        res.json({ success: true, ...result });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }

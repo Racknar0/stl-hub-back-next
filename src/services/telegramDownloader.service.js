@@ -229,6 +229,53 @@ class TelegramDownloaderService {
         };
     }
 
+    // Quick scan that counts actual FILES (not text messages)
+    async quickScanFiles(channelName) {
+        await this.initClient();
+
+        const lastDownload = this.getLastDownloadForChannel(channelName);
+        const messages = await this.client.getMessages(channelName, { limit: 1 });
+        if (!messages || messages.length === 0) {
+            throw new Error('No se encontraron mensajes en el canal o no tienes acceso.');
+        }
+
+        const maxId = messages[0].id;
+        const startFrom = lastDownload ? lastDownload.lastMsgId + 1 : Math.max(1, maxId - 100);
+
+        if (startFrom > maxId) {
+            return { newFiles: 0, totalMessages: 0, totalSize: '0 B', totalSizeBytes: 0, maxId };
+        }
+
+        // Fetch up to 3000 messages from startFrom forward
+        const allMessages = await this.client.getMessages(channelName, {
+            limit: 3000,
+            offsetId: startFrom,
+            reverse: true,
+        });
+
+        let fileCount = 0;
+        let totalBytes = 0;
+        const totalMessages = allMessages ? allMessages.length : 0;
+
+        for (const msg of (allMessages || [])) {
+            if (!msg.media) continue;
+            fileCount++;
+            if (msg.media.document) {
+                totalBytes += Number(msg.media.document.size || 0);
+            } else {
+                totalBytes += this.estimateMediaSizeBytes(msg);
+            }
+        }
+
+        return {
+            newFiles: fileCount,
+            totalMessages,
+            totalSize: this.formatBytes(totalBytes),
+            totalSizeBytes: totalBytes,
+            maxId,
+        };
+    }
+
     // Scan messages to calculate how many fit within maxGB
     async scanWithLimit(channelName, startId, maxGB) {
         await this.initClient();
