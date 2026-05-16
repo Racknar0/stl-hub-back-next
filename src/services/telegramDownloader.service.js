@@ -630,10 +630,14 @@ class TelegramDownloaderService {
                     }
 
                     if (!this.shouldCancel) {
-                        fs.renameSync(tempPath, fullPath);
-                        completedBytes += fs.statSync(fullPath).size;
-                        this.saveLastDownload(channelName, item.msg.id, finalFileName);
-                        this.emitProgress({ type: 'file_done', fileName: finalFileName });
+                        if (!fs.existsSync(tempPath)) {
+                            this.emitProgress({ type: 'file_skip', fileName: finalFileName, reason: 'Media sin archivo descargable' });
+                        } else {
+                            fs.renameSync(tempPath, fullPath);
+                            completedBytes += fs.statSync(fullPath).size;
+                            this.saveLastDownload(channelName, item.msg.id, finalFileName);
+                            this.emitProgress({ type: 'file_done', fileName: finalFileName });
+                        }
                     }
                 };
 
