@@ -543,7 +543,11 @@ class TelegramDownloaderService {
 
                 const item = downloadList[idx];
                 const safeName = this.sanitizeFileName(item.originalName);
-                const finalFileName = `${item.msg.id}_${safeName}`;
+                const channelTag = String(channelName || 'unknown')
+                    .replace(/^[@-]+/, '')
+                    .replace(/[^a-zA-Z0-9]/g, '')
+                    .substring(0, 30) || 'ch';
+                const finalFileName = `${channelTag}_${item.msg.id}_${safeName}`;
                 const fullPath = path.join(UPLOADS_DIR, finalFileName);
                 const tempPath = `${fullPath}.part`;
 
