@@ -58,6 +58,11 @@ export const sendTikTokEvent = async ({
             }
         };
 
+        // Si hay un código de prueba configurado (solo para depuración), lo añadimos
+        if (process.env.TIKTOK_TEST_EVENT_CODE) {
+            payload.test_event_code = process.env.TIKTOK_TEST_EVENT_CODE;
+        }
+
         // Si es un evento de valor (compra), añadimos las propiedades de e-commerce
         if (value !== undefined && value !== null) {
             payload.properties = {
