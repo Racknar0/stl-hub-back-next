@@ -2,9 +2,11 @@ import express from 'express';
 import { 
     listChannels, 
     addChannel, 
+    updateChannel,
     deleteChannel, 
     getChannelInfo, 
     scanWithLimit,
+    quickScan,
     startDownload, 
     cancelDownload, 
     downloadStatus,
@@ -28,9 +30,11 @@ router.post('/auth/password', providePassword);
 
 router.get('/channels', listChannels);
 router.post('/channels', addChannel);
+router.patch('/channels/:name', updateChannel);
 router.delete('/channels/:name', deleteChannel);
 router.get('/info', getChannelInfo);
 router.get('/scan', scanWithLimit);
+router.get('/quick-scan', quickScan);
 router.post('/start', startDownload);
 router.post('/cancel', cancelDownload);
 router.get('/download-status', downloadStatus);

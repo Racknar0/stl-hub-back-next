@@ -88,15 +88,58 @@ export const listChannels = (req, res) => {
 
 export const addChannel = (req, res) => {
     try {
-        const { name } = req.body;
+        const { name, label } = req.body;
         if (!name) return res.status(400).json({ success: false, message: 'Name is required' });
 
         const channels = getChannels();
         if (!channels.find(c => c.name === name)) {
-            channels.push({ name, addedAt: new Date().toISOString() });
+            channels.push({ name, label: label || '', addedAt: new Date().toISOString() });
             fs.writeFileSync(CHANNELS_FILE, JSON.stringify(channels, null, 2));
         }
         res.json({ success: true, channels });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+export const updateChannel = (req, res) => {
+    try {
+        const { name } = req.params;
+        const { label, newName } = req.body;
+        const channels = getChannels();
+        const idx = channels.findIndex(c => c.name === name);
+        if (idx === -1) return res.status(404).json({ success: false, message: 'Channel not found' });
+
+        if (label !== undefined) channels[idx].label = label;
+        if (newName && newName !== name) {
+            // Also update last_downloads key
+            const allLd = telegramDownloaderService.getLastDownloads();
+            if (allLd[name]) {
+                allLd[newName] = allLd[name];
+                delete allLd[name];
+                const ldPath = path.join(process.cwd(), 'data', 'last_downloads.json');
+                fs.writeFileSync(ldPath, JSON.stringify(allLd, null, 2), 'utf8');
+            }
+            channels[idx].name = newName;
+        }
+        fs.writeFileSync(CHANNELS_FILE, JSON.stringify(channels, null, 2));
+
+        // Re-enrich with lastDownload
+        const allLastDownloads = telegramDownloaderService.getLastDownloads();
+        const enriched = channels.map(c => ({ ...c, lastDownload: allLastDownloads[c.name] || null }));
+        res.json({ success: true, channels: enriched });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+export const quickScan = async (req, res) => {
+    try {
+        const { channelName } = req.query;
+        if (!channelName) return res.status(400).json({ success: false, message: 'channelName required' });
+
+        const info = await telegramDownloaderService.getChannelInfo(channelName, 999);
+        res.json({ success: true, maxId: info.maxId, newMessages: info.newMessages, suggestedStart: info.suggestedStart });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
