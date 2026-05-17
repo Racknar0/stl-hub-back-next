@@ -1,11 +1,12 @@
 import { Router } from 'express';
 import { listCategories, getCategory, createCategory, updateCategory, deleteCategory } from '../../controllers/category.controller.js';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
+import { optionalAuth } from '../../middlewares/nsfwFilter.js'
 
 const router = Router();
 
 // públicas (si quieres mostrar categorías en público)
-router.get('/', listCategories);
+router.get('/', optionalAuth, listCategories);
 router.get('/:id', getCategory);
 
 // admin

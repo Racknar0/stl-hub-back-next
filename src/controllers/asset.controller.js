@@ -12,6 +12,7 @@ import { applyMegaProxy, listMegaProxies } from '../utils/megaProxy.js';
 import { createPartFromBase64, GoogleGenAI, PartMediaResolutionLevel } from '@google/genai';
 import qdrantMultimodalService from '../services/qdrantMultimodal.service.js';
 import { megaMenuCache } from '../utils/memoryCache.js';
+import { buildNsfwWhere, buildNsfwCategoryWhere, isAssetNSFW as isAssetNSFWBackend } from '../middlewares/nsfwFilter.js';
 
 const prisma = new PrismaClient();
 import { randomizeFreebies, getRandomizeFreebiesCountFromEnv } from '../utils/randomizeFreebies.js';
@@ -2254,8 +2255,9 @@ export const deleteAsset = async (req, res) => {
 export const latestAssets = async (req, res) => {
     try {
         const limit = Math.max(1, Math.min(50, Number(req.query.limit) || 20));
+        const nsfwWhere = buildNsfwWhere(req);
         const items = await prisma.asset.findMany({
-            where: { status: 'PUBLISHED' },
+            where: { status: 'PUBLISHED', ...nsfwWhere },
             orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
             take: limit,
             select: {
@@ -2303,8 +2305,9 @@ export const latestAssets = async (req, res) => {
 export const mostDownloadedAssets = async (req, res) => {
     try {
         const limit = Math.max(1, Math.min(50, Number(req.query.limit) || 20));
+        const nsfwWhere = buildNsfwWhere(req);
         const items = await prisma.asset.findMany({
-            where: { status: 'PUBLISHED' },
+            where: { status: 'PUBLISHED', ...nsfwWhere },
             orderBy: [{ downloads: 'desc' }, { id: 'desc' }],
             take: limit,
             select: {
@@ -2521,14 +2524,19 @@ function buildSeasonalCollectionsFromQdrant(baseCollections, orderedAssets) {
 }
 
 /** Datos para el mega menú: categorías con conteo de assets y assets destacados. GET /api/assets/menu/mega */
-export const getMegaMenuData = async (_req, res) => {
+export const getMegaMenuData = async (req, res) => {
     try {
-        const data = await megaMenuCache.getOrSet('megaMenu', async () => {
+        // Clave de cache distinta para logueado vs anónimo (el anónimo excluye NSFW)
+        const cacheKey = req.user ? 'megaMenu:auth' : 'megaMenu:anon';
+        const data = await megaMenuCache.getOrSet(cacheKey, async () => {
             const oneWeekAgo = new Date();
             oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
 
+            const nsfwCatWhere = buildNsfwCategoryWhere(req);
+            const nsfwAssetWhere = buildNsfwWhere(req);
             const [categories, mostDownloaded, totalAssets, sizeAgg, weeklyAssets] = await Promise.all([
                 prisma.category.findMany({
+                    where: { ...nsfwCatWhere },
                     orderBy: { name: 'asc' },
                     select: {
                         id: true,
@@ -2539,7 +2547,7 @@ export const getMegaMenuData = async (_req, res) => {
                     },
                 }),
                 prisma.asset.findMany({
-                    where: { status: 'PUBLISHED' },
+                    where: { status: 'PUBLISHED', ...nsfwAssetWhere },
                     orderBy: [{ downloads: 'desc' }, { id: 'desc' }],
                     take: 8,
                     select: {
@@ -2697,7 +2705,8 @@ export const searchAssets = async (req, res) => {
     }
 
     // --- WHERE base ---
-    const where = { status: 'PUBLISHED' };
+    const nsfwWhere = buildNsfwWhere(req);
+    const where = { status: 'PUBLISHED', ...nsfwWhere };
 
     // Opcional: plan/isPremium (se respeta si lo usas en el front)
     const planStr = String(plan || '').toLowerCase();
@@ -2859,7 +2868,7 @@ export const searchAssets = async (req, res) => {
                     for (let i = 0; i < sugIds.length; i += BATCH) {
                         const chunk = sugIds.slice(i, i + BATCH);
                         const batch = await prisma.asset.findMany({
-                            where: { id: { in: chunk }, status: 'PUBLISHED' },
+                            where: { id: { in: chunk }, status: 'PUBLISHED', ...nsfwWhere },
                             select: sugSelect,
                         });
                         allSugDb.push(...batch);
@@ -3158,7 +3167,7 @@ export const searchAssets = async (req, res) => {
                     for (let i = 0; i < sugIds.length; i += BATCH) {
                         const chunk = sugIds.slice(i, i + BATCH);
                         const batch = await prisma.asset.findMany({
-                            where: { id: { in: chunk }, status: 'PUBLISHED' },
+                            where: { id: { in: chunk }, status: 'PUBLISHED', ...nsfwWhere },
                             select: sugSelect,
                         });
                         allSugDb.push(...batch);
@@ -3389,6 +3398,12 @@ export const getAssetBySlug = async (req, res) => {
             },
         });
         if (!a) return res.status(404).json({ message: 'Asset not found' });
+
+        // --- NSFW gate: si el asset es adulto y el usuario no está logueado, bloqueamos ---
+        if (!req.user && isAssetNSFWBackend(a)) {
+            return res.json({ __nsfw_restricted: true, slug: a.slug });
+        }
+
         // ANTES: filtrábamos por status === PUBLISHED. Ahora devolvemos siempre el asset y exponemos flag para el frontend.
             const tagsEs = Array.isArray(a.tags) ? a.tags.map(t => t.slug).filter(Boolean) : [];
             const tagsEn = Array.isArray(a.tags) ? a.tags.map(t => (t.nameEn || t.name || t.slug)).filter(Boolean) : [];
@@ -3463,7 +3478,8 @@ export const getAssetBySlug = async (req, res) => {
 export const listPublishedSlugs = async (req, res) => {
     try {
         const { updatedAfter } = req.query || {};
-        const where = { status: 'PUBLISHED' };
+        const nsfwWhere = buildNsfwWhere(req);
+        const where = { status: 'PUBLISHED', ...nsfwWhere };
         if (updatedAfter) {
             const d = new Date(updatedAfter);
             if (!isNaN(d.getTime())) where.updatedAt = { gt: d };

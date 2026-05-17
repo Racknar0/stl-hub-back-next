@@ -32,6 +32,7 @@ import {
   deleteIgnoredSimilarPair,
 } from '../../controllers/asset.controller.js';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
+import { optionalAuth } from '../../middlewares/nsfwFilter.js'
 import { createBrokenReport } from '../../controllers/brokenReport.controller.js'
 
 const router = Router();
@@ -59,13 +60,13 @@ const imageStorage = multer.diskStorage({
 });
 const uploadImagesMulter = multer({ storage: imageStorage });
 
-// Rutas públicas
-router.get('/latest', latestAssets);
-router.get('/top', mostDownloadedAssets);
-router.get('/menu/mega', getMegaMenuData);
-router.get('/search', searchAssets);
-router.get('/slugs', listPublishedSlugs);
-router.get('/slug/:slug', getAssetBySlug);
+// Rutas públicas (optionalAuth intenta leer JWT sin rechazar; req.user = null si anónimo)
+router.get('/latest', optionalAuth, latestAssets);
+router.get('/top', optionalAuth, mostDownloadedAssets);
+router.get('/menu/mega', optionalAuth, getMegaMenuData);
+router.get('/search', optionalAuth, searchAssets);
+router.get('/slugs', optionalAuth, listPublishedSlugs);
+router.get('/slug/:slug', optionalAuth, getAssetBySlug);
 router.get('/:id(\\d+)', getAsset);
 router.post('/:id/request-download', requestDownload);
 router.post('/:id/report-broken-link', createBrokenReport);

@@ -1,9 +1,14 @@
 import { PrismaClient } from '@prisma/client';
+import { buildNsfwTagWhere } from '../middlewares/nsfwFilter.js';
 const prisma = new PrismaClient();
 
 export async function listTags(req, res) {
   try {
-    const items = await prisma.tag.findMany({ orderBy: { name: 'asc' } });
+    const nsfwWhere = buildNsfwTagWhere(req);
+    const items = await prisma.tag.findMany({
+      where: { ...nsfwWhere },
+      orderBy: { name: 'asc' },
+    });
     res.json({ items });
   } catch (e) {
     console.error(e);
