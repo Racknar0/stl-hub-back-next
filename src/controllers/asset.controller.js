@@ -713,7 +713,7 @@ function toJsonSafe(value) {
 /** Listar assets con paginación, filtros y ordenamiento. GET /api/assets */
 export const listAssets = async (req, res) => {
     try {
-    const { q = '', pageIndex, pageSize, plan, isPremium, accountId, accountAlias, is_ai_search, categorySlug, tagSlug, status } = req.query;
+    const { q = '', pageIndex, pageSize, plan, isPremium, accountId, accountAlias, is_ai_search, categorySlug, tagSlug, status, noDescription, noDescriptionEn, noTags, noCategories, noImages } = req.query;
         const hasPagination = pageIndex !== undefined && pageSize !== undefined;
 
         // Construir filtro dinámico
@@ -776,6 +776,44 @@ export const listAssets = async (req, res) => {
         // Filtro por estado
         if (status && String(status).trim()) {
             where.status = String(status).trim().toUpperCase();
+        }
+
+        // Filtros SEO: assets con metadata faltante
+        // Se usa AND para no pisar el OR de búsqueda por texto
+        if (noDescription === 'true') {
+            if (!where.AND) where.AND = [];
+            where.AND.push({
+                OR: [
+                    { description: null },
+                    { description: '' },
+                ],
+            });
+        }
+        if (noDescriptionEn === 'true') {
+            // Tiene descripción ES pero le falta EN
+            if (!where.AND) where.AND = [];
+            where.AND.push(
+                { description: { not: null } },
+                { NOT: { description: '' } },
+                {
+                    OR: [
+                        { descriptionEn: null },
+                        { descriptionEn: '' },
+                    ],
+                },
+            );
+        }
+        if (noTags === 'true') {
+            if (!where.AND) where.AND = [];
+            where.AND.push({ tags: { none: {} } });
+        }
+        if (noCategories === 'true') {
+            if (!where.AND) where.AND = [];
+            where.AND.push({ categories: { none: {} } });
+        }
+        if (noImages === 'true') {
+            if (!where.AND) where.AND = [];
+            where.AND.push({ images: { equals: null } });
         }
 
         if (hasPagination) {
