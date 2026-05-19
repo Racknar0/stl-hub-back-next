@@ -176,7 +176,8 @@ export const googleLogin = async (req, res) => {
 
             return res.status(200).json({
                 message: language === 'en' ? 'Login successful' : 'Inicio de sesión exitoso',
-                token: jwtToken
+                token: jwtToken,
+                isNewUser: false
             });
         } else {
             // Usuario no existe: Hacemos REGISTRO y luego LOGIN
@@ -228,7 +229,8 @@ export const googleLogin = async (req, res) => {
             
             return res.status(200).json({
                 message: language === 'en' ? 'Login successful' : 'Inicio de sesión exitoso',
-                token: jwtToken
+                token: jwtToken,
+                isNewUser: true
             });
         }
     } catch (error) {

@@ -26,10 +26,17 @@ class PinterestPublisherService {
       // 3. Aplicar filtros con Sharp
       const processedBase64 = await this.processImage(imageBuffer, filters);
 
+      // Truncar la descripción para no romper el límite de 800 caracteres de Pinterest
+      // Dejamos un máximo de 600 caracteres para asegurar que quepan los hashtags.
+      let safeDescription = description || '';
+      if (safeDescription.length > 600) {
+        safeDescription = safeDescription.substring(0, 597) + '...';
+      }
+
       // 4. Construir el payload para la API de Pinterest
       const payload = {
         title: title || '',
-        description: description || '',
+        description: safeDescription,
         link: link || '',
         board_id: boardId,
         media_source: {

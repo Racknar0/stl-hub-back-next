@@ -2,6 +2,7 @@
 import http from 'http';
 import app from './app.js';
 import { startBatchWorker } from './src/workers/batchWorker.js';
+import pinterestWorker from './src/services/pinterestWorker.service.js';
 
 const PORT = process.env.PORT || 3001; // usa 3001 si NGINX proxy_pass -> 3001
 
@@ -18,4 +19,9 @@ server.listen(PORT, () => {
   setTimeout(() => {
     startBatchWorker().catch(e => console.error('Worker fail:', e));
   }, 3000);
+
+  // Iniciar worker de Pinterest
+  setTimeout(() => {
+    pinterestWorker.start(60000); // Revisa la cola cada 1 minuto
+  }, 5000);
 });
