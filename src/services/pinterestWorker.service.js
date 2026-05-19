@@ -56,21 +56,15 @@ class PinterestWorkerService {
           
           if (!imageUrl) throw new Error('No hay imageUrl en los filtros.');
 
-          // Descargar la imagen
-          const response = await fetch(imageUrl);
-          if (!response.ok) throw new Error(`Fallo al descargar imagen: ${response.status}`);
-          const arrayBuffer = await response.arrayBuffer();
-          const imageBuffer = Buffer.from(arrayBuffer);
-
-          // Publicar usando el Publisher Service
+          // Publicar usando el Publisher Service (it downloads the image internally)
           console.log(`[Pinterest Worker] Publicando Pin ID ${pin.id} (Asset ${pin.assetId})...`);
           
           const result = await pinterestPublisherService.publishPin(
-            imageBuffer,
+            imageUrl,
+            pin.boardId === 'Automático' ? null : pin.boardId,
             pin.title,
             pin.description,
             pin.link,
-            pin.boardId === 'Automático' ? null : pin.boardId, // Si es automático, el servicio lo infiere
             filters
           );
 

@@ -7,7 +7,7 @@ class PinterestService {
     this.clientId = process.env.PINTEREST_CLIENT_ID;
     this.clientSecret = process.env.PINTEREST_CLIENT_SECRET;
     this.redirectUri = process.env.PINTEREST_REDIRECT_URI || 'http://localhost:3001/api/pinterest/callback';
-    this.baseUrl = 'https://api.pinterest.com/v5';
+    this.baseUrl = process.env.PINTEREST_API_BASE || 'https://api-sandbox.pinterest.com/v5';
   }
 
   // 1. Generar la URL de autorización para iniciar el flujo OAuth
@@ -179,6 +179,56 @@ class PinterestService {
         message: error.message 
       };
     }
+  }
+  // Listar tableros de la cuenta de Pinterest
+  async listBoards() {
+    const token = await this.getValidAccessToken();
+    const response = await fetch(`${this.baseUrl}/boards?page_size=100`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`Pinterest API error: ${err}`);
+    }
+
+    const data = await response.json();
+    return (data.items || []).map(b => ({
+      id: b.id,
+      name: b.name,
+      description: b.description || '',
+      pinCount: b.pin_count || 0,
+      privacy: b.privacy,
+    }));
+  }
+
+  // Crear un tablero nuevo
+  async createBoard(name, description = '') {
+    const token = await this.getValidAccessToken();
+    const response = await fetch(`${this.baseUrl}/boards`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name,
+        description,
+        privacy: 'PUBLIC',
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`Pinterest API error: ${err}`);
+    }
+
+    const board = await response.json();
+    return {
+      id: board.id,
+      name: board.name,
+      description: board.description || '',
+    };
   }
 }
 
