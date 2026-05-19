@@ -5,8 +5,11 @@ import { generateRandomToken } from '../utils/cryptoUtils.js';
 import { generateJWT } from '../utils/jwtUtils.js';
 import { pickTrackingForDb, resolveMarketingCampaignId, resolveTrackingForRequest } from '../utils/attribution.js';
 import { sendTikTokEvent } from '../utils/tiktokCapi.js';
+import { OAuth2Client } from 'google-auth-library';
+import crypto from 'crypto';
 
 const prisma = new PrismaClient();
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 // Tipos de suscripciones
 const subscriptionTypes = {
@@ -123,6 +126,118 @@ export const login = async (req, res) => {
   }
 };
 
+// Google Login / Register
+export const googleLogin = async (req, res) => {
+    const { token, language = 'es', eventId } = req.body;
+    
+    if (!token) {
+        return res.status(400).json({ message: language === 'en' ? 'Google token is required' : 'Token de Google requerido' });
+    }
+
+    try {
+        // Obtenemos la información del usuario desde Google usando el access_token
+        const googleResponse = await fetch(`https://www.googleapis.com/oauth2/v3/userinfo?access_token=${token}`);
+        if (!googleResponse.ok) {
+            return res.status(401).json({ message: language === 'en' ? 'Invalid Google token' : 'Token de Google inválido' });
+        }
+        
+        const payload = await googleResponse.json();
+        const { email } = payload;
+        
+        if (!email) {
+            return res.status(400).json({ message: language === 'en' ? 'Could not retrieve email from Google' : 'No se pudo obtener el correo de Google' });
+        }
+
+        let user = await prisma.user.findUnique({ where: { email } });
+        
+        if (user) {
+            // Usuario ya existe: hacemos LOGIN
+            if (!user.isActive) {
+                // Como Google ya validó el correo, lo activamos automáticamente si estaba inactivo
+                user = await prisma.user.update({
+                    where: { id: user.id },
+                    data: { isActive: true, activationToken: null }
+                });
+            }
+            
+            const isAdmin = Number(user.roleId) === 2;
+            const jwtToken = isAdmin
+                ? generateJWT({ id: user.id, roleId: user.roleId }, null)
+                : generateJWT({ id: user.id, roleId: user.roleId });
+                
+            try {
+                await prisma.user.update({
+                    where: { id: user.id },
+                    data: { lastLogin: new Date() },
+                });
+            } catch (e) {
+                console.warn('Could not update lastLogin for user', user.id, e.message);
+            }
+
+            return res.status(200).json({
+                message: language === 'en' ? 'Login successful' : 'Inicio de sesión exitoso',
+                token: jwtToken
+            });
+        } else {
+            // Usuario no existe: Hacemos REGISTRO y luego LOGIN
+            // Generamos una contraseña aleatoria super fuerte porque este usuario entrará siempre con Google
+            const randomPassword = crypto.randomBytes(32).toString('hex');
+            const hashedPassword = await hashPassword(randomPassword);
+            
+            const trackingResolved = await resolveTrackingForRequest(prisma, req, 'first');
+            const tracking = trackingResolved?.tracking || null;
+            const marketingCampaignIdFromTracking = tracking
+                ? await resolveMarketingCampaignId(prisma, tracking)
+                : null;
+            const marketingCampaignId = marketingCampaignIdFromTracking || trackingResolved?.marketingCampaignId || null;
+            const trackingDb = pickTrackingForDb(tracking);
+            const trackingNow = tracking ? new Date() : null;
+
+            user = await prisma.user.create({
+                data: {
+                    email,
+                    password: hashedPassword,
+                    language,
+                    isActive: true, // Activado automáticamente porque Google verifica el email
+                    roleId: 1, 
+                    marketingCampaignId,
+                    ...trackingDb,
+                    utmFirstAt: trackingNow,
+                    utmLastAt: trackingNow,
+                },
+            });
+
+            // Evento de Servidor: TikTok CAPI (CompleteRegistration)
+            sendTikTokEvent({
+                eventName: 'CompleteRegistration',
+                eventId: eventId || `reg-g-${user.id}`,
+                userEmail: email,
+                userIp: req.ip,
+                userAgent: req.headers['user-agent']
+            });
+            
+            const jwtToken = generateJWT({ id: user.id, roleId: user.roleId });
+            try {
+                await prisma.user.update({
+                    where: { id: user.id },
+                    data: { lastLogin: new Date() },
+                });
+            } catch (e) {
+                console.warn('Could not update lastLogin for user', user.id, e.message);
+            }
+            
+            return res.status(200).json({
+                message: language === 'en' ? 'Login successful' : 'Inicio de sesión exitoso',
+                token: jwtToken
+            });
+        }
+    } catch (error) {
+        console.error('Error in googleLogin:', error);
+        return res.status(500).json({
+            message: language === 'en' ? 'Internal server error' : 'Error interno del servidor',
+        });
+    }
+};
 
 // forgot password
 export const forgotPassword = async (req, res) => {

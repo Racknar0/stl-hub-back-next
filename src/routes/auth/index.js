@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { login, forgotPassword, resetPassword, registerUserSale, register, activateAccount } from '../../controllers/auth.controller.js';
+import { login, googleLogin, forgotPassword, resetPassword, registerUserSale, register, activateAccount } from '../../controllers/auth.controller.js';
 
 const router = Router();
 
@@ -11,6 +11,9 @@ router.post('/register', register);
 
 // Activación de cuenta
 router.post('/activate', activateAccount);
+
+// Autenticación con Google
+router.post('/google', googleLogin);
 
 // Recuperación de contraseña
 router.post('/forgot-password', forgotPassword);
