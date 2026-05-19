@@ -696,3 +696,31 @@ model GiftRedemption {
   @@index([userId])
   @@map("giftredemption")
 }
+
+// --- PINTEREST AUTOMATION ---
+enum PinterestPinStatus {
+  PENDING
+  PUBLISHED
+  FAILED
+}
+
+model PinterestPinQueue {
+  id          Int                @id @default(autoincrement())
+  assetId     Int                // Ref to asset (no strict FK to avoid cascade issues if asset is deleted, though could be FK)
+  scheduledAt DateTime           // Scheduled publish time
+  status      PinterestPinStatus @default(PENDING)
+  boardId     String             // Destination Pinterest Board ID
+  title       String?            // Custom or generated title
+  description String?            @db.Text
+  link        String?            // Target URL (e.g., Free pass or asset page)
+  filters     Json?              // e.g. { "flip": true, "zoom": 1.05 }
+  errorMessage String?           @db.Text // Error details if FAILED
+  publishedPinId String?         // ID of the pin in Pinterest once published
+  
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  @@index([status])
+  @@index([scheduledAt])
+  @@map("pinterestpinqueue")
+}
