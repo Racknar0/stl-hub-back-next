@@ -225,6 +225,41 @@ router.post('/ai-optimize', requireAuth, requireAdmin, async (req, res) => {
 import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 
+// Stats: counts by status
+router.get('/stats', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const [published, pending, failed] = await Promise.all([
+      prisma.pinterestPinQueue.count({ where: { status: 'PUBLISHED' } }),
+      prisma.pinterestPinQueue.count({ where: { status: 'PENDING' } }),
+      prisma.pinterestPinQueue.count({ where: { status: 'FAILED' } }),
+    ]);
+    res.json({ published, pending, failed, total: published + pending + failed });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Connection status: check if we have a valid token
+router.get('/connection-status', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const token = await prisma.systemSetting.findUnique({ where: { key: 'PINTEREST_ACCESS_TOKEN' } });
+    if (!token?.value) return res.json({ connected: false });
+
+    // Quick validation: call user_account
+    const baseUrl = process.env.PINTEREST_API_BASE || 'https://api-sandbox.pinterest.com/v5';
+    const resp = await fetch(`${baseUrl}/user_account`, {
+      headers: { 'Authorization': `Bearer ${token.value}` }
+    });
+    if (resp.ok) {
+      const user = await resp.json();
+      return res.json({ connected: true, username: user.username });
+    }
+    res.json({ connected: false, reason: 'Token expired' });
+  } catch (e) {
+    res.json({ connected: false, reason: e.message });
+  }
+});
+
 router.get('/search-assets', requireAuth, requireAdmin, async (req, res) => {
   try {
     const { q, mode } = req.query; // q = query, mode = 'id' o 'name'
