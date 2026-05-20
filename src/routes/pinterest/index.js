@@ -260,6 +260,19 @@ router.get('/connection-status', requireAuth, requireAdmin, async (req, res) => 
   }
 });
 
+// 9. Desconectar Pinterest (Eliminar tokens de la base de datos)
+router.post('/disconnect', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    await prisma.systemSetting.deleteMany({
+      where: { key: { in: ['PINTEREST_ACCESS_TOKEN', 'PINTEREST_REFRESH_TOKEN', 'PINTEREST_TOKEN_EXPIRES_AT'] } }
+    });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error desconectando Pinterest:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.get('/search-assets', requireAuth, requireAdmin, async (req, res) => {
   try {
     const { q, mode } = req.query; // q = query, mode = 'id' o 'name'
