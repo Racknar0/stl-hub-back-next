@@ -1,7 +1,7 @@
 import express from 'express'
 import { getUploadsMetrics, getConnectionsToday, getVpsMemoryMetrics } from '../../controllers/metrics.controller.js'
 import { getUsersCount } from '../../controllers/metrics.controller.js'
-import { getDownloadMetrics } from '../../controllers/metrics.controller.js'
+import { getDownloadMetrics, getDownloadsTimeseries } from '../../controllers/metrics.controller.js'
 import { getRegistrationMetrics, getRegistrationTimeseries } from '../../controllers/metrics.controller.js'
 import { getTopDownloads } from '../../controllers/metrics.controller.js'
 import { getTaxonomyCounts } from '../../controllers/metrics.controller.js'
@@ -18,6 +18,7 @@ router.get('/vps-memory', getVpsMemoryMetrics)
 router.get('/connections-today', getConnectionsToday)
 router.get('/users', getUsersCount)
 router.get('/downloads', getDownloadMetrics)
+router.get('/downloads/timeseries', getDownloadsTimeseries)
 router.get('/registrations', getRegistrationMetrics)
 router.get('/registrations/timeseries', getRegistrationTimeseries)
 router.get('/top-downloads', getTopDownloads)
