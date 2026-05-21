@@ -188,8 +188,24 @@ export const quickScan = async (req, res) => {
         const { channelName } = req.query;
         if (!channelName) return res.status(400).json({ success: false, message: 'channelName required' });
 
-        const result = await telegramDownloaderService.quickScanFiles(channelName);
-        res.json({ success: true, ...result });
+        // Ejecutar sincronización completa (descarga avatar, actualiza nombre y escanea)
+        await telegramCheckerService.syncChannelData(channelName);
+
+        const channels = getChannels();
+        const chan = channels.find(c => c.name === channelName);
+        if (!chan) {
+            return res.status(404).json({ success: false, message: 'Channel not found after sync' });
+        }
+
+        const scan = chan.lastScanResult || {};
+        res.json({
+            success: true,
+            newFiles: scan.newFiles ?? 0,
+            totalMessages: scan.totalMessages ?? 0,
+            totalSize: scan.totalSize ?? '0 B',
+            totalSizeBytes: scan.totalSizeBytes ?? 0,
+            maxId: scan.maxId ?? 0
+        });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
