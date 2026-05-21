@@ -3285,96 +3285,152 @@ export const requestDownload = async (req, res) => {
       }
     }
 
-    // 3) Política Free vs Premium
+    // 3) Política Free vs Premium con Límites Dinámicos
+    // 3.1) Bloquear descargas anónimas
+    if (!userId) {
+      return res.status(401).json({ code: 'ANONYMOUS_BLOCKED', message: 'Authentication required to download assets' });
+    }
+
+    // 3.2) Verificar usuario activo + jwtVersion
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { isActive: true, jwtVersion: true },
+    });
+    if (!user || !user.isActive) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+    if (jwtVerFromToken != null && user.jwtVersion != null && jwtVerFromToken !== user.jwtVersion) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+
     let allowed = false;
 
-    if (!asset.isPremium) {
-      // Free: permitido sin autenticación
+    if (roleId === 2) {
+      // Admin bypass
       allowed = true;
     } else {
-      // Premium: requiere autenticación
-      if (!tokenToUse || !userId) {
-        return res.status(401).json({ message: 'Unauthorized' });
-      }
-
-      // 3.1) Verificar usuario activo + (opcional) invalidación por jwtVersion
-      const user = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { isActive: true, jwtVersion: true },
+      // 3.3) Cargar suscripción del usuario
+      const now = new Date();
+      const lastSub = await prisma.subscription.findFirst({
+        where: { userId },
+        orderBy: { currentPeriodEnd: 'desc' },
       });
-      if (!user || !user.isActive) {
-        return res.status(401).json({ message: 'Unauthorized' });
+
+      let currentStatus = lastSub?.status || null;
+      if (lastSub && currentStatus === 'ACTIVE' && lastSub.currentPeriodEnd < now) {
+        await prisma.subscription.update({
+          where: { id: lastSub.id },
+          data: { status: 'EXPIRED' },
+        });
+        currentStatus = 'EXPIRED';
       }
-      if (jwtVerFromToken != null && user.jwtVersion != null && jwtVerFromToken !== user.jwtVersion) {
-        // El token pertenece a una versión antigua -> inválido
-        return res.status(401).json({ message: 'Unauthorized' });
-      }
 
-      // 3.2) Admin bypass
-      if (roleId === 2) {
-        allowed = true;
-      } else {
-        // 3.2.1) 🚀 Launch Promo: check systemSetting
-        const promoSetting = await prisma.systemSetting.findUnique({ where: { key: 'LAUNCH_PROMO_ACTIVE' } });
-        const promoActive = promoSetting?.value === 'true';
+      const hasActiveSub = lastSub && currentStatus === 'ACTIVE' && lastSub.currentPeriodEnd > now;
 
-        if (promoActive) {
-          const promoDaysSetting = await prisma.systemSetting.findUnique({ where: { key: 'LAUNCH_PROMO_DAYS' } });
-          const promoDays = Number(promoDaysSetting?.value || 0);
-
-          if (promoDays <= 0) {
-            // 0 or empty = unlimited (all free)
-            allowed = true;
-          } else {
-            // Check if promo start date is within the configured days
-            const promoStartSetting = await prisma.systemSetting.findUnique({ where: { key: 'LAUNCH_PROMO_START' } });
-            const promoStart = promoStartSetting?.value ? new Date(promoStartSetting.value) : null;
-
-            if (promoStart && !Number.isNaN(promoStart.getTime())) {
-              const elapsed = (Date.now() - promoStart.getTime()) / (24 * 60 * 60 * 1000);
-              if (elapsed <= promoDays) {
-                allowed = true;
-              }
-            } else {
-              // No start date set yet, treat as unlimited
-              allowed = true;
-            }
+      // 3.4) Cargar configuraciones de límites
+      const settings = await prisma.systemSetting.findMany({
+        where: {
+          key: {
+            in: [
+              'LIMIT_FREE_PASS_FREE_DOWNLOADS',
+              'LIMIT_NORMAL_FREE_DOWNLOADS',
+              'LIMIT_SUBSCRIBED_DOWNLOADS',
+              'LAUNCH_PROMO_ACTIVE',
+              'LAUNCH_PROMO_DAYS',
+              'LAUNCH_PROMO_START'
+            ]
           }
         }
+      });
 
-        if (!allowed) {
-        // 3.3) Auditar la suscripción más reciente
-        const now = new Date();
-        const lastSub = await prisma.subscription.findFirst({
-          where: { userId },
-          orderBy: { currentPeriodEnd: 'desc' },
+      const settingsMap = {};
+      settings.forEach(s => { settingsMap[s.key] = s.value; });
+
+      const limitFreePass = Number(settingsMap['LIMIT_FREE_PASS_FREE_DOWNLOADS'] || 100);
+      const limitNormalFree = Number(settingsMap['LIMIT_NORMAL_FREE_DOWNLOADS'] || 50);
+      const limitSubscribed = Number(settingsMap['LIMIT_SUBSCRIBED_DOWNLOADS'] || 500);
+
+      const promoActive = settingsMap['LAUNCH_PROMO_ACTIVE'] === 'true';
+      let isPromoValid = false;
+      if (promoActive) {
+        const promoDays = Number(settingsMap['LAUNCH_PROMO_DAYS'] || 0);
+        if (promoDays <= 0) {
+          isPromoValid = true;
+        } else {
+          const promoStartStr = settingsMap['LAUNCH_PROMO_START'];
+          const promoStart = promoStartStr ? new Date(promoStartStr) : null;
+          if (promoStart && !Number.isNaN(promoStart.getTime())) {
+            const elapsed = (Date.now() - promoStart.getTime()) / (24 * 60 * 60 * 1000);
+            if (elapsed <= promoDays) {
+              isPromoValid = true;
+            }
+          } else {
+            isPromoValid = true;
+          }
+        }
+      }
+
+      // 3.5) Resolver límite aplicable
+      let limit = limitNormalFree;
+      let isSubscribed = false;
+
+      if (hasActiveSub) {
+        limit = limitSubscribed;
+        isSubscribed = true;
+        allowed = true;
+      } else {
+        if (isPromoValid) {
+          limit = limitFreePass;
+          allowed = true;
+        } else {
+          if (asset.isPremium) {
+            // Modo Normal: no se permiten descargas premium para usuarios gratuitos
+            if (!lastSub) {
+              return res.status(403).json({ code: 'NO_SUB', message: 'Subscription required' });
+            }
+            return res.status(403).json({
+              code: 'EXPIRED',
+              message: 'Subscription expired',
+              expiredAt: lastSub.currentPeriodEnd.toISOString(),
+            });
+          } else {
+            limit = limitNormalFree;
+            allowed = true;
+          }
+        }
+      }
+
+      // 3.6) Verificar límite contra historial de descargas en las últimas 24 horas
+      if (allowed) {
+        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const downloadsToday = await prisma.downloadHistory.count({
+          where: {
+            userId,
+            downloadedAt: { gte: oneDayAgo }
+          }
         });
 
-        if (!lastSub) {
-          return res.status(403).json({ code: 'NO_SUB', message: 'Subscription required' });
-        }
-
-        let currentStatus = lastSub.status;
-
-        // Si está ACTIVE pero ya venció, marcar EXPIRED primero
-        if (currentStatus === 'ACTIVE' && lastSub.currentPeriodEnd < now) {
-          await prisma.subscription.update({
-            where: { id: lastSub.id },
-            data: { status: 'EXPIRED' },
+        if (downloadsToday >= limit) {
+          const oldestDownload = await prisma.downloadHistory.findFirst({
+            where: {
+              userId,
+              downloadedAt: { gte: oneDayAgo }
+            },
+            orderBy: { downloadedAt: 'asc' }
           });
-          currentStatus = 'EXPIRED';
-        }
 
-        const isActive = currentStatus === 'ACTIVE' && lastSub.currentPeriodEnd > now;
-        if (!isActive) {
+          const nextReset = oldestDownload
+            ? new Date(oldestDownload.downloadedAt.getTime() + 24 * 60 * 60 * 1000)
+            : new Date(Date.now() + 24 * 60 * 60 * 1000);
+
           return res.status(403).json({
-            code: 'EXPIRED',
-            message: 'Subscription expired',
-            expiredAt: lastSub.currentPeriodEnd.toISOString(),
+            code: 'DAILY_LIMIT_REACHED',
+            message: 'Daily download limit reached',
+            limit,
+            current: downloadsToday,
+            isSubscribed,
+            nextReset: nextReset.toISOString()
           });
-        }
-
-        allowed = true;
         }
       }
     }
