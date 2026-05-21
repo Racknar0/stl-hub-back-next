@@ -24,3 +24,5 @@ src/utils/proxies.txt
 
 # Telegram session (credencial sensible)
 data/telegram.session
+data/telegram_channels.json
+data/last_downloads.json
