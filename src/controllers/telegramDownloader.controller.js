@@ -88,7 +88,7 @@ export const listChannels = (req, res) => {
 
 export const addChannel = (req, res) => {
     try {
-        const { name, label } = req.body;
+        const { name, label, lastMsgId } = req.body;
         if (!name) return res.status(400).json({ success: false, message: 'Name is required' });
 
         const channels = getChannels();
@@ -96,6 +96,11 @@ export const addChannel = (req, res) => {
             channels.push({ name, label: label || '', addedAt: new Date().toISOString() });
             fs.writeFileSync(CHANNELS_FILE, JSON.stringify(channels, null, 2));
         }
+
+        if (lastMsgId !== undefined && lastMsgId !== null && lastMsgId !== '') {
+            telegramDownloaderService.saveLastDownload(name, Number(lastMsgId), 'Inicialización manual');
+        }
+
         res.json({ success: true, channels });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
@@ -105,7 +110,7 @@ export const addChannel = (req, res) => {
 export const updateChannel = (req, res) => {
     try {
         const { name } = req.params;
-        const { label, newName } = req.body;
+        const { label, newName, lastMsgId } = req.body;
         const channels = getChannels();
         const idx = channels.findIndex(c => c.name === name);
         if (idx === -1) return res.status(404).json({ success: false, message: 'Channel not found' });
@@ -122,6 +127,12 @@ export const updateChannel = (req, res) => {
             }
             channels[idx].name = newName;
         }
+
+        if (lastMsgId !== undefined && lastMsgId !== null && lastMsgId !== '') {
+            const targetName = newName || name;
+            telegramDownloaderService.saveLastDownload(targetName, Number(lastMsgId), 'Modificado manualmente');
+        }
+
         fs.writeFileSync(CHANNELS_FILE, JSON.stringify(channels, null, 2));
 
         // Re-enrich with lastDownload
