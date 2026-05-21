@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import telegramDownloaderService from '../services/telegramDownloader.service.js';
+import telegramCheckerService from '../services/telegramChecker.service.js';
 
 const CHANNELS_FILE = path.join(process.cwd(), 'data', 'telegram_channels.json');
 
@@ -86,14 +87,20 @@ export const listChannels = (req, res) => {
     }
 };
 
-export const addChannel = (req, res) => {
+export const addChannel = async (req, res) => {
     try {
         const { name, label, lastMsgId } = req.body;
         if (!name) return res.status(400).json({ success: false, message: 'Name is required' });
 
         const channels = getChannels();
         if (!channels.find(c => c.name === name)) {
-            channels.push({ name, label: label || '', addedAt: new Date().toISOString() });
+            channels.push({ 
+                name, 
+                label: label || '', 
+                addedAt: new Date().toISOString(),
+                lastCheckedAt: new Date().toISOString(),
+                avatarUrl: null
+            });
             fs.writeFileSync(CHANNELS_FILE, JSON.stringify(channels, null, 2));
         }
 
@@ -101,7 +108,25 @@ export const addChannel = (req, res) => {
             telegramDownloaderService.saveLastDownload(name, Number(lastMsgId), 'Inicialización manual');
         }
 
-        res.json({ success: true, channels });
+        // Si Telegram está autenticado, intentar sincronizar de inmediato
+        const isAuth = await telegramDownloaderService.checkAuth();
+        if (isAuth) {
+            try {
+                await telegramCheckerService.syncChannelData(name);
+            } catch (syncErr) {
+                console.error('[Telegram Controller] Error sincronizando canal nuevo:', syncErr);
+            }
+        }
+
+        // Retornar listado de canales enriquecido
+        const updatedChannels = getChannels();
+        const allLastDownloads = telegramDownloaderService.getLastDownloads();
+        const enriched = updatedChannels.map(c => ({
+            ...c,
+            lastDownload: allLastDownloads[c.name] || null
+        }));
+
+        res.json({ success: true, channels: enriched });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
@@ -117,6 +142,20 @@ export const updateChannel = (req, res) => {
 
         if (label !== undefined) channels[idx].label = label;
         if (newName && newName !== name) {
+            // Renombrar archivo de avatar si existe
+            const oldAvatarPath = path.join(process.cwd(), 'uploads', 'telegram_avatars', `${name}.jpg`);
+            const newAvatarPath = path.join(process.cwd(), 'uploads', 'telegram_avatars', `${newName}.jpg`);
+            if (fs.existsSync(oldAvatarPath)) {
+                try {
+                    fs.renameSync(oldAvatarPath, newAvatarPath);
+                    channels[idx].avatarUrl = `/uploads/telegram_avatars/${newName}.jpg`;
+                } catch (err) {
+                    console.error('[Telegram Controller] Error renombrando avatar:', err);
+                }
+            } else if (channels[idx].avatarUrl && channels[idx].avatarUrl.includes(name)) {
+                channels[idx].avatarUrl = `/uploads/telegram_avatars/${newName}.jpg`;
+            }
+
             // Also update last_downloads key
             const allLd = telegramDownloaderService.getLastDownloads();
             if (allLd[name]) {
