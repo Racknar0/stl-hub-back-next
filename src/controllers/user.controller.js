@@ -276,7 +276,7 @@ export const deleteUser = async (req, res) => {
 export const extendSubscription = async (req, res) => {
   try {
     const userId = parseInt(req.params.id);
-    const { months, daysToAdd } = req.body; // Prefer daysToAdd
+    const { months, daysToAdd, daysRemaining } = req.body; // Prefer daysRemaining
 
     const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true } });
     if (!user) return res.status(404).json({ message: 'User not found' });
@@ -292,34 +292,55 @@ export const extendSubscription = async (req, res) => {
     });
 
     let newEnd;
-    const days = Number(daysToAdd);
-    if (Number.isFinite(days) && days > 0) {
-      const base = (activeSub && activeSub.currentPeriodEnd > now) ? activeSub.currentPeriodEnd : now;
+    let status = 'ACTIVE';
+
+    if (daysRemaining !== undefined) {
+      const days = Number(daysRemaining);
+      if (!Number.isInteger(days) || days < 0) {
+        return res.status(400).json({ message: 'daysRemaining must be a positive integer or 0' });
+      }
       const safeDays = Math.min(days, 3650); // Máx ~10 años
-      newEnd = addDays(base, safeDays);
+      newEnd = addDays(now, safeDays);
+      if (safeDays === 0) {
+        status = 'EXPIRED';
+      }
+    } else if (daysToAdd !== undefined) {
+      const days = Number(daysToAdd);
+      if (Number.isFinite(days) && days > 0) {
+        const base = (activeSub && activeSub.currentPeriodEnd > now) ? activeSub.currentPeriodEnd : now;
+        const safeDays = Math.min(days, 3650); // Máx ~10 años
+        newEnd = addDays(base, safeDays);
+      } else {
+        return res.status(400).json({ message: 'Provide a valid daysToAdd (>0).' });
+      }
     } else {
       // Fallback a meses (compatibilidad)
       const m = Number(months);
       if (![3, 6, 12].includes(m)) {
-        return res.status(400).json({ message: 'Provide daysToAdd (>0) or valid months (3, 6 or 12).' });
+        return res.status(400).json({ message: 'Provide daysRemaining, daysToAdd (>0) or valid months (3, 6 or 12).' });
       }
       const base = (activeSub && activeSub.currentPeriodEnd > now) ? activeSub.currentPeriodEnd : now;
       newEnd = addMonths(base, m);
+    }
+
+    // Si daysRemaining es 0 y no hay suscripción activa, no hace falta hacer nada
+    if (daysRemaining !== undefined && Number(daysRemaining) === 0 && !activeSub) {
+      return res.status(200).json({ message: 'Subscription already inactive/expired' });
     }
 
     let updatedSub;
     if (activeSub) {
       updatedSub = await prisma.subscription.update({
         where: { id: activeSub.id },
-        data: { currentPeriodEnd: newEnd, startedAt: activeSub.startedAt ?? now, status: 'ACTIVE' },
+        data: { currentPeriodEnd: newEnd, startedAt: activeSub.startedAt ?? now, status: status },
       });
     } else {
       updatedSub = await prisma.subscription.create({
-        data: { userId, status: 'ACTIVE', startedAt: now, currentPeriodEnd: newEnd },
+        data: { userId, status: status, startedAt: now, currentPeriodEnd: newEnd },
       });
     }
 
-    return res.status(200).json({ message: 'Subscription extended', subscription: updatedSub });
+    return res.status(200).json({ message: 'Subscription updated', subscription: updatedSub });
   } catch (error) {
     console.error('Error extending subscription:', error);
     return res.status(500).json({ message: 'Error extending subscription' });
