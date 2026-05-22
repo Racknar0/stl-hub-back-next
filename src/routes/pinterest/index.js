@@ -563,7 +563,8 @@ router.post('/publish-now', requireAuth, requireAdmin, async (req, res) => {
       const result = await pinterestPublisherService.publishPin(
         fullImageUrl,
         boardId && boardId !== 'auto' && boardId !== 'Automático' ? boardId : null,
-        title, description, link, filters
+        title, description, link, filters,
+        assetId ? Number(assetId) : null
       );
 
       await prisma.pinterestPinQueue.update({
@@ -577,6 +578,22 @@ router.post('/publish-now', requireAuth, requireAdmin, async (req, res) => {
         where: { id: pin.id },
         data: { status: 'FAILED', errorMessage: pubError.message }
       });
+
+      // Crear notificación de error interna en la BD
+      try {
+        await prisma.notification.create({
+          data: {
+            title: `Error al publicar Pin ahora (Asset #${assetId || 'now'})`,
+            body: `Ocurrió un error al intentar publicar manualmente el Pin en Pinterest.\n\nError: ${pubError.message}\n\nTítulo del Pin: ${title || 'Sin título'}`,
+            status: 'UNREAD',
+            type: 'AUTOMATION',
+            typeStatus: 'ERROR'
+          }
+        });
+      } catch (notifErr) {
+        console.error('[Pinterest Route] No se pudo crear la notificación en la BD:', notifErr.message);
+      }
+
       res.status(500).json({ error: pubError.message, dbId: pin.id });
     }
   } catch (error) {

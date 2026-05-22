@@ -1,5 +1,8 @@
 import sharp from 'sharp';
 import pinterestService from './pinterest.service.js';
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient();
 
 class PinterestPublisherService {
   constructor() {
@@ -14,18 +17,33 @@ class PinterestPublisherService {
    * @param {string} description Descripción del Pin
    * @param {string} link URL a donde lleva el Pin (ej. la página del asset)
    * @param {Object} filters Configuración de filtros { flip: true, zoom: 1.05, rotate: 2 }
+   * @param {number|null} assetId ID opcional del asset para resolver categoría
    */
-  async publishPin(imageUrl, boardId, title, description, link, filters = {}) {
+  async publishPin(imageUrl, boardId, title, description, link, filters = {}, assetId = null) {
     try {
       // 1. Obtener un token de acceso válido
       const accessToken = await pinterestService.getValidAccessToken();
 
-      // 2. Resolver boardId si es null/auto
+      // 2. Resolver boardId si es null/auto/Automático
       let resolvedBoardId = boardId;
-      if (!resolvedBoardId) {
-        resolvedBoardId = await this.findOrCreateBoard('STL Hub', accessToken);
-        if (!resolvedBoardId) throw new Error('No se pudo obtener un tablero de Pinterest. Crea uno manualmente.');
-        console.log(`[Pinterest] Using auto board: ${resolvedBoardId}`);
+      if (!resolvedBoardId || resolvedBoardId === 'auto' || resolvedBoardId === 'Automático') {
+        let boardName = 'STL Hub';
+        if (assetId) {
+          try {
+            const assetObj = await prisma.asset.findUnique({
+              where: { id: Number(assetId) },
+              include: { categories: true }
+            });
+            if (assetObj?.categories?.length > 0) {
+              boardName = assetObj.categories[0].name;
+            }
+          } catch (err) {
+            console.error('[Pinterest] Error fetching asset category:', err.message);
+          }
+        }
+        resolvedBoardId = await this.findOrCreateBoard(boardName, accessToken);
+        if (!resolvedBoardId) throw new Error(`No se pudo obtener el tablero "${boardName}" de Pinterest. Crea uno manualmente.`);
+        console.log(`[Pinterest] Using board: ${boardName} (${resolvedBoardId})`);
       }
 
       // 3. Descargar la imagen a memoria RAM

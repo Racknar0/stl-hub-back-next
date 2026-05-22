@@ -61,11 +61,12 @@ class PinterestWorkerService {
           
           const result = await pinterestPublisherService.publishPin(
             imageUrl,
-            pin.boardId === 'Automático' ? null : pin.boardId,
+            (pin.boardId === 'Automático' || pin.boardId === 'auto') ? null : pin.boardId,
             pin.title,
             pin.description,
             pin.link,
-            filters
+            filters,
+            pin.assetId
           );
 
           // Actualizar DB a PUBLISHED
@@ -90,6 +91,21 @@ class PinterestWorkerService {
               errorMessage: error.message
             }
           });
+
+          // Crear notificación de error interna en la BD
+          try {
+            await prisma.notification.create({
+              data: {
+                title: `Error publicando Pin #${pin.id} (Asset #${pin.assetId})`,
+                body: `Ocurrió un error al intentar publicar automáticamente el Pin en Pinterest.\n\nError: ${error.message}\n\nTítulo del Pin: ${pin.title || 'Sin título'}\n\nEnlace: ${pin.link || 'Sin enlace'}`,
+                status: 'UNREAD',
+                type: 'AUTOMATION',
+                typeStatus: 'ERROR'
+              }
+            });
+          } catch (notifErr) {
+            console.error('[Pinterest Worker] No se pudo crear la notificación en la BD:', notifErr.message);
+          }
         }
       }
     } catch (error) {
