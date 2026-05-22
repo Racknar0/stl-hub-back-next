@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import path from 'path';
 import { withMegaLock } from './megaQueue.js';
 import { applyMegaProxy, listMegaProxies } from './megaProxy.js';
+import { loginWithSessionCache } from './megaSessionHelper.js';
 
 /*
   Script: validateLastMeAccount
@@ -133,6 +134,7 @@ export async function runValidateLastMeAccount() {
 
       // Login
       try {
+        /* CÓDIGO ANTERIOR RESPALDADO
         if (payload?.type === 'session' && payload.session) {
           await runCmd(loginCmd, [payload.session]);
         } else if (payload?.username && payload?.password) {
@@ -141,6 +143,9 @@ export async function runValidateLastMeAccount() {
           throw new Error('Payload de credenciales inválido');
         }
         log.info(`[VALIDAR][LOGIN][OK] id=${account.id} alias=${account.alias}`);
+        */
+        const loginResult = await loginWithSessionCache(prisma, runCmd, account.id, payload, accCtx);
+        log.info(`[VALIDAR][LOGIN][OK] id=${account.id} alias=${account.alias} metodo=${loginResult.method}`);
       } catch (e) {
         const msg = String(e.message || '').toLowerCase();
         if (!msg.includes('already logged in')) throw e;
@@ -230,7 +235,12 @@ export async function runValidateLastMeAccount() {
       }
 
       // Logout best-effort al final del bloque MEGA
-      try { await runCmd(logoutCmd, []); } catch {}
+      try {
+        /* CÓDIGO ANTERIOR RESPALDADO
+        await runCmd(logoutCmd, []);
+        */
+        await runCmd(logoutCmd, ['--keep-session']);
+      } catch {}
     }, 'VALIDATE-LAST-MEGA');
 
     if (!storageTotalMB || storageTotalMB <= 0) storageTotalMB = DEFAULT_FREE_QUOTA_MB;
@@ -261,6 +271,22 @@ export async function runValidateLastMeAccount() {
       try {
         await prisma.megaAccount.update({ where: { id: account.id }, data: { status: 'ERROR', statusMessage: String(e.message).slice(0,500), lastCheckAt: new Date() } });
       } catch {}
+      // Crear notificación en la base de datos
+      try {
+        const notifTitle = `Fallo en validación de cuenta MAIN (Validador)`;
+        const notifBody = `La cuenta MAIN ${account.alias || '--'} (ID=${account.id}, Email=${account.email || '--'}) falló al validarse. Detalle del error: ${e.message}`;
+        await prisma.notification.create({
+          data: {
+            title: notifTitle,
+            body: notifBody.slice(0, 1000),
+            status: 'UNREAD',
+            type: 'AUTOMATION',
+            typeStatus: 'ERROR'
+          }
+        });
+      } catch (notifErr) {
+        log.warn('No se pudo crear notificación para fallo de validación: ' + notifErr.message);
+      }
     }
     return { ok: false, error: String(e.message) };
   } finally {
@@ -269,7 +295,10 @@ export async function runValidateLastMeAccount() {
       await withMegaLock(async () => {
         try {
           await ensureProxyOrThrow({ accountId: account?.id, ctx: 'validate:last cleanup', maxTries: 3 });
+          /* CÓDIGO ANTERIOR RESPALDADO
           await runCmd('mega-logout', []);
+          */
+          await runCmd('mega-logout', ['--keep-session']);
         } catch {
           // skip cleanup
         }

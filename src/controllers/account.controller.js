@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import { loginWithSessionCache } from '../utils/megaSessionHelper.js';
 import { encryptJson, decryptToJson } from '../utils/cryptoUtils.js';
 import { log, isVerbose } from '../utils/logger.js';
 import { spawn } from 'child_process';
@@ -61,7 +62,7 @@ async function applyProxyByIndexOrThrow(proxies, idx, ctx){
  * Rota proxy → logout → login. Reintenta hasta agotar todos los proxies.
  * Retorna el proxyIndex final que funcionó.
  */
-async function loginWithProxyRetry({ proxies, startProxyIndex, payload, ctx, maxAttempts }) {
+async function loginWithProxyRetry({ proxies, startProxyIndex, payload, ctx, maxAttempts, accountId }) {
   const attempts = maxAttempts || Math.min(proxies.length, MEGA_PROXY_ROTATE_MAX_TRIES || proxies.length);
   let proxyIdx = startProxyIndex;
   let lastErr = null;
@@ -71,12 +72,26 @@ async function loginWithProxyRetry({ proxies, startProxyIndex, payload, ctx, max
       await applyProxyByIndexOrThrow(proxies, proxyIdx, ctx);
       try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
 
+      /* CÓDIGO ANTERIOR RESPALDADO
       if (payload?.type === 'session' && payload.session) {
         await runCmdWithTimeout('mega-login', [payload.session], MEGA_LOGIN_TIMEOUT_MS);
       } else if (payload?.username && payload?.password) {
         await runCmdWithTimeout('mega-login', [payload.username, payload.password], MEGA_LOGIN_TIMEOUT_MS);
       } else {
         throw new Error('Credenciales inválidas');
+      }
+      */
+      if (accountId) {
+        await loginWithSessionCache(prisma, runCmdWithTimeout, accountId, payload, ctx, MEGA_LOGIN_TIMEOUT_MS);
+      } else {
+        // Fallback simple si no hay accountId disponible
+        if (payload?.type === 'session' && payload.session) {
+          await runCmdWithTimeout('mega-login', [payload.session], MEGA_LOGIN_TIMEOUT_MS);
+        } else if (payload?.username && payload?.password) {
+          await runCmdWithTimeout('mega-login', [payload.username, payload.password], MEGA_LOGIN_TIMEOUT_MS);
+        } else {
+          throw new Error('Credenciales inválidas');
+        }
       }
 
       log.info(`[LOGIN-RETRY][OK] intento=${i + 1}/${attempts} proxyIdx=${proxyIdx} ${ctx}`);
@@ -192,15 +207,23 @@ function attachAutoAcceptTerms(child, label = 'MEGA') {
 
 // Ejecuta un comando y devuelve stdout/err con logs (sin exponer credenciales) limitando tamaño
 function runCmd(cmd, args = [], { cwd, maxBytes, timeoutMs } = {}) {
+  let finalArgs = [...args];
+  if (cmd === 'mega-logout' && !args.includes('--keep-session') && !args.includes('--hard-logout')) {
+    finalArgs.push('--keep-session');
+  }
+  if (cmd === 'mega-logout' && args.includes('--hard-logout')) {
+    finalArgs = args.filter(a => a !== '--hard-logout');
+  }
+
   const maskArgs = (c, a) => (c && c.toLowerCase().includes('mega-login') ? ['<hidden>'] : a);
-  const printable = `${cmd} ${(maskArgs(cmd, args) || []).join(' ')}`.trim();
+  const printable = `${cmd} ${(maskArgs(cmd, finalArgs) || []).join(' ')}`.trim();
   if (cmd === 'mega-login') log.info('[MEGA][LOGIN] iniciando (accounts controller)')
   if (cmd === 'mega-logout') log.info('[MEGA][LOGOUT] iniciando (accounts controller)')
   const quiet = QUIET_MEGA_CMDS.has(cmd);
   const verbose = typeof isVerbose === 'function' && isVerbose();
   if (!quiet && verbose) log.verbose(`Ejecutando comando: ${printable}`);
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { cwd, shell: true });
+    const child = spawn(cmd, finalArgs, { cwd, shell: true });
     // mega-login/mega-* a veces pueden pedir aceptar términos; evitar cuelgue interactivo
     if (cmd === 'mega-login' || cmd === 'mega-export' || cmd === 'mega-put') {
       try { attachAutoAcceptTerms(child, cmd.toUpperCase()); } catch {}
@@ -715,6 +738,7 @@ export const testAccount = async (req, res) => {
 
         // Login con timeout de 15s por proxy
         try {
+          /* CÓDIGO ANTERIOR RESPALDADO
           if (payload?.type === 'session' && payload.session) {
             await runCmdWithTimeout(loginCmd, [payload.session], MEGA_LOGIN_PER_PROXY_TIMEOUT_MS);
           } else if (payload?.username && payload?.password) {
@@ -722,9 +746,11 @@ export const testAccount = async (req, res) => {
           } else {
             throw new Error('Invalid credentials payload');
           }
+          */
+          const loginResult = await loginWithSessionCache(prisma, runCmdWithTimeout, id, payload, ctx, MEGA_LOGIN_PER_PROXY_TIMEOUT_MS);
           didLogin = true;
           loginOk = true;
-          log.info(`[ACCOUNTS][TEST] Login OK via proxy ${p.proxyUrl} ${ctx}`);
+          log.info(`[ACCOUNTS][TEST] Login OK via proxy ${p.proxyUrl} ${ctx} metodo=${loginResult.method}`);
           break;
         } catch (e) {
           const msg = String(e.message || '').toLowerCase();
@@ -1066,7 +1092,7 @@ export const listBackupCandidates = async (req, res) => {
 export const logoutAccount = async (_req, res) => {
   try {
     console.log('[ACCOUNTS] logout request');
-    try { await runCmd('mega-logout', []); console.log('[ACCOUNTS] logout ok'); } catch (e) { console.warn('[ACCOUNTS] logout warn:', String(e.message).slice(0,200)); }
+    try { await runCmd('mega-logout', ['--hard-logout']); console.log('[ACCOUNTS] logout ok'); } catch (e) { console.warn('[ACCOUNTS] logout warn:', String(e.message).slice(0,200)); }
     return res.json({ message: 'Logged out' })
   } catch (e) {
     console.error('[ACCOUNTS] Error logging out:', e);

@@ -6,6 +6,7 @@ import path from 'path'
 import fs from 'fs'
 import { fileURLToPath } from 'url'
 import { log } from './logger.js'
+import { loginWithSessionCache } from './megaSessionHelper.js'
 
 /*
   Script: validateAssetsOnLastAccount (FINAL V3 - ZOMBIE KILLER EDITION)
@@ -298,16 +299,36 @@ async function getAccountMetrics(base){
 
 async function megaLogin(payload, ctx) {
   let lastErr = null;
+  let accountId = null;
+  if (ctx) {
+    const match = String(ctx).match(/accId=(\d+)/);
+    if (match) accountId = Number(match[1]);
+  }
+
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const TIMEOUT_LOGIN = 60000; // 60s para asegurar conexión con proxies lentos
 
-      if (payload?.type === 'session' && payload.session) {
-        await runCmd('mega-login', [payload.session], { quiet: true, timeoutMs: TIMEOUT_LOGIN });
-      } else if (payload?.username && payload?.password) {
-        await runCmd('mega-login', [payload.username, payload.password], { quiet: true, timeoutMs: TIMEOUT_LOGIN });
+      if (accountId) {
+        /* CÓDIGO ANTERIOR RESPALDADO
+        if (payload?.type === 'session' && payload.session) {
+          await runCmd('mega-login', [payload.session], { quiet: true, timeoutMs: TIMEOUT_LOGIN });
+        } else if (payload?.username && payload?.password) {
+          await runCmd('mega-login', [payload.username, payload.password], { quiet: true, timeoutMs: TIMEOUT_LOGIN });
+        } else {
+          throw new Error('Credenciales inválidas');
+        }
+        */
+        await loginWithSessionCache(prisma, runCmd, accountId, payload, ctx, TIMEOUT_LOGIN);
       } else {
-        throw new Error('Credenciales inválidas');
+        // Fallback simple si no hay accountId
+        if (payload?.type === 'session' && payload.session) {
+          await runCmd('mega-login', [payload.session], { quiet: true, timeoutMs: TIMEOUT_LOGIN });
+        } else if (payload?.username && payload?.password) {
+          await runCmd('mega-login', [payload.username, payload.password], { quiet: true, timeoutMs: TIMEOUT_LOGIN });
+        } else {
+          throw new Error('Credenciales inválidas');
+        }
       }
       log.info(`[MEGA][LOGIN][OK] ${ctx} intento=${attempt} proxy=${CURRENT_PROXY || 'off'}`);
       return;
@@ -318,20 +339,20 @@ async function megaLogin(payload, ctx) {
       // Si tenemos sticky por cuenta, intentamos refrescar el proxy asignado y reintentar una vez
       if (STICKY_PROXY_ENABLED && STICKY_PROXY_REFRESH_ON_LOGIN_FAIL && payload && attempt === 1) {
         try {
-          // ctx incluye accId=..., lo extraemos para best-effort
-          const mId = String(ctx || '').match(/accId=(\d+)/);
-          const accId = mId ? Number(mId[1]) : null;
-          if (accId) {
-            const key = `id=${accId}|email=`; // email no siempre está en ctx
+          if (accountId) {
             // Borramos cualquier asignación que coincida por prefijo id para forzar reasignación
             for (const k of Array.from(STICKY_PROXY_BY_ACCOUNT.keys())) {
-              if (k.startsWith(`id=${accId}|`)) STICKY_PROXY_BY_ACCOUNT.delete(k);
+              if (k.startsWith(`id=${accountId}|`)) STICKY_PROXY_BY_ACCOUNT.delete(k);
             }
           }
           await setValidatedProxy(STICKY_PROXY_MAX_TRIES);
           // Reintento inmediato con el nuevo estado de proxy
-          if (payload?.type === 'session') await runCmd('mega-login', [payload.session], { quiet: true, timeoutMs: TIMEOUT_LOGIN });
-          else await runCmd('mega-login', [payload.username, payload.password], { quiet: true, timeoutMs: TIMEOUT_LOGIN });
+          if (accountId) {
+            await loginWithSessionCache(prisma, runCmd, accountId, payload, ctx, TIMEOUT_LOGIN);
+          } else {
+            if (payload?.type === 'session') await runCmd('mega-login', [payload.session], { quiet: true, timeoutMs: TIMEOUT_LOGIN });
+            else await runCmd('mega-login', [payload.username, payload.password], { quiet: true, timeoutMs: TIMEOUT_LOGIN });
+          }
           log.info(`[MEGA][LOGIN][OK][STICKY-REFRESH] ${ctx} proxy=${CURRENT_PROXY || 'off'}`);
           return;
         } catch (er) {
@@ -362,7 +383,17 @@ async function megaLogin(payload, ctx) {
   throw lastErr || new Error('megaLogin failed');
 }
 
-async function megaLogout(ctx){ try { await runCmd('mega-logout',[],{ quiet:true }); log.info(`[MEGA][LOGOUT][OK] ${ctx}`) } catch(e){ log.warn(`[MEGA][LOGOUT][WARN] ${ctx} ${e.message}`) } }
+async function megaLogout(ctx){
+  try {
+    /* CÓDIGO ANTERIOR RESPALDADO
+    await runCmd('mega-logout',[],{ quiet:true });
+    */
+    await runCmd('mega-logout', ['--keep-session'], { quiet: true });
+    log.info(`[MEGA][LOGOUT][OK] ${ctx}`);
+  } catch(e){
+    log.warn(`[MEGA][LOGOUT][WARN] ${ctx} ${e.message}`);
+  }
+}
 
 // ==========================================
 // LÓGICA PRINCIPAL
@@ -718,7 +749,12 @@ export async function runAutoRestoreMain(){
     try { if (fs.existsSync(RUN_LOCK)) fs.unlinkSync(RUN_LOCK) } catch{}
     // Nunca tocar sesión/proxy si hay subidas activas (protege uploader en paralelo)
     if (!uploadsAreActiveNow()) {
-      try { await runCmd('mega-logout',[],{ quiet:true }) } catch{}
+      try {
+        /* CÓDIGO ANTERIOR RESPALDADO
+        await runCmd('mega-logout',[],{ quiet:true })
+        */
+        await runCmd('mega-logout', ['--keep-session'], { quiet: true })
+      } catch{}
       try { await clearProxy() } catch{}
     } else {
       log.warn('[CRON][FINALLY][SKIP] subidas activas: no hago mega-logout/clearProxy');

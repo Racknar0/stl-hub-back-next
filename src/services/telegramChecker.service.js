@@ -30,7 +30,6 @@ class TelegramCheckerService {
 
     start() {
         if (this.timeoutId) return;
-        console.log('[Telegram Checker] Iniciando worker de chequeo automático...');
         this.scheduleNextCheck(10000); // Empezar primer chequeo en 10 segundos
     }
 
@@ -39,7 +38,6 @@ class TelegramCheckerService {
             clearTimeout(this.timeoutId);
             this.timeoutId = null;
         }
-        console.log('[Telegram Checker] Worker detenido.');
     }
 
     calculateInterval(channelCount) {
@@ -57,9 +55,6 @@ class TelegramCheckerService {
         const channels = getChannels();
         const interval = delayMs !== undefined ? delayMs : this.calculateInterval(channels.length);
         
-        const nextTimeStr = new Date(Date.now() + interval).toLocaleTimeString();
-        console.log(`[Telegram Checker] Siguiente comprobación programada para las ${nextTimeStr} (espera: ${Math.round(interval / 1000 / 60 * 10) / 10} min)`);
-        
         this.timeoutId = setTimeout(() => this.checkNextChannel(), interval);
     }
 
@@ -70,14 +65,12 @@ class TelegramCheckerService {
         try {
             const channels = getChannels();
             if (channels.length === 0) {
-                console.log('[Telegram Checker] No hay canales configurados para chequear.');
                 this.scheduleNextCheck();
                 return;
             }
 
             // 1. Evitar interrumpir descargas activas en curso
             if (telegramDownloaderService.isDownloading) {
-                console.log('[Telegram Checker] Descarga activa en curso. Pospone chequeo 2 minutos.');
                 this.scheduleNextCheck(2 * 60 * 1000);
                 return;
             }
@@ -85,7 +78,6 @@ class TelegramCheckerService {
             // 2. Verificar autenticación
             const isAuth = await telegramDownloaderService.checkAuth();
             if (!isAuth) {
-                console.log('[Telegram Checker] Telegram no autenticado. Pospone chequeo 10 minutos.');
                 this.scheduleNextCheck(10 * 60 * 1000);
                 return;
             }
@@ -99,8 +91,6 @@ class TelegramCheckerService {
             });
 
             const targetChannel = sorted[0];
-            console.log(`[Telegram Checker] Iniciando chequeo de: ${targetChannel.name} (${targetChannel.label || 'Sin alias'})`);
-
             await this.syncChannelData(targetChannel.name);
 
             // Programar el siguiente chequeo normal
@@ -161,8 +151,6 @@ class TelegramCheckerService {
                 error: false
             };
             channels[idx].lastCheckedAt = new Date().toISOString();
-
-            console.log(`[Telegram Checker] Sincronización exitosa: ${channelName} | ${scan.newFiles} archivos nuevos (${scan.totalSize})`);
 
         } catch (error) {
             console.error(`[Telegram Checker] Error sincronizando canal ${channelName}:`, error.message);
