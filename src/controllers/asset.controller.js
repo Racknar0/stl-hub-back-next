@@ -3400,28 +3400,20 @@ export const requestDownload = async (req, res) => {
         }
       }
 
-      // 3.6) Verificar límite contra historial de descargas en las últimas 24 horas
+      // 3.6) Verificar límite contra historial de descargas del día (reinicio a las 00:00 UTC)
       if (allowed) {
-        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const startOfToday = new Date();
+        startOfToday.setUTCHours(0, 0, 0, 0);
+
         const downloadsToday = await prisma.downloadHistory.count({
           where: {
             userId,
-            downloadedAt: { gte: oneDayAgo }
+            downloadedAt: { gte: startOfToday }
           }
         });
 
         if (downloadsToday >= limit) {
-          const oldestDownload = await prisma.downloadHistory.findFirst({
-            where: {
-              userId,
-              downloadedAt: { gte: oneDayAgo }
-            },
-            orderBy: { downloadedAt: 'asc' }
-          });
-
-          const nextReset = oldestDownload
-            ? new Date(oldestDownload.downloadedAt.getTime() + 24 * 60 * 60 * 1000)
-            : new Date(Date.now() + 24 * 60 * 60 * 1000);
+          const nextReset = new Date(startOfToday.getTime() + 24 * 60 * 60 * 1000);
 
           return res.status(403).json({
             code: 'DAILY_LIMIT_REACHED',

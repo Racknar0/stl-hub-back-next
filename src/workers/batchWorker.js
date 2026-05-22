@@ -933,7 +933,7 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
       }
 
       await withMegaLock(async () => {
-        const proxies = await listMegaProxies()
+        const proxies = await listMegaProxies({ shuffle: false })
         if (!proxies.length) {
           throw new Error('PROXY_REQUIRED_NO_PROXIES_AVAILABLE')
         }
@@ -969,7 +969,9 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
           if (!candidatePool.length) {
             candidatePool = proxies.filter((p) => p?.proxyUrl)
           }
-          picked = candidatePool[Math.floor(Math.random() * candidatePool.length)]
+          const preferredIdx = accountIdNum % proxies.length
+          const preferredProxy = proxies[preferredIdx]
+          picked = candidatePool.find((p) => p?.proxyUrl === preferredProxy?.proxyUrl) || candidatePool[Math.floor(Math.random() * candidatePool.length)]
         }
 
         if (!picked?.proxyUrl) {

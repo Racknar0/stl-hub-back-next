@@ -862,7 +862,7 @@ async function setStickyProxyForAccount(acc, { maxTries = STICKY_PROXY_MAX_TRIES
   // Intentamos asignar un proxy válido y lo cacheamos
   await clearProxy();
   const tries = Math.min(Math.max(Number(maxTries) || 1, 1), PROXY_LIST.length);
-  const startIdx = Math.floor(Math.random() * PROXY_LIST.length);
+  const startIdx = acc?.id ? (acc.id % PROXY_LIST.length) : Math.floor(Math.random() * PROXY_LIST.length);
 
   for (let i = 0; i < tries; i++) {
     const raw = PROXY_LIST[(startIdx + i) % PROXY_LIST.length];

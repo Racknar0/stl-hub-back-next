@@ -27,15 +27,16 @@ const prisma = new PrismaClient();
 
 const DEFAULT_FREE_QUOTA_MB = Number(process.env.MEGA_FREE_QUOTA_MB) || 20480;
 
-async function ensureProxyOrThrow({ ctx, maxTries = 10 } = {}) {
-  const proxies = listMegaProxies({});
+async function ensureProxyOrThrow({ accountId, ctx, maxTries = 10 } = {}) {
+  const proxies = listMegaProxies({ shuffle: false });
   if (!proxies.length) {
     throw new Error(`[VALIDAR][PROXY] Sin proxies válidos (no se permite IP directa)${ctx ? ` ${ctx}` : ''}`);
   }
   const tries = Math.min(Math.max(1, Number(maxTries) || 1), proxies.length);
+  const startIdx = accountId ? (accountId % proxies.length) : 0;
   let lastErr = null;
   for (let i = 0; i < tries; i++) {
-    const p = proxies[i];
+    const p = proxies[(startIdx + i) % proxies.length];
     try {
       const r = await applyMegaProxy(p, { ctx: ctx || 'validate:last', timeoutMs: 15000, clearOnFail: false });
       if (r?.enabled) {
@@ -125,7 +126,7 @@ export async function runValidateLastMeAccount() {
     let storageSource = 'none';
 
     await withMegaLock(async () => {
-      await ensureProxyOrThrow({ ctx: accCtx, maxTries: 10 });
+      await ensureProxyOrThrow({ accountId: account.id, ctx: accCtx, maxTries: 10 });
 
       // Limpiar sesión previa (ignorar errores)
       try { await runCmd(logoutCmd, []); } catch {}
@@ -267,7 +268,7 @@ export async function runValidateLastMeAccount() {
     try {
       await withMegaLock(async () => {
         try {
-          await ensureProxyOrThrow({ ctx: 'validate:last cleanup', maxTries: 3 });
+          await ensureProxyOrThrow({ accountId: account?.id, ctx: 'validate:last cleanup', maxTries: 3 });
           await runCmd('mega-logout', []);
         } catch {
           // skip cleanup
