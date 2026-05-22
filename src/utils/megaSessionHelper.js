@@ -62,7 +62,14 @@ export async function loginWithSessionCache(prisma, runCmd, accountId, payload, 
     // 3. Capturar el nuevo ticket de sesión generado por MEGA
     log.info(`[MEGA-SESSION-CACHE][SESSION-GET] Obteniendo el nuevo ticket de sesión para accId=${accountId}`);
     const res = await runCmd(sessionCmd, [], { quiet: true, timeoutMs: 15000 });
-    let ticket = (res.out || '').trim();
+    let ticket = '';
+    if (res) {
+      if (typeof res === 'string') {
+        ticket = res.trim();
+      } else if (typeof res === 'object') {
+        ticket = (res.out || res.stdout || '').trim();
+      }
+    }
 
     // Extraer la cadena del ticket removiendo cualquier texto explicativo de MEGA
     const prefix = 'Your (secret) session is:';
