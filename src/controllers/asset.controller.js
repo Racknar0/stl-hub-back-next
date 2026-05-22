@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import { loginWithSessionCache } from '../utils/megaSessionHelper.js';
 import path from 'path';
 import fs from 'fs';
 import sharp from 'sharp';
@@ -1752,6 +1753,14 @@ export const getScpCommand = async (req, res) => {
 
 /** Ejecutar comando de sistema con timeout y captura de stdout/stderr. */
 async function runCmd(cmd, args = [], options = {}) {
+    let finalArgs = [...args];
+    if (cmd === 'mega-logout' && !args.includes('--keep-session') && !args.includes('--hard-logout')) {
+        finalArgs.push('--keep-session');
+    }
+    if (cmd === 'mega-logout' && args.includes('--hard-logout')) {
+        finalArgs = args.filter(a => a !== '--hard-logout');
+    }
+
     const timeoutMs =
         Number(options.timeoutMs) ||
         (cmd === 'mega-login'
@@ -1776,7 +1785,7 @@ async function runCmd(cmd, args = [], options = {}) {
             try { child.kill(); } catch {}
         };
 
-        const child = spawn(cmd, args, {
+        const child = spawn(cmd, finalArgs, {
             shell: true,
             detached: process.platform !== 'win32',
             ...spawnOpts,
@@ -2088,16 +2097,31 @@ async function megaLogoutBestEffort(ctx) {
 }
 
 /** Iniciar sesión MEGA con credenciales (session string o user/pass). */
-async function megaLoginOrThrow(payload, ctx) {
+async function megaLoginOrThrow(payload, ctx, accountId = null) {
     const loginCmd = 'mega-login';
-    if (payload?.type === 'session' && payload.session) {
-        console.log(`[MEGA][LOGIN] session ${ctx}`);
-        await runCmd(loginCmd, [payload.session]);
-    } else if (payload?.username && payload?.password) {
-        console.log(`[MEGA][LOGIN] user/pass ${ctx}`);
-        await runCmd(loginCmd, [payload.username, payload.password]);
+    if (accountId) {
+        await loginWithSessionCache(prisma, runCmd, accountId, payload, ctx, Number(process.env.MEGA_LOGIN_TIMEOUT_MS) || 60000);
     } else {
-        throw new Error('Invalid credentials payload');
+        /* CÓDIGO ANTERIOR RESPALDADO
+        if (payload?.type === 'session' && payload.session) {
+            console.log(`[MEGA][LOGIN] session ${ctx}`);
+            await runCmd(loginCmd, [payload.session]);
+        } else if (payload?.username && payload?.password) {
+            console.log(`[MEGA][LOGIN] user/pass ${ctx}`);
+            await runCmd(loginCmd, [payload.username, payload.password]);
+        } else {
+            throw new Error('Invalid credentials payload');
+        }
+        */
+        if (payload?.type === 'session' && payload.session) {
+            console.log(`[MEGA][LOGIN] session ${ctx}`);
+            await runCmd(loginCmd, [payload.session]);
+        } else if (payload?.username && payload?.password) {
+            console.log(`[MEGA][LOGIN] user/pass ${ctx}`);
+            await runCmd(loginCmd, [payload.username, payload.password]);
+        } else {
+            throw new Error('Invalid credentials payload');
+        }
     }
     console.log(`[MEGA][LOGIN][OK] ${ctx}`);
 }
@@ -2235,7 +2259,7 @@ export const deleteAsset = async (req, res) => {
                     );
                     proxyUsed = picked?.proxyUrl || null;
                     await megaLogoutBestEffort(`PREV ${ctx}`);
-                    await megaLoginOrThrow(payload, ctx);
+                    await megaLoginOrThrow(payload, ctx, acc.id);
                     try {
                         console.log(`[ASSETS][DEL][MEGA-RM][START] acc=${acc.id} path=${remotePath} proxy=${proxyUsed || '--'} ${ctx}`);
                         await runCmd(rmCmd, ['-rf', remotePath]);
@@ -3845,6 +3869,7 @@ export async function restoreAssetFromBackup(req, res) {
     );
 
     await withMegaLock(async () => {
+      /* CÓDIGO ANTERIOR RESPALDADO
       try { await runCmd('mega-logout', []); } catch {}
       if (backupCred?.type === 'session' && backupCred.session) {
         await runCmd('mega-login', [backupCred.session]);
@@ -3853,6 +3878,8 @@ export async function restoreAssetFromBackup(req, res) {
       } else {
         throw new Error('Invalid backup credentials payload');
       }
+      */
+      await loginWithSessionCache(prisma, runCmd, backupAcc.id, backupCred, `restore-backup-${backupAcc.id}`, Number(process.env.MEGA_LOGIN_TIMEOUT_MS) || 60000);
 
       console.log(`[RESTORE] Download from backup acc=${backupAcc.id} path=${backupRemoteFile}`);
       await runCmd('mega-get', [backupRemoteFile, '.'], { cwd: TEMP_DIR });
@@ -3885,6 +3912,7 @@ export async function restoreAssetFromBackup(req, res) {
     let publicLink = null;
 
     await withMegaLock(async () => {
+      /* CÓDIGO ANTERIOR RESPALDADO
       try { await runCmd('mega-logout', []); } catch {}
       if (mainCred?.type === 'session' && mainCred.session) {
         await runCmd('mega-login', [mainCred.session]);
@@ -3893,6 +3921,8 @@ export async function restoreAssetFromBackup(req, res) {
       } else {
         throw new Error('Invalid main credentials payload');
       }
+      */
+      await loginWithSessionCache(prisma, runCmd, mainAcc.id, mainCred, `restore-main-${mainAcc.id}`, Number(process.env.MEGA_LOGIN_TIMEOUT_MS) || 60000);
 
       await safeMkdir(mainRemoteFolder);
 
