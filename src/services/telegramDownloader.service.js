@@ -442,6 +442,9 @@ class TelegramDownloaderService {
     }
 
     emitProgress(data) {
+        if (this.downloadInfo) {
+            data.channelName = this.downloadInfo.channelName;
+        }
         // Save state for reconnecting clients
         if (data.type === 'progress') {
             this.lastProgress = data;
