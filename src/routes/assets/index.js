@@ -26,6 +26,7 @@ import {
   saveSelectedAssetMeta,
   generateAssetMetaDescriptions,
   generateAssetMetaTags,
+  generateAssetMetaAll,
   listIgnoredSimilarPairs,
   upsertIgnoredSimilarPairs,
   clearIgnoredSimilarPairs,
@@ -101,6 +102,7 @@ router.post('/scp-command', getScpCommand);
 router.post('/meta/save-selected', saveSelectedAssetMeta);
 router.post('/meta/generate-descriptions', generateAssetMetaDescriptions);
 router.post('/meta/generate-tags', generateAssetMetaTags);
+router.post('/meta/generate-all', generateAssetMetaAll);
 router.put('/:id', updateAsset);
 router.delete('/:id', deleteAsset);
 

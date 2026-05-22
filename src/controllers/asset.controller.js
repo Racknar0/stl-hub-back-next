@@ -541,6 +541,104 @@ async function generateSeoDescriptionForAsset(assetInput, assetRaw = null) {
     }
 }
 
+/** Generar metadata completa (título, descripción, categorías, tags) bilingüe para un asset usando Gemini AI. */
+async function generateSeoAllForAsset(assetInput, availableCategories, assetRaw = null) {
+    const fallback = {
+        title: assetRaw?.title || '',
+        titleEn: assetRaw?.titleEn || '',
+        description: assetRaw?.description || '',
+        descriptionEn: assetRaw?.descriptionEn || '',
+        categories: assetRaw?.categories?.map(c => c.slug) || [],
+        tags: assetRaw?.tags?.map(t => ({ es: t.name, en: t.nameEn })) || [],
+    };
+
+    const ai = getGeminiClient();
+    if (!ai) return fallback;
+
+    const { parts: imageParts, attachedImages } = await buildAssetImageParts(assetRaw);
+
+    const categoriesListStr = availableCategories.map(c => `- Name ES: "${c.name}", Name EN: "${c.nameEn}", Slug: "${c.slug}"`).join('\n');
+
+    const prompt = [
+        'Eres experto en SEO y redacción de contenido para una tienda online de modelos y figuras STL impresas en 3D.',
+        'Tu tarea es generar y optimizar de forma automática toda la metadata de un producto basándote en su título actual, tags y las imágenes adjuntas (si existen).',
+        'Debes generar los siguientes campos:',
+        '1. title: Título optimizado en español, corto, claro, descriptivo y sin caracteres extraños (máx 100 caracteres).',
+        '2. titleEn: Título optimizado en inglés, corto, claro, descriptivo (máx 100 caracteres).',
+        '3. description: Descripción SEO bilingüe en español de 80 a 150 palabras. Debe describir visualmente el modelo basándose en las imágenes, tipo de impresión (resina/FDM), sugerencias de uso y nivel de detalle.',
+        '4. descriptionEn: Descripción SEO bilingüe en inglés de 80 a 150 palabras, similar a la anterior pero en inglés.',
+        '5. categories: Una lista de slugs de categorías sugeridas que correspondan al producto. Debes elegir ÚNICAMENTE de la siguiente lista de categorías disponibles en nuestra tienda:',
+        categoriesListStr,
+        '6. tags: Una lista de exactamente 3 a 5 tags bilingües relevantes para búsqueda interna y SEO. Cada tag debe tener la forma {"es": "...", "en": "..."}. Evita tags genéricos.',
+        '',
+        'Responde ÚNICAMENTE con un objeto JSON válido con el siguiente esquema exacto:',
+        JSON.stringify({
+            title: "Título optimizado en español",
+            titleEn: "Optimized title in English",
+            description: "Descripción en español",
+            descriptionEn: "Description in English",
+            categories: ["slug-categoria-1", "slug-categoria-2"],
+            tags: [{"es": "tag en español", "en": "tag in english"}]
+        }, null, 2),
+        '',
+        'Contexto actual del asset:',
+        JSON.stringify(assetInput, null, 2),
+        `Imágenes adjuntas analizadas: ${attachedImages}`
+    ].join('\n\n');
+
+    try {
+        const response = await ai.models.generateContent({
+            model: ASSET_META_AI_MODEL,
+            contents: [prompt, ...imageParts],
+            config: {
+                responseMimeType: 'application/json',
+                responseJsonSchema: {
+                    type: 'object',
+                    additionalProperties: false,
+                    required: ['title', 'titleEn', 'description', 'descriptionEn', 'categories', 'tags'],
+                    properties: {
+                        title: { type: 'string' },
+                        titleEn: { type: 'string' },
+                        description: { type: 'string' },
+                        descriptionEn: { type: 'string' },
+                        categories: {
+                            type: 'array',
+                            items: { type: 'string' }
+                        },
+                        tags: {
+                            type: 'array',
+                            items: {
+                                type: 'object',
+                                additionalProperties: false,
+                                required: ['es', 'en'],
+                                properties: {
+                                    es: { type: 'string' },
+                                    en: { type: 'string' }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        const parsed = parseJsonLoose(response?.text);
+        if (!parsed) return fallback;
+
+        return {
+            title: String(parsed.title || fallback.title).trim().slice(0, 100),
+            titleEn: String(parsed.titleEn || fallback.titleEn).trim().slice(0, 100),
+            description: normalizeDescriptionText(parsed.description || '') || fallback.description,
+            descriptionEn: normalizeDescriptionText(parsed.descriptionEn || '') || fallback.descriptionEn,
+            categories: Array.isArray(parsed.categories) ? parsed.categories.map(s => String(s).trim().toLowerCase()) : fallback.categories,
+            tags: Array.isArray(parsed.tags) ? normalizeBilingualGeneratedTags(parsed.tags) : fallback.tags,
+        };
+    } catch (err) {
+        console.warn('[ASSETS][META][GENERATE_ALL_AI_WARN]', err?.message || err);
+        return fallback;
+    }
+}
+
 /** Normalizar tags generados bilingües: deduplicar y limpiar pares es/en. */
 function normalizeBilingualGeneratedTags(rawTags) {
     const arr = Array.isArray(rawTags) ? rawTags : [];
@@ -1436,6 +1534,92 @@ export const generateAssetMetaTags = async (req, res) => {
     } catch (e) {
         console.error('[ASSETS][META] generate tags error:', e);
         return res.status(500).json({ message: 'Error generating tags' });
+    }
+};
+
+// POST /assets/meta/generate-all
+/** Generar metadata completa (titulo, desc, categorias, tags) con Gemini AI para un asset. POST /api/assets/meta/generate-all */
+export const generateAssetMetaAll = async (req, res) => {
+    try {
+        const id = Number(req.body?.assetId);
+        if (!id) {
+            return res.status(400).json({ message: 'assetId requerido' });
+        }
+
+        const asset = await prisma.asset.findUnique({
+            where: { id },
+            include: {
+                categories: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+                tags: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+            },
+        });
+
+        if (!asset) {
+            return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        // Obtener listado de categorías del sistema para pasar a Gemini
+        const availableCategories = await prisma.category.findMany({
+            select: { id: true, name: true, nameEn: true, slug: true },
+        });
+
+        const input = buildAssetMetaInput(asset);
+        const generated = await generateSeoAllForAsset(input, availableCategories, asset);
+
+        // Asegurar los IDs de los tags generados
+        const tagIds = await ensureTagIdsFromPairs(generated.tags);
+
+        // Mapear categorías sugeridas a IDs reales que existen en la base de datos
+        const categorySlugs = generated.categories || [];
+        const matchingCategories = availableCategories.filter(c => categorySlugs.includes(c.slug.toLowerCase()));
+        const categoryIds = matchingCategories.map(c => c.id);
+
+        // Actualizar el asset con todo
+        const data = {
+            title: generated.title || asset.title,
+            titleEn: generated.titleEn || asset.titleEn,
+            description: normalizeDescriptionText(generated.description) || null,
+            descriptionEn: normalizeDescriptionText(generated.descriptionEn) || null,
+        };
+
+        if (categoryIds.length) {
+            data.categories = {
+                set: [],
+                connect: categoryIds.map(catId => ({ id: catId })),
+            };
+        }
+
+        if (tagIds.length) {
+            data.tags = {
+                set: [],
+                connect: tagIds.map(tId => ({ id: tId })),
+            };
+        }
+
+        const updatedAsset = await prisma.asset.update({
+            where: { id },
+            data,
+            include: {
+                categories: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+                tags: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+            },
+        });
+
+        // Reindexar vector para sincronizar con Qdrant
+        qdrantMultimodalService
+            .upsertAssetMultimodalVector(id)
+            .catch((err) =>
+                console.error('[QDRANT] Generate all sync error:', err),
+            );
+
+        const assetSafe = toJsonSafe(updatedAsset);
+        return res.json({
+            success: true,
+            asset: assetSafe,
+        });
+    } catch (e) {
+        console.error('[ASSETS][META] generate all error:', e);
+        return res.status(500).json({ message: 'Error generating all metadata' });
     }
 };
 
