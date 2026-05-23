@@ -81,8 +81,13 @@ class TelegramDownloaderService {
         let count = 0;
         for (const file of files) {
             if (file === '.gitkeep') continue;
-            fs.unlinkSync(path.join(UPLOADS_DIR, file));
-            count++;
+            const filePath = path.join(UPLOADS_DIR, file);
+            try {
+                fs.rmSync(filePath, { recursive: true, force: true });
+                count++;
+            } catch (err) {
+                console.error(`[Clear Downloads] No se pudo eliminar ${file}:`, err.message);
+            }
         }
         return count;
     }
