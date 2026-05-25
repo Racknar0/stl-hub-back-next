@@ -1,5 +1,4 @@
 import { PrismaClient } from '@prisma/client';
-import { loginWithSessionCache } from '../utils/megaSessionHelper.js';
 import path from 'path';
 import fs from 'fs';
 import sharp from 'sharp';
@@ -4007,17 +4006,9 @@ export async function restoreAssetFromBackup(req, res) {
     );
 
     await withMegaLock(async () => {
-      /* CÓDIGO ANTERIOR RESPALDADO
-      try { await runCmd('mega-logout', []); } catch {}
-      if (backupCred?.type === 'session' && backupCred.session) {
-        await runCmd('mega-login', [backupCred.session]);
-      } else if (backupCred?.username && backupCred?.password) {
-        await runCmd('mega-login', [backupCred.username, backupCred.password]);
-      } else {
-        throw new Error('Invalid backup credentials payload');
-      }
-      */
-      await loginWithSessionCache(prisma, runCmdCapture, backupAcc.id, backupCred, `restore-backup-${backupAcc.id}`, Number(process.env.MEGA_LOGIN_TIMEOUT_MS) || 60000);
+      await megaLoginFull(prisma, backupAcc.id, backupCred, `restore-backup-${backupAcc.id}`, {
+        skipStorageRefresh: true,  // solo descargamos, no necesitamos métricas
+      });
 
       console.log(`[RESTORE] Download from backup acc=${backupAcc.id} path=${backupRemoteFile}`);
       await runCmd('mega-get', [backupRemoteFile, '.'], { cwd: TEMP_DIR });
@@ -4037,7 +4028,7 @@ export async function restoreAssetFromBackup(req, res) {
         throw new Error('Downloaded file not found locally after mega-get');
       }
 
-      try { await runCmd('mega-logout', []); } catch {}
+      await megaLogoutSafe(`restore-backup-${backupAcc.id}`);
     }, `RESTORE-BACKUP-${backupAcc.id}`);
 
     // 6) LOGIN main -> mkdir -p -> (opcional) evitar re-subida si ya existe -> export/get link
@@ -4050,17 +4041,9 @@ export async function restoreAssetFromBackup(req, res) {
     let publicLink = null;
 
     await withMegaLock(async () => {
-      /* CÓDIGO ANTERIOR RESPALDADO
-      try { await runCmd('mega-logout', []); } catch {}
-      if (mainCred?.type === 'session' && mainCred.session) {
-        await runCmd('mega-login', [mainCred.session]);
-      } else if (mainCred?.username && mainCred?.password) {
-        await runCmd('mega-login', [mainCred.username, mainCred.password]);
-      } else {
-        throw new Error('Invalid main credentials payload');
-      }
-      */
-      await loginWithSessionCache(prisma, runCmdCapture, mainAcc.id, mainCred, `restore-main-${mainAcc.id}`, Number(process.env.MEGA_LOGIN_TIMEOUT_MS) || 60000);
+      await megaLoginFull(prisma, mainAcc.id, mainCred, `restore-main-${mainAcc.id}`, {
+        skipStorageRefresh: true,  // refrescamos storage manualmente abajo
+      });
 
       await safeMkdir(mainRemoteFolder);
 
@@ -4081,7 +4064,6 @@ export async function restoreAssetFromBackup(req, res) {
       else console.warn('[RESTORE] No se pudo obtener link público');
 
             // Mantener métricas de la cuenta main sincronizadas en la misma sesión
-            // donde se restaura/sube el archivo.
             try {
                 await refreshAccountStorageFromMegaDfInCurrentSession(
                     mainAcc.id,
@@ -4089,7 +4071,7 @@ export async function restoreAssetFromBackup(req, res) {
                 );
             } catch {}
 
-      try { await runCmd('mega-logout', []); } catch {}
+      await megaLogoutSafe(`restore-main-${mainAcc.id}`);
     }, `RESTORE-MAIN-${mainAcc.id}`);
 
     // 7) Actualizar DB
