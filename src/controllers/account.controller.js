@@ -4,7 +4,7 @@ import { encryptJson, decryptToJson } from '../utils/cryptoUtils.js';
 import { log, isVerbose } from '../utils/logger.js';
 import { spawn } from 'child_process';
 import { withMegaLock } from '../utils/megaQueue.js';
-import { applyMegaProxy, listMegaProxies, clearMegaProxyIfSafe } from '../utils/megaProxy.js';
+import { applyMegaProxy, listMegaProxies, clearMegaProxyIfSafe, getStickyProxyForAccount } from '../utils/megaProxy.js';
 import { megaCmdWithProgressAndStall, isMegaStallError } from '../utils/megaTransfer.js';
 import path from 'path';
 import fs from 'fs';
@@ -48,9 +48,9 @@ function getArchiveFileName(archiveName) {
   return path.posix.basename(normalized);
 }
 
-async function applyProxyByIndexOrThrow(proxies, idx, ctx){
-  if (!proxies?.length) throw new Error(`[SYNC][PROXY] Sin proxies válidos (no se permite IP directa)${ctx ? ` ${ctx}` : ''}`);
-  const p = proxies[idx % proxies.length];
+async function applyProxyByIndexOrThrow(account, idx, ctx){
+  const p = getStickyProxyForAccount(account, idx);
+  if (!p) throw new Error(`[SYNC][PROXY] Sin proxies válidos (no se permite IP directa)${ctx ? ` ${ctx}` : ''}`);
   const r = await applyMegaProxy(p, { ctx: ctx || 'sync', timeoutMs: 15000, clearOnFail: false });
   if (!r?.enabled) throw new Error(`[SYNC][PROXY] apply failed proxy=${p?.proxyUrl || '--'} err=${String(r?.error || '').slice(0,160)}`);
   log.info(`[SYNC][PROXY][OK] ${p.proxyUrl}${ctx ? ` ${ctx}` : ''}`);
@@ -62,25 +62,16 @@ async function applyProxyByIndexOrThrow(proxies, idx, ctx){
  * Rota proxy → logout → login. Reintenta hasta agotar todos los proxies.
  * Retorna el proxyIndex final que funcionó.
  */
-async function loginWithProxyRetry({ proxies, startProxyIndex, payload, ctx, maxAttempts, accountId }) {
-  const attempts = maxAttempts || Math.min(proxies.length, MEGA_PROXY_ROTATE_MAX_TRIES || proxies.length);
+async function loginWithProxyRetry({ startProxyIndex, payload, ctx, maxAttempts, accountId }) {
+  const attempts = maxAttempts || 50;
   let proxyIdx = startProxyIndex;
   let lastErr = null;
 
   for (let i = 0; i < attempts; i++) {
     try {
-      await applyProxyByIndexOrThrow(proxies, proxyIdx, ctx);
+      await applyProxyByIndexOrThrow({ id: accountId }, proxyIdx, ctx);
       try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
 
-      /* CÓDIGO ANTERIOR RESPALDADO
-      if (payload?.type === 'session' && payload.session) {
-        await runCmdWithTimeout('mega-login', [payload.session], MEGA_LOGIN_TIMEOUT_MS);
-      } else if (payload?.username && payload?.password) {
-        await runCmdWithTimeout('mega-login', [payload.username, payload.password], MEGA_LOGIN_TIMEOUT_MS);
-      } else {
-        throw new Error('Credenciales inválidas');
-      }
-      */
       if (accountId) {
         await loginWithSessionCache(prisma, runCmdWithTimeout, accountId, payload, ctx, MEGA_LOGIN_TIMEOUT_MS);
       } else {
@@ -99,14 +90,14 @@ async function loginWithProxyRetry({ proxies, startProxyIndex, payload, ctx, max
     } catch (e) {
       lastErr = e;
       log.warn(`[LOGIN-RETRY][FAIL] intento=${i + 1}/${attempts} proxyIdx=${proxyIdx} ${ctx}: ${String(e.message).slice(0, 200)}`);
-      proxyIdx = rotateIndex(proxyIdx, proxies.length);
+      proxyIdx++;
     }
   }
 
   throw new Error(`Login fallido tras ${attempts} intentos. Último error: ${lastErr?.message || 'desconocido'}`);
 }
 
-async function megaGetWithStallRetry({ remoteFile, destLocal, ctx, proxies, getProxyIndex, setProxyIndex, relogin }){
+async function megaGetWithStallRetry({ remoteFile, destLocal, ctx, account, getProxyIndex, setProxyIndex, relogin }){
   let attempt = 0;
   while (true) {
     attempt++;
@@ -130,15 +121,15 @@ async function megaGetWithStallRetry({ remoteFile, destLocal, ctx, proxies, getP
     } catch (e) {
       if (!isMegaStallError(e) || attempt > MEGA_TRANSFER_STALL_MAX_RETRIES) throw e;
       log.warn(`[SYNC][STALL][DL] sin progreso, rotate proxy + relogin (attempt=${attempt}/${MEGA_TRANSFER_STALL_MAX_RETRIES}) ${ctx}`);
-      setProxyIndex(rotateIndex(getProxyIndex(), proxies.length));
-      await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctx);
+      setProxyIndex(getProxyIndex() + 1);
+      await applyProxyByIndexOrThrow(account, getProxyIndex(), ctx);
       await relogin();
       await new Promise(r => setTimeout(r, MEGA_TRANSFER_STALL_BACKOFF_MS));
     }
   }
 }
 
-async function megaPutWithStallRetry({ localPath, remoteFolderOrFile, ctx, proxies, getProxyIndex, setProxyIndex, relogin, asFilePath = false, useProxy = true }){
+async function megaPutWithStallRetry({ localPath, remoteFolderOrFile, ctx, account, getProxyIndex, setProxyIndex, relogin, asFilePath = false, useProxy = true }){
   let attempt = 0;
   while (true) {
     attempt++;
@@ -164,8 +155,8 @@ async function megaPutWithStallRetry({ localPath, remoteFolderOrFile, ctx, proxi
       if (!isMegaStallError(e) || attempt > MEGA_TRANSFER_STALL_MAX_RETRIES) throw e;
       log.warn(`[SYNC][STALL][UP] sin progreso, rotate proxy + relogin (attempt=${attempt}/${MEGA_TRANSFER_STALL_MAX_RETRIES}) ${ctx}`);
       if (useProxy) {
-        setProxyIndex(rotateIndex(getProxyIndex(), proxies.length));
-        await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctx);
+        setProxyIndex(getProxyIndex() + 1);
+        await applyProxyByIndexOrThrow(account, getProxyIndex(), ctx);
       } else {
         await runCmd('mega-proxy', ['--none']); // asegurar que seguimos limpios
       }
@@ -693,7 +684,7 @@ export const testAccount = async (req, res) => {
 
       // Rotación de proxy + login con timeout corto por intento.
       // Requisito: no caer a IP directa; si no hay proxy válido o ninguno conecta, abortar.
-      const proxies = listMegaProxies({});
+      const proxies = listMegaProxies({ shuffle: false });
       if (!proxies.length) {
         log.error(`[ACCOUNTS][TEST] Sin proxies válidos. Abortando login. ${ctx}`);
         throw new Error('Sin proxies válidos');
@@ -718,7 +709,8 @@ export const testAccount = async (req, res) => {
           throw new Error('Test abortado por el cliente');
         }
 
-        const p = proxies[i];
+        const p = getStickyProxyForAccount(acc, i);
+        if (!p) break;
         log.info(`[ACCOUNTS][TEST] Proxy try ${i + 1}/${maxTries} -> ${p.proxyUrl} ${ctx}`);
 
         const applied = await applyMegaProxy(p, { ctx, timeoutMs: 15000, clearOnFail: false });
@@ -1284,7 +1276,7 @@ export const syncMainToBackups = async (req, res) => {
     };
     logSync(`Sincronización iniciada main=${mainId} assets_publicados=${assets.length} backups=${backupAccounts.length}`);
 
-    const proxies = listMegaProxies({});
+    const proxies = listMegaProxies({ shuffle: false });
     if (!proxies.length) return res.status(500).json({ message: 'Sin proxies válidos (no se permite IP directa)' });
     let proxyIndex = 0;
     const getProxyIndex = () => proxyIndex;
@@ -1524,7 +1516,7 @@ export const syncMainToBackups = async (req, res) => {
         await loginWithSessionCache(prisma, runCmd, mainId, payloadMain, `sync-main-dl-${mainId}`, 60000);
       };
 
-      await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctxMain);
+      await applyProxyByIndexOrThrow(main, getProxyIndex(), ctxMain);
       try { await runCmd('mega-logout', []); } catch {}
       await reloginMain();
 
@@ -1547,7 +1539,7 @@ export const syncMainToBackups = async (req, res) => {
             remoteFile,
             destLocal,
             ctx: `${ctxMain} asset=${a.id}`,
-            proxies,
+            account: main,
             getProxyIndex,
             setProxyIndex,
             relogin: reloginMain,
@@ -1562,9 +1554,9 @@ export const syncMainToBackups = async (req, res) => {
         // Rotar proxy dinámicamente si ya bajamos más de 3GB en medio del batch
         if (downloadedBytesTotal >= ROTATE_AFTER_DOWNLOAD_BYTES) {
           const prev = getProxyIndex();
-          setProxyIndex(rotateIndex(prev, proxies.length));
+          setProxyIndex(prev + 1);
           logSync(`[SYNC][PROXY] Rotación intermedia total=${Math.round(downloadedBytesTotal/1024/1024)}MB (>=${Math.round(ROTATE_AFTER_DOWNLOAD_BYTES/1024/1024)}MB) idx ${prev} -> ${getProxyIndex()}`);
-          await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctxMain);
+          await applyProxyByIndexOrThrow(main, getProxyIndex(), ctxMain);
           await reloginMain(); // reconectar luego de cambiar el proxy
           downloadedBytesTotal = 0; // Reiniciamos el contador dinámico para los siguientes 3GB
         }
@@ -1601,7 +1593,7 @@ export const syncMainToBackups = async (req, res) => {
           await loginWithSessionCache(prisma, runCmd, b.id, payloadB, `sync-main-up-${b.id}`, 60000);
         };
 
-        await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctxB);
+        await applyProxyByIndexOrThrow(b, getProxyIndex(), ctxB);
         try { await runCmd('mega-logout', []); } catch {}
         await reloginB();
 
@@ -1626,7 +1618,7 @@ export const syncMainToBackups = async (req, res) => {
               localPath,
               remoteFolderOrFile: remoteFolder,
               ctx: `${ctxB} asset=${a.id}`,
-              proxies,
+              account: b,
               getProxyIndex,
               setProxyIndex,
               relogin: reloginB,
@@ -1842,7 +1834,7 @@ export const alignmentAudit = async (req, res) => {
     const baseB = (backupAccount.baseFolder || '/').replaceAll('\\', '/');
 
     // Proxy setup (obligatorio para evitar rate limiting)
-    const proxies = listMegaProxies({});
+    const proxies = listMegaProxies({ shuffle: false });
     if (!proxies.length) return res.status(500).json({ message: 'Sin proxies válidos (no se permite IP directa)' });
     let proxyIndex = 0;
 
@@ -1851,7 +1843,7 @@ export const alignmentAudit = async (req, res) => {
     console.log(`[ALIGNMENT][AUDIT] Escaneando Main MEGA (cuenta ${mainId})...`);
     await withMegaLock(async () => {
       proxyIndex = await loginWithProxyRetry({
-        proxies, startProxyIndex: proxyIndex, payload: payloadMain,
+        startProxyIndex: proxyIndex, payload: payloadMain,
         ctx: `align-audit main=${mainId}`, accountId: mainId
       });
 
@@ -1869,14 +1861,14 @@ export const alignmentAudit = async (req, res) => {
     console.log(`[ALIGNMENT][AUDIT] Main MEGA: ${mainFolders.length} carpetas encontradas`);
 
     // Rotar proxy para el backup
-    proxyIndex = rotateIndex(proxyIndex, proxies.length);
+    proxyIndex = proxyIndex + 1;
 
     // 2. Escanear BACKUP MEGA
     let backupFolders = [];
     console.log(`[ALIGNMENT][AUDIT] Escaneando Backup MEGA (cuenta ${backupAccount.id})...`);
     await withMegaLock(async () => {
       proxyIndex = await loginWithProxyRetry({
-        proxies, startProxyIndex: proxyIndex, payload: payloadB,
+        startProxyIndex: proxyIndex, payload: payloadB,
         ctx: `align-audit backup=${backupAccount.id}`, accountId: backupAccount.id
       });
 
@@ -2001,7 +1993,7 @@ export const alignmentSync = async (req, res) => {
 
     console.log(`[ALIGNMENT][SYNC] main=${mainId} backup=${backupAccount.id} assets=${assets.length}`);
 
-    const proxies = listMegaProxies({});
+    const proxies = listMegaProxies({ shuffle: false });
     if (!proxies.length) return res.status(500).json({ message: 'Sin proxies válidos' });
     let proxyIndex = 0;
     const getProxyIndex = () => proxyIndex;
@@ -2033,7 +2025,7 @@ export const alignmentSync = async (req, res) => {
         await loginWithSessionCache(prisma, runCmd, mainId, payloadMain, `align-sync-dl-${mainId}`, 60000);
       };
 
-      await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctxMain);
+      await applyProxyByIndexOrThrow(main, getProxyIndex(), ctxMain);
       await reloginMain();
 
       for (let i = 0; i < assets.length; i++) {
@@ -2051,7 +2043,7 @@ export const alignmentSync = async (req, res) => {
             remoteFile,
             destLocal,
             ctx: `${ctxMain} asset=${a.id} slug=${a.slug}`,
-            proxies,
+            account: main,
             getProxyIndex,
             setProxyIndex,
             relogin: reloginMain,
@@ -2082,7 +2074,7 @@ export const alignmentSync = async (req, res) => {
           await loginWithSessionCache(prisma, runCmd, backupAccount.id, payloadB, `align-sync-up-${backupAccount.id}`, 60000);
         };
 
-        await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctxB);
+        await applyProxyByIndexOrThrow(backupAccount, getProxyIndex(), ctxB);
         await reloginB();
 
         const safeMkdir = async remotePath => {
@@ -2115,7 +2107,7 @@ export const alignmentSync = async (req, res) => {
               localPath,
               remoteFolderOrFile: remoteFolder,
               ctx: `${ctxB} asset=${a.id} slug=${a.slug}`,
-              proxies,
+              account: backupAccount,
               getProxyIndex,
               setProxyIndex,
               relogin: reloginB,
@@ -2242,7 +2234,7 @@ export const alignmentCleanup = async (req, res) => {
     const payloadTarget = decryptToJson(targetAccount.credentials.encData, targetAccount.credentials.encIv, targetAccount.credentials.encTag);
     const baseTarget = (targetAccount.baseFolder || '/').replaceAll('\\', '/');
 
-    const proxies = listMegaProxies({});
+    const proxies = listMegaProxies({ shuffle: false });
     if (!proxies.length) return res.status(500).json({ message: 'Sin proxies válidos' });
 
     const results = [];
@@ -2250,7 +2242,7 @@ export const alignmentCleanup = async (req, res) => {
 
     await withMegaLock(async () => {
       await loginWithProxyRetry({
-        proxies, startProxyIndex: 0, payload: payloadTarget,
+        startProxyIndex: 0, payload: payloadTarget,
         ctx: `align-cleanup-${target} acc=${targetAccount.id}`, accountId: targetAccount.id
       });
 
@@ -2340,7 +2332,7 @@ export const alignmentCleanupUnified = async (req, res) => {
       return res.json({ ok: true, mainDeleted: 0, backupDeleted: 0, blocked: blocked.length, message: 'Todas las carpetas tienen assets asociados.' });
     }
 
-    const proxies = listMegaProxies({});
+    const proxies = listMegaProxies({ shuffle: false });
     if (!proxies.length) return res.status(500).json({ message: 'Sin proxies válidos' });
 
     const mainResults = [];
@@ -2355,7 +2347,7 @@ export const alignmentCleanupUnified = async (req, res) => {
 
       await withMegaLock(async () => {
         await loginWithProxyRetry({
-          proxies, startProxyIndex: 0, payload: decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag),
+          startProxyIndex: 0, payload: decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag),
           ctx: `align-cleanup-unified-main acc=${mainId}`, accountId: mainId
         });
 
@@ -2391,7 +2383,7 @@ export const alignmentCleanupUnified = async (req, res) => {
 
       await withMegaLock(async () => {
         await loginWithProxyRetry({
-          proxies, startProxyIndex: 0, payload: decryptToJson(backupAccount.credentials.encData, backupAccount.credentials.encIv, backupAccount.credentials.encTag),
+          startProxyIndex: 0, payload: decryptToJson(backupAccount.credentials.encData, backupAccount.credentials.encIv, backupAccount.credentials.encTag),
           ctx: `align-cleanup-unified-backup acc=${backupAccount.id}`, accountId: backupAccount.id
         });
 
@@ -2472,7 +2464,7 @@ export const alignmentRestore = async (req, res) => {
 
     console.log(`[ALIGNMENT][RESTORE] main=${mainId} backup=${backupAccount.id} assets=${assets.length}`);
 
-    const proxies = listMegaProxies({});
+    const proxies = listMegaProxies({ shuffle: false });
     if (!proxies.length) return res.status(500).json({ message: 'Sin proxies válidos' });
     let proxyIndex = 0;
     const getProxyIndex = () => proxyIndex;
@@ -2504,7 +2496,7 @@ export const alignmentRestore = async (req, res) => {
         await loginWithSessionCache(prisma, runCmd, backupAccount.id, payloadB, `align-restore-dl-${backupAccount.id}`, 60000);
       };
 
-      await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctxB);
+      await applyProxyByIndexOrThrow(backupAccount, getProxyIndex(), ctxB);
       await reloginB();
 
       for (let i = 0; i < assets.length; i++) {
@@ -2522,7 +2514,7 @@ export const alignmentRestore = async (req, res) => {
             remoteFile,
             destLocal,
             ctx: `${ctxB} asset=${a.id} slug=${a.slug}`,
-            proxies,
+            account: backupAccount,
             getProxyIndex,
             setProxyIndex,
             relogin: reloginB,
@@ -2553,7 +2545,7 @@ export const alignmentRestore = async (req, res) => {
           await loginWithSessionCache(prisma, runCmd, mainId, payloadMain, `align-restore-up-${mainId}`, 60000);
         };
 
-        await applyProxyByIndexOrThrow(proxies, getProxyIndex(), ctxM);
+        await applyProxyByIndexOrThrow(main, getProxyIndex(), ctxM);
         await reloginM();
 
         const safeMkdir = async remotePath => {
@@ -2586,7 +2578,7 @@ export const alignmentRestore = async (req, res) => {
               localPath,
               remoteFolderOrFile: remoteFolder,
               ctx: `${ctxM} asset=${a.id} slug=${a.slug}`,
-              proxies,
+              account: main,
               getProxyIndex,
               setProxyIndex,
               relogin: reloginM,

@@ -162,3 +162,23 @@ export async function clearMegaProxyIfSafe({ ctx } = {}) {
     return { ok: false, error: e.message };
   }
 }
+
+let CACHED_PROXIES = null;
+
+/**
+ * Retorna el proxy correspondiente a un intento dado para una cuenta específica,
+ * basándose en el mapeo "sticky proxy" (bloques asignados por id de cuenta).
+ *
+ * @param {object} account Objeto de cuenta que contenga la propiedad `id`.
+ * @param {number} attempt Número de intento o rotación (0 para el primero).
+ * @returns {object|null} El proxy asignado ({ proxyUrl, username, password, raw }) o null si no hay disponibles.
+ */
+export function getStickyProxyForAccount(account, attempt = 0) {
+  if (!CACHED_PROXIES) {
+    CACHED_PROXIES = listMegaProxies({ shuffle: false });
+  }
+  if (!CACHED_PROXIES.length) return null;
+  const accId = account?.id ? Number(account.id) : 0;
+  const startIdx = accId ? (accId % CACHED_PROXIES.length) : 0;
+  return CACHED_PROXIES[(startIdx + attempt) % CACHED_PROXIES.length];
+}

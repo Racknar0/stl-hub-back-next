@@ -5,7 +5,7 @@ import { log } from './logger.js';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import { withMegaLock } from './megaQueue.js';
-import { applyMegaProxy, listMegaProxies } from './megaProxy.js';
+import { applyMegaProxy, getStickyProxyForAccount } from './megaProxy.js';
 import { loginWithSessionCache } from './megaSessionHelper.js';
 
 /*
@@ -29,15 +29,12 @@ const prisma = new PrismaClient();
 const DEFAULT_FREE_QUOTA_MB = Number(process.env.MEGA_FREE_QUOTA_MB) || 20480;
 
 async function ensureProxyOrThrow({ accountId, ctx, maxTries = 10 } = {}) {
-  const proxies = listMegaProxies({ shuffle: false });
-  if (!proxies.length) {
-    throw new Error(`[VALIDAR][PROXY] Sin proxies válidos (no se permite IP directa)${ctx ? ` ${ctx}` : ''}`);
-  }
-  const tries = Math.min(Math.max(1, Number(maxTries) || 1), proxies.length);
-  const startIdx = accountId ? (accountId % proxies.length) : 0;
   let lastErr = null;
-  for (let i = 0; i < tries; i++) {
-    const p = proxies[(startIdx + i) % proxies.length];
+  for (let i = 0; i < maxTries; i++) {
+    const p = getStickyProxyForAccount({ id: accountId }, i);
+    if (!p) {
+      throw new Error(`[VALIDAR][PROXY] Sin proxies válidos (no se permite IP directa)${ctx ? ` ${ctx}` : ''}`);
+    }
     try {
       const r = await applyMegaProxy(p, { ctx: ctx || 'validate:last', timeoutMs: 15000, clearOnFail: false });
       if (r?.enabled) {

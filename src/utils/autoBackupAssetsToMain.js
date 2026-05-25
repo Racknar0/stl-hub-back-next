@@ -7,6 +7,7 @@ import fs from 'fs'
 import { fileURLToPath } from 'url'
 import { log } from './logger.js'
 import { loginWithSessionCache } from './megaSessionHelper.js'
+import { applyMegaProxy, getStickyProxyForAccount } from './megaProxy.js'
 
 /*
   Script: validateAssetsOnLastAccount (FINAL V3 - ZOMBIE KILLER EDITION)
@@ -55,8 +56,6 @@ async function safeClearProxy(why = ''){
 // ==========================================
 // SISTEMA DE PROXIES
 // ==========================================
-const PROXY_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'proxies.txt');
-let PROXY_LIST = [];
 let CURRENT_PROXY = null;
 const PROXY_CURL_TEST_URL = 'https://www.google.com';
 const PROXY_CURL_TIMEOUT_S = 10;
@@ -64,23 +63,8 @@ const STICKY_PROXY_ENABLED = true; // sticky por cuenta durante TODO el run
 const STICKY_PROXY_MAX_TRIES = 5;  // cuántos proxies probar al asignar
 const STICKY_PROXY_REFRESH_ON_LOGIN_FAIL = true; // si falla login, reintenta reasignando proxy
 
-// Cache en memoria: accountKey -> { raw, proxyUrl } donde raw es línea IP:PORT:USER:PASS
+// Cache en memoria: accountKey -> { p, proxyUrl } donde p es el objeto proxy completo
 const STICKY_PROXY_BY_ACCOUNT = new Map();
-
-try {
-  if (fs.existsSync(PROXY_FILE)) {
-    const content = fs.readFileSync(PROXY_FILE, 'utf-8');
-    // Guardamos las líneas crudas, las procesamos al momento de usar
-    PROXY_LIST = content.split(/\r?\n/)
-      .map(l => l.trim())
-      .filter(l => l && !l.startsWith('#'));
-    log.info(`[INIT] Proxies cargados: ${PROXY_LIST.length}`);
-  } else {
-    log.warn('[INIT] NO se encontró proxies.txt. Operación MEGA abortará (no se permite IP directa).');
-  }
-} catch (e) {
-  log.error(`[INIT] Error leyendo proxies: ${e.message}`);
-}
 
 // Función para reiniciar el servidor si se queda "tonto"
 async function resetMegaServer() {
@@ -814,56 +798,39 @@ async function validateProxyWithCurl(raw) {
 }
 
 async function setValidatedProxy(maxTries = 5) {
-  if (!PROXY_LIST || PROXY_LIST.length === 0) {
-    CURRENT_PROXY = null;
-    return { ok: false, reason: 'NO_PROXIES' };
-  }
-
-  // No se permite clear a IP directa; solo rotamos aplicando otro proxy.
   await clearProxy();
 
-  const tries = Math.min(Math.max(Number(maxTries) || 1, 1), PROXY_LIST.length);
-  const startIdx = Math.floor(Math.random() * PROXY_LIST.length);
+  const tries = Number(maxTries) || 5;
 
   for (let i = 0; i < tries; i++) {
-    const raw = PROXY_LIST[(startIdx + i) % PROXY_LIST.length];
-    const masked = maskProxyForLogs(raw);
+    const p = getStickyProxyForAccount(null, i);
+    if (!p) {
+      log.warn('[PROXY][VALIDATION] Sin proxies válidos disponibles.');
+      return { ok: false, reason: 'NO_PROXIES' };
+    }
+    const masked = maskProxyForLogs(p.raw);
 
-    const v = await validateProxyWithCurl(raw);
+    const v = await validateProxyWithCurl(p.raw);
     if (!v.ok) {
       log.warn(`[PROXY][VALIDATION] FAIL ${masked} reason=${v.reason}`);
       continue;
     }
 
-    const built = buildHttpProxyAuthUrl(raw);
-    if (!built) continue;
-
     try {
-      await runCmd('mega-proxy', [built.proxyUrl, `--username=${built.user}`, `--password=${built.pass}`], { quiet: true });
-      CURRENT_PROXY = built.proxyUrl;
-      log.info(`[PROXY][VALIDATION] OK ${built.proxyUrl} (curl=${v.code || 'ok'})`);
-      return { ok: true, proxy: built.proxyUrl };
+      const applied = await applyMegaProxy(p, { ctx: 'restore-main', timeoutMs: 15000, clearOnFail: false });
+      if (applied?.enabled) {
+        CURRENT_PROXY = p.proxyUrl;
+        log.info(`[PROXY][VALIDATION] OK ${p.proxyUrl} (curl=${v.code || 'ok'})`);
+        return { ok: true, proxy: p.proxyUrl };
+      }
     } catch (e) {
-      log.warn(`[PROXY] Falló al aplicar ${built.proxyUrl}: ${e.message}`);
-      await clearProxy();
+      log.warn(`[PROXY] Falló al aplicar ${p.proxyUrl}: ${e.message}`);
     }
   }
 
   log.warn('[PROXY][VALIDATION] Ningún proxy pasó la validación. ABORTANDO (no se permite IP directa).');
-  await clearProxy();
+  CURRENT_PROXY = null;
   return { ok: false, reason: 'ALL_FAILED' };
-}
-
-async function applyProxyRaw(raw){
-  if (!raw) throw new Error('Direct proxy is not allowed');
-  const built = buildHttpProxyAuthUrl(raw);
-  if (!built) {
-    await clearProxy();
-    return { ok: false, reason: 'FORMATO_INVALIDO' };
-  }
-  await runCmd('mega-proxy', [built.proxyUrl, `--username=${built.user}`, `--password=${built.pass}`], { quiet: true });
-  CURRENT_PROXY = built.proxyUrl;
-  return { ok: true, proxy: built.proxyUrl, mode: 'proxy' };
 }
 
 async function setStickyProxyForAccount(acc, { maxTries = STICKY_PROXY_MAX_TRIES, forceRefresh = false } = {}) {
@@ -878,9 +845,12 @@ async function setStickyProxyForAccount(acc, { maxTries = STICKY_PROXY_MAX_TRIES
   // Si ya tenemos asignación (proxy o directo), la reutilizamos
   if (cached && !forceRefresh) {
     try {
-      await applyProxyRaw(cached.raw);
-      log.info(`[PROXY][STICKY] Reutilizando para ${key}: ${cached.proxyUrl}`);
-      return { ok: true, sticky: true, proxy: cached.proxyUrl || null };
+      const applied = await applyMegaProxy(cached.p, { ctx: 'restore-main:sticky-cached', timeoutMs: 15000, clearOnFail: false });
+      if (applied?.enabled) {
+        CURRENT_PROXY = cached.proxyUrl;
+        log.info(`[PROXY][STICKY] Reutilizando para ${key}: ${cached.proxyUrl}`);
+        return { ok: true, sticky: true, proxy: cached.proxyUrl || null };
+      }
     } catch (e) {
       // Si aplicar falla, forzamos reasignación
       log.warn(`[PROXY][STICKY] Falló re-aplicar para ${key}: ${e.message}. Reasignando...`);
@@ -888,41 +858,39 @@ async function setStickyProxyForAccount(acc, { maxTries = STICKY_PROXY_MAX_TRIES
     }
   }
 
-  // Si no hay proxies, abortar (no se permite IP directa)
-  if (!PROXY_LIST || PROXY_LIST.length === 0) {
-    await clearProxy();
-    log.warn(`[PROXY][STICKY] ${key}: NO_PROXIES (abort)`);
-    return { ok: false, sticky: true, reason: 'NO_PROXIES' };
-  }
-
   // Intentamos asignar un proxy válido y lo cacheamos
   await clearProxy();
-  const tries = Math.min(Math.max(Number(maxTries) || 1, 1), PROXY_LIST.length);
-  const startIdx = acc?.id ? (acc.id % PROXY_LIST.length) : Math.floor(Math.random() * PROXY_LIST.length);
+  const tries = Number(maxTries) || 5;
 
   for (let i = 0; i < tries; i++) {
-    const raw = PROXY_LIST[(startIdx + i) % PROXY_LIST.length];
-    const masked = maskProxyForLogs(raw);
+    const p = getStickyProxyForAccount(acc, i);
+    if (!p) {
+      log.warn(`[PROXY][STICKY] ${key}: NO_PROXIES (abort)`);
+      return { ok: false, sticky: true, reason: 'NO_PROXIES' };
+    }
+    const masked = maskProxyForLogs(p.raw);
 
-    const v = await validateProxyWithCurl(raw);
+    const v = await validateProxyWithCurl(p.raw);
     if (!v.ok) {
       log.warn(`[PROXY][STICKY] VALIDATION FAIL ${key} ${masked} reason=${v.reason}`);
       continue;
     }
 
     try {
-      const applied = await applyProxyRaw(raw);
-      STICKY_PROXY_BY_ACCOUNT.set(key, { raw, proxyUrl: applied.proxy });
-      log.info(`[PROXY][STICKY] Asignado a ${key}: ${applied.proxy} (curl=${v.code || 'ok'})`);
-      return { ok: true, sticky: true, proxy: applied.proxy };
+      const applied = await applyMegaProxy(p, { ctx: `restore-main:sticky-assign:${key}`, timeoutMs: 15000, clearOnFail: false });
+      if (applied?.enabled) {
+        STICKY_PROXY_BY_ACCOUNT.set(key, { p, proxyUrl: p.proxyUrl });
+        CURRENT_PROXY = p.proxyUrl;
+        log.info(`[PROXY][STICKY] Asignado a ${key}: ${p.proxyUrl} (curl=${v.code || 'ok'})`);
+        return { ok: true, sticky: true, proxy: p.proxyUrl };
+      }
     } catch (e) {
       log.warn(`[PROXY][STICKY] APPLY FAIL ${key} ${masked}: ${e.message}`);
-      await clearProxy();
     }
   }
 
   // Si no hay ninguno válido, abortar
-  await clearProxy();
+  CURRENT_PROXY = null;
   log.warn(`[PROXY][STICKY] ${key}: ALL_FAILED (abort)`);
   return { ok: false, sticky: true, reason: 'ALL_FAILED' };
 }

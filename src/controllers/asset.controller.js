@@ -9,7 +9,7 @@ import jwt from 'jsonwebtoken';
 import { withMegaLock } from '../utils/megaQueue.js';
 import { checkMegaLinkAlive } from '../utils/megaCheckFiles/megaLinkChecker.js';
 import { maybeCheckMegaOnVisit } from '../utils/megaCheckFiles/visitTriggeredMegaCheck.js';
-import { applyMegaProxy, listMegaProxies } from '../utils/megaProxy.js';
+import { applyMegaProxy, listMegaProxies, getStickyProxyForAccount } from '../utils/megaProxy.js';
 import { createPartFromBase64, GoogleGenAI, PartMediaResolutionLevel } from '@google/genai';
 import qdrantMultimodalService from '../services/qdrantMultimodal.service.js';
 import { megaMenuCache } from '../utils/memoryCache.js';
@@ -2429,11 +2429,11 @@ export const deleteAsset = async (req, res) => {
                     let loginOk = false;
                     let lastErr = '';
                     const maxTries = Math.min(10, proxies.length);
-                    const startIdx = acc.id ? (acc.id % proxies.length) : 0;
                     const perProxyTimeout = Number(process.env.MEGA_LOGIN_PER_PROXY_TIMEOUT_MS) || 15000;
 
                     for (let i = 0; i < maxTries; i++) {
-                        const p = proxies[(startIdx + i) % proxies.length];
+                        const p = getStickyProxyForAccount(acc, i);
+                        if (!p) break;
                         const proxyCtx = `${ctx} [Try ${i+1}/${maxTries} Proxy=${p.proxyUrl}]`;
                         try {
                             const applied = await applyMegaProxy(p, { ctx: proxyCtx, timeoutMs: 15000, clearOnFail: false });

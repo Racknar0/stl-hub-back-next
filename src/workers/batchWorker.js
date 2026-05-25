@@ -19,7 +19,7 @@ import path from 'path'
 import { spawn } from 'child_process'
 import sharp from 'sharp'
 import { withMegaLock, cancelPendingAutoLogout } from '../utils/megaQueue.js'
-import { applyMegaProxy, listMegaProxies } from '../utils/megaProxy.js'
+import { applyMegaProxy, listMegaProxies, getStickyProxyForAccount } from '../utils/megaProxy.js'
 import { decryptToJson } from '../utils/cryptoUtils.js'
 import {
   registerActiveBatchUpload,
@@ -937,6 +937,7 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
   const accountSwitching = activeMegaSessionAccountId > 0 && activeMegaSessionAccountId !== accountIdNum
   let forceReloginNextAttempt = false
   let forceSkipLastProxy = false
+  let proxyAttempt = 0
 
   for (let attempt = 1; attempt <= MAX_STALL_RETRIES; attempt++) {
     try {
@@ -959,11 +960,6 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
       }
 
       await withMegaLock(async () => {
-        const proxies = await listMegaProxies({ shuffle: false })
-        if (!proxies.length) {
-          throw new Error('PROXY_REQUIRED_NO_PROXIES_AVAILABLE')
-        }
-
         let picked = null
         const shouldReuseLastProxy = Boolean(
           lastProxyUrl
@@ -973,31 +969,25 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
           && !(accountSwitching && activeMegaProxyUrl && lastProxyUrl === activeMegaProxyUrl)
         )
         if (shouldReuseLastProxy) {
-          picked = proxies.find((p) => p?.proxyUrl === lastProxyUrl) || null
+          for (let i = 0; i < 50; i++) {
+            const p = getStickyProxyForAccount(account, i)
+            if (p && p.proxyUrl === lastProxyUrl) {
+              picked = p
+              proxyAttempt = i
+              break
+            }
+          }
+          if (!picked) {
+            picked = getStickyProxyForAccount(account, proxyAttempt)
+          }
           if (picked?.proxyUrl) {
             console.log(`[BATCH][PROXY][REUSE] ${picked.proxyUrl} ${ctx}`)
           }
-        }
-
-        if (!picked) {
-          let candidatePool = proxies.filter((p) => p?.proxyUrl && !triedProxyUrls.has(p.proxyUrl))
-          if (accountSwitching && activeMegaProxyUrl) {
-            const withoutActiveProxy = candidatePool.filter((p) => p.proxyUrl !== activeMegaProxyUrl)
-            if (withoutActiveProxy.length) candidatePool = withoutActiveProxy
+        } else {
+          if (attempt > 1 || forceSkipLastProxy || manualSwitchRequested) {
+            proxyAttempt++
           }
-          if (lastProxyUrl) {
-            const withoutLast = candidatePool.filter((p) => p.proxyUrl !== lastProxyUrl)
-            if (withoutLast.length) candidatePool = withoutLast
-          }
-          if (!candidatePool.length) {
-            candidatePool = proxies.filter((p) => p?.proxyUrl && (!lastProxyUrl || p.proxyUrl !== lastProxyUrl))
-          }
-          if (!candidatePool.length) {
-            candidatePool = proxies.filter((p) => p?.proxyUrl)
-          }
-          const preferredIdx = accountIdNum % proxies.length
-          const preferredProxy = proxies[preferredIdx]
-          picked = candidatePool.find((p) => p?.proxyUrl === preferredProxy?.proxyUrl) || candidatePool[Math.floor(Math.random() * candidatePool.length)]
+          picked = getStickyProxyForAccount(account, proxyAttempt)
         }
 
         if (!picked?.proxyUrl) {
