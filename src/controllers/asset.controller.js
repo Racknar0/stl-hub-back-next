@@ -12,7 +12,7 @@ import { applyMegaProxy, listMegaProxies, getStickyProxyForAccount } from '../ut
 import { createPartFromBase64, GoogleGenAI, PartMediaResolutionLevel } from '@google/genai';
 import qdrantMultimodalService from '../services/qdrantMultimodal.service.js';
 import { parseSizeToMB, parseStorageFromDfText } from '../utils/megaDfParser.js';
-import { megaLoginFull, megaLogoutSafe } from '../utils/megaSession.js';
+import { megaLoginFull, megaLogoutSafe, refreshStorageMetrics } from '../utils/megaSession.js';
 import { megaMenuCache } from '../utils/memoryCache.js';
 import { buildNsfwWhere, buildNsfwCategoryWhere, isAssetNSFW as isAssetNSFWBackend } from '../middlewares/nsfwFilter.js';
 
@@ -1936,268 +1936,24 @@ export const getScpCommand = async (req, res) => {
 };
 
 
-/** Ejecutar comando de sistema con timeout y captura de stdout/stderr. */
-async function runCmd(cmd, args = [], options = {}) {
-    let finalArgs = [...args];
-    if (cmd === 'mega-logout' && !args.includes('--keep-session') && !args.includes('--hard-logout')) {
-        finalArgs.push('--keep-session');
-    }
-    if (cmd === 'mega-logout' && args.includes('--hard-logout')) {
-        finalArgs = args.filter(a => a !== '--hard-logout');
-    }
-
-    const timeoutMs =
-        Number(options.timeoutMs) ||
-        (cmd === 'mega-login'
-            ? Number(process.env.MEGA_LOGIN_TIMEOUT_MS) || 60000
-            : cmd === 'mega-logout'
-              ? Number(process.env.MEGA_LOGOUT_TIMEOUT_MS) || 30000
-              : cmd === 'mega-mkdir'
-                ? Number(process.env.MEGA_MKDIR_TIMEOUT_MS) || 20000
-                : 0);
-
-    const { timeoutMs: _ignored, ...spawnOpts } = options || {};
-
-    return new Promise((resolve, reject) => {
-        const killTree = () => {
-            // En Linux, con detached podemos matar el grupo y evitar procesos huérfanos cuando shell=true.
-            try {
-                if (process.platform !== 'win32' && child?.pid) {
-                    try { process.kill(-child.pid, 'SIGKILL'); } catch {}
-                }
-            } catch {}
-            try { child.kill('SIGKILL'); } catch {}
-            try { child.kill(); } catch {}
-        };
-
-        const child = spawn(cmd, finalArgs, {
-            shell: true,
-            detached: process.platform !== 'win32',
-            ...spawnOpts,
-        });
-        let settled = false;
-        let to = null;
-        if (timeoutMs > 0) {
-            to = setTimeout(() => {
-                if (settled) return;
-                settled = true;
-                killTree();
-                reject(new Error(`${cmd} timeout after ${timeoutMs}ms`));
-            }, timeoutMs);
-        }
-        const normalizeChunk = (d) => String(d || '').replace(/\r/g, '\n').split('\n').map((s) => s.trim()).filter(Boolean);
-        const isMegaNoticeLine = (line) => {
-            const m = String(line || '').toLowerCase();
-            return (
-                m.includes('revised terms') ||
-                m.includes('terms of service') ||
-                m.includes('privacy policy') ||
-                m.includes('psa --discard') ||
-                m.includes('[progreso transferencia]') ||
-                /\|#+/.test(m)
-            );
-        };
-
-        child.stdout.on('data', (d) => {
-            const lines = normalizeChunk(d);
-            for (const line of lines) console.log(`[MEGA] ${line}`);
-        });
-        child.stderr.on('data', (d) => {
-            const lines = normalizeChunk(d);
-            for (const line of lines) {
-                if (isMegaNoticeLine(line)) console.warn(`[MEGA][NOTICE] ${line}`);
-                else console.error(`[MEGA] ${line}`);
-            }
-        });
-        child.on('error', (e) => {
-            if (to) clearTimeout(to);
-            if (settled) return;
-            settled = true;
-            try { killTree(); } catch {}
-            reject(e);
-        });
-        child.on('close', (code) => {
-            if (to) clearTimeout(to);
-            if (settled) return;
-            settled = true;
-            code === 0
-                ? resolve()
-                : reject(new Error(`${cmd} exited ${code}`));
-        });
-    });
-}
+// ─── MEGA helpers centralizados ──────────────────────────────────────
+// runCmd ahora viene de megaCmd.js (importado arriba)
+import { runCmd } from '../utils/megaCmd.js';
 
 // mega-mkdir retorna código 54 cuando la carpeta ya existe; lo tratamos como éxito silencioso.
-/** Crear directorio remoto en MEGA via mega-mkdir (ignora si ya existe). */
 async function safeMkdir(remotePath) {
-    const mkdirCmd = 'mega-mkdir';
-    return new Promise((resolve, reject) => {
-        const child = spawn(mkdirCmd, ['-p', remotePath], { shell: true });
-        let stderrBuf = '';
-        const timeoutMs = Number(process.env.MEGA_MKDIR_TIMEOUT_MS) || 20000;
-        let settled = false;
-        const to = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            try { child.kill('SIGKILL'); } catch {}
-            try { child.kill(); } catch {}
-            return reject(new Error(`${mkdirCmd} timeout after ${timeoutMs}ms`));
-        }, timeoutMs);
-        child.stdout.on('data', (d) =>
-            console.log(`[MEGA] ${d.toString().trim()}`)
-        );
-        child.stderr.on('data', (d) => {
-            const s = d.toString();
-            stderrBuf += s;
-            console.error(`[MEGA] ${s.trim()}`);
-        });
-        child.on('error', (e) => {
-            clearTimeout(to);
-            if (settled) return;
-            settled = true;
-            return reject(e);
-        });
-        child.on('close', (code) => {
-            clearTimeout(to);
-            if (settled) return;
-            settled = true;
-            if (code === 0) return resolve();
-            if (code === 54 || /Folder already exists/i.test(stderrBuf)) {
-                console.log(`[MEGA] mkdir exists (code=${code}) -> ok`);
-                return resolve();
-            }
-            return reject(new Error(`${mkdirCmd} exited ${code}`));
-        });
-    });
-}
-
-/** Intentar matar árbol de procesos (taskkill en Windows, SIGKILL en Linux). */
-function killProcessTreeBestEffort(child, label = 'PROC') {
     try {
-        if (!child?.pid) return;
-        const pid = Number(child.pid);
-        if (!Number.isFinite(pid) || pid <= 0) return;
-
-        if (process.platform === 'win32') {
-            try {
-                // /T mata el árbol; /F fuerza. No esperamos el exit.
-                spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { shell: true });
-                console.warn(`[${label}] taskkill sent pid=${pid}`);
-                return;
-            } catch {}
-        }
-
-        // Linux/macOS: si el proceso fue lanzado detached, intentamos matar grupo.
-        try { process.kill(-pid, 'SIGKILL'); } catch {}
-        try { child.kill('SIGKILL'); } catch {}
-        try { child.kill(); } catch {}
-    } catch {}
+        await runCmd('mega-mkdir', ['-p', remotePath]);
+    } catch (e) {
+        // Código 54 = carpeta ya existe → OK
+        if (!/exited 54|Folder already exists/i.test(String(e.message))) throw e;
+        console.log(`[MEGA] mkdir exists -> ok`);
+    }
 }
 
-// parseSizeToMB ahora viene del módulo centralizado (megaDfParser.js)
-
-/** Ejecutar comando de sistema con timeout y captura de stdout/stderr. */
-async function runCmdCapture(cmd, args = [], { timeoutMs = 15000, maxBytes = 1024 * 1024 } = {}) {
-    return new Promise((resolve, reject) => {
-        const child = spawn(cmd, args, { shell: true });
-        let out = '';
-        let err = '';
-        let truncatedOut = false;
-        let truncatedErr = false;
-        let settled = false;
-        const to = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            try { child.kill('SIGKILL'); } catch {}
-            try { child.kill(); } catch {}
-            reject(new Error(`${cmd} timeout after ${timeoutMs}ms`));
-        }, Math.max(1, Number(timeoutMs) || 15000));
-
-        const appendLimited = (prev, chunk, cap, markTruncated) => {
-            if (prev.length + chunk.length <= cap) return { val: prev + chunk, truncated: false };
-            const slice = cap - prev.length;
-            if (slice > 0) return { val: prev + chunk.slice(0, slice), truncated: true };
-            return { val: prev, truncated: true };
-        };
-
-        child.stdout.on('data', (d) => {
-            if (truncatedOut) return;
-            const r = appendLimited(out, d.toString(), maxBytes);
-            out = r.val;
-            if (r.truncated) truncatedOut = true;
-        });
-        child.stderr.on('data', (d) => {
-            if (truncatedErr) return;
-            const r = appendLimited(err, d.toString(), maxBytes);
-            err = r.val;
-            if (r.truncated) truncatedErr = true;
-        });
-        child.on('error', (e) => {
-            clearTimeout(to);
-            if (settled) return;
-            settled = true;
-            reject(e);
-        });
-        child.on('close', (code) => {
-            clearTimeout(to);
-            if (settled) return;
-            settled = true;
-            if (code === 0) return resolve({ out, err, truncatedOut, truncatedErr });
-            reject(new Error(err || out || `${cmd} exited ${code}`));
-        });
-    });
-}
-
-/** Refrescar datos de almacenamiento de una cuenta MEGA leyendo mega-df en sesión activa. */
+// refreshAccountStorageFromMegaDfInCurrentSession ahora usa refreshStorageMetrics de megaSession.js
 async function refreshAccountStorageFromMegaDfInCurrentSession(accountId, ctx = '') {
-    const id = Number(accountId);
-    if (!Number.isFinite(id) || id <= 0) return;
-
-    const DEFAULT_FREE_QUOTA_MB = Number(process.env.MEGA_FREE_QUOTA_MB) || 20480;
-    const label = ctx ? ` ${ctx}` : '';
-    const parseDfText = (txtRaw) => {
-        const parsed = parseStorageFromDfText(txtRaw);
-        let { storageUsedMB, storageTotalMB } = parsed;
-        if (!storageTotalMB || storageTotalMB <= 0) storageTotalMB = DEFAULT_FREE_QUOTA_MB;
-        if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB;
-        return { storageUsedMB, storageTotalMB };
-    };
-
-    try {
-        const r = await runCmdCapture('mega-df', ['-h'], { timeoutMs: 15000, maxBytes: 512 * 1024 });
-        const txt = (r.out || r.err || '').toString();
-        const { storageUsedMB, storageTotalMB } = parseDfText(txt);
-        await prisma.megaAccount.update({
-            where: { id },
-            data: {
-                storageUsedMB,
-                storageTotalMB,
-                lastCheckAt: new Date(),
-            },
-        });
-        console.log(`[BATCH][SPACE] updated accId=${id} used=${storageUsedMB}MB total=${storageTotalMB}MB${label}`);
-        return;
-    } catch (e) {
-        console.warn(`[BATCH][SPACE] mega-df -h warn accId=${id} msg=${String(e.message).slice(0, 200)}${label}`);
-    }
-
-    // Fallback sin -h
-    try {
-        const r = await runCmdCapture('mega-df', [], { timeoutMs: 15000, maxBytes: 512 * 1024 });
-        const txt = (r.out || r.err || '').toString();
-        const { storageUsedMB, storageTotalMB } = parseDfText(txt);
-        await prisma.megaAccount.update({
-            where: { id },
-            data: {
-                storageUsedMB,
-                storageTotalMB,
-                lastCheckAt: new Date(),
-            },
-        });
-        console.log(`[BATCH][SPACE] updated(accId=${id}) fallback used=${storageUsedMB}MB total=${storageTotalMB}MB${label}`);
-    } catch (e) {
-        console.warn(`[BATCH][SPACE] mega-df fallback warn accId=${id} msg=${String(e.message).slice(0, 200)}${label}`);
-    }
+    return refreshStorageMetrics(prisma, accountId, ctx);
 }
 
 /** Aplicar proxy MEGA via mega-proxy o fallar con error. */

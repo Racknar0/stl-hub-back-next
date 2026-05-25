@@ -8,7 +8,7 @@ import { applyMegaProxy, listMegaProxies, clearMegaProxyIfSafe, getStickyProxyFo
 import { megaCmdWithProgressAndStall, isMegaStallError } from '../utils/megaTransfer.js';
 import { runCmd, attachAutoAcceptTerms } from '../utils/megaCmd.js';
 import { parseSizeToMB, parseStorageFromDfText } from '../utils/megaDfParser.js';
-import { megaLoginFull, megaLogoutSafe } from '../utils/megaSession.js';
+import { megaLoginFull, megaLogoutSafe, createReloginFn } from '../utils/megaSession.js';
 import path from 'path';
 import fs from 'fs';
 
@@ -765,22 +765,9 @@ export const getAccountDetail = async (req, res) => {
     let items = []
     const base = (acc.baseFolder || '/').trim()
     await withMegaLock( async () => {
-      try { await runCmdWithTimeout(logoutCmd, [], MEGA_LOGOUT_TIMEOUT_MS) } catch {}
-      /* CÓDIGO ANTERIOR RESPALDADO
-      try {
-        if (payload?.type === 'session' && payload.session) {
-          await runCmdWithTimeout(loginCmd, [payload.session], MEGA_LOGIN_TIMEOUT_MS)
-        } else if (payload?.username && payload?.password) {
-          await runCmdWithTimeout(loginCmd, [payload.username, payload.password], MEGA_LOGIN_TIMEOUT_MS)
-        } else {
-          throw new Error('Invalid credentials payload')
-        }
-      } catch (e) {
-        const msg = String(e.message || '').toLowerCase()
-        if (!msg.includes('already logged in')) throw e
-      }
-      */
-      await loginWithSessionCache(prisma, runCmdWithTimeout, acc.id, payload, 'get-acc-detail', MEGA_LOGIN_TIMEOUT_MS);
+      await megaLoginFull(prisma, acc.id, payload, 'get-acc-detail', {
+        skipStorageRefresh: true,
+      });
       if (base && base !== '/') {
         try { await runCmdWithTimeout(mkdirCmd, ['-p', base], MEGA_MKDIR_TIMEOUT_MS) } catch {}
       }
@@ -788,7 +775,7 @@ export const getAccountDetail = async (req, res) => {
         const ls = await runCmdWithTimeout(lsCmd, ['-l', base || '/'], MEGA_READONLY_TIMEOUT_MS)
         items = (ls.out || '').split(/\r?\n/).filter(Boolean)
       } catch {}
-      try { await runCmdWithTimeout(logoutCmd, [], MEGA_LOGOUT_TIMEOUT_MS) } catch {}
+      await megaLogoutSafe('get-acc-detail');
     }, 'ACCOUNTS-DETAIL')
 
     return res.json({
@@ -1147,13 +1134,10 @@ export const syncMainToBackups = async (req, res) => {
       const baseB = (b.baseFolder || '/').replaceAll('\\', '/');
   logSync(`Backup ${b.id}: escaneo en base ${baseB}`, 'verbose');
       await withMegaLock(async () => {
-        /* CÓDIGO ANTERIOR RESPALDADO
-        try { await runCmd('mega-logout', []); } catch {}
-        if (payloadB?.type === 'session' && payloadB.session) await runCmd('mega-login', [payloadB.session]);
-        else if (payloadB?.username && payloadB?.password) await runCmd('mega-login', [payloadB.username, payloadB.password]);
-        else throw new Error('Credenciales backup inválidas para escaneo');
-        */
-        await loginWithSessionCache(prisma, runCmd, b.id, payloadB, `sync-main-scan-backup-${b.id}`, 60000);
+        await megaLoginFull(prisma, b.id, payloadB, `sync-main-scan-backup-${b.id}`, {
+          skipStorageRefresh: true,
+          skipProxySetup: true,
+        });
 
         try { await runCmd('mega-mkdir', ['-p', baseB]); } catch {}
 
@@ -1243,7 +1227,7 @@ export const syncMainToBackups = async (req, res) => {
             scanStats.get(b.id).missing++;
           }
         }
-        try { await runCmd('mega-logout', []); } catch {}
+        await megaLogoutSafe(`sync-main-scan-backup-${b.id}`);
       }, `SYNC-SCAN-${b.id}`);
 
       const st = scanStats.get(b.id);
@@ -1297,18 +1281,9 @@ export const syncMainToBackups = async (req, res) => {
     let downloadedBytesTotal = 0;
     await withMegaLock(async () => {
       const ctxMain = `main=${mainId} alias=${main.alias || '--'}`;
-      const reloginMain = async () => {
-        /* CÓDIGO ANTERIOR RESPALDADO
-        try { await runCmd('mega-logout', []); } catch {}
-        if (payloadMain?.type === 'session' && payloadMain.session) await runCmd('mega-login', [payloadMain.session]);
-        else if (payloadMain?.username && payloadMain?.password) await runCmd('mega-login', [payloadMain.username, payloadMain.password]);
-        else throw new Error('Credenciales main inválidas para descarga');
-        */
-        await loginWithSessionCache(prisma, runCmd, mainId, payloadMain, `sync-main-dl-${mainId}`, 60000);
-      };
+      const reloginMain = createReloginFn(prisma, mainId, payloadMain, `sync-main-dl-${mainId}`);
 
       await applyProxyByIndexOrThrow(main, getProxyIndex(), ctxMain);
-      try { await runCmd('mega-logout', []); } catch {}
       await reloginMain();
 
       const baseMain = (main.baseFolder || '/').replaceAll('\\', '/');
@@ -1352,7 +1327,7 @@ export const syncMainToBackups = async (req, res) => {
           downloadedBytesTotal = 0; // Reiniciamos el contador dinámico para los siguientes 3GB
         }
       }
-      try { await runCmd('mega-logout', []); } catch {}
+      await megaLogoutSafe(`sync-dl-${mainId}`);
     }, `SYNC-DOWNLOAD-${mainId}`);
 
     // Rotación eliminada del post-descarga, ya que ahora es dinámica por archivo.
@@ -1374,18 +1349,9 @@ export const syncMainToBackups = async (req, res) => {
 
       await withMegaLock(async () => {
         const ctxB = `backup=${b.id} alias=${b.alias || '--'}`;
-        const reloginB = async () => {
-          /* CÓDIGO ANTERIOR RESPALDADO
-          try { await runCmd('mega-logout', []); } catch {}
-          if (payloadB?.type === 'session' && payloadB.session) await runCmd('mega-login', [payloadB.session]);
-          else if (payloadB?.username && payloadB?.password) await runCmd('mega-login', [payloadB.username, payloadB.password]);
-          else throw new Error('Credenciales backup inválidas');
-          */
-          await loginWithSessionCache(prisma, runCmd, b.id, payloadB, `sync-main-up-${b.id}`, 60000);
-        };
+        const reloginB = createReloginFn(prisma, b.id, payloadB, `sync-main-up-${b.id}`);
 
         await applyProxyByIndexOrThrow(b, getProxyIndex(), ctxB);
-        try { await runCmd('mega-logout', []); } catch {}
         await reloginB();
 
         await safeMkdir(baseB);
@@ -1806,15 +1772,7 @@ export const alignmentSync = async (req, res) => {
     console.log(`[ALIGNMENT][SYNC][DOWNLOAD] Descargando ${assets.length} assets desde main ${mainId}...`);
     await withMegaLock(async () => {
       const ctxMain = `align-dl main=${mainId}`;
-      const reloginMain = async () => {
-        /* CÓDIGO ANTERIOR RESPALDADO
-        try { await runCmd('mega-logout', []); } catch {}
-        if (payloadMain?.type === 'session' && payloadMain.session) await runCmd('mega-login', [payloadMain.session]);
-        else if (payloadMain?.username && payloadMain?.password) await runCmd('mega-login', [payloadMain.username, payloadMain.password]);
-        else throw new Error('Credenciales main inválidas');
-        */
-        await loginWithSessionCache(prisma, runCmd, mainId, payloadMain, `align-sync-dl-${mainId}`, 60000);
-      };
+      const reloginMain = createReloginFn(prisma, mainId, payloadMain, `align-sync-dl-${mainId}`);
 
       await applyProxyByIndexOrThrow(main, getProxyIndex(), ctxMain);
       await reloginMain();
@@ -1846,7 +1804,7 @@ export const alignmentSync = async (req, res) => {
           failCount++;
         }
       }
-      try { await runCmd('mega-logout', []); } catch {}
+      await megaLogoutSafe(`align-sync-dl-${mainId}`);
     }, `ALIGN-DL-${mainId}`);
 
     // FASE 2: Subir a Backup MEGA
@@ -1855,15 +1813,7 @@ export const alignmentSync = async (req, res) => {
       console.log(`[ALIGNMENT][SYNC][UPLOAD] Subiendo ${toUpload.length} assets a backup ${backupAccount.id}...`);
       await withMegaLock(async () => {
         const ctxB = `align-up backup=${backupAccount.id}`;
-        const reloginB = async () => {
-          /* CÓDIGO ANTERIOR RESPALDADO
-          try { await runCmd('mega-logout', []); } catch {}
-          if (payloadB?.type === 'session' && payloadB.session) await runCmd('mega-login', [payloadB.session]);
-          else if (payloadB?.username && payloadB?.password) await runCmd('mega-login', [payloadB.username, payloadB.password]);
-          else throw new Error('Credenciales backup inválidas');
-          */
-          await loginWithSessionCache(prisma, runCmd, backupAccount.id, payloadB, `align-sync-up-${backupAccount.id}`, 60000);
-        };
+        const reloginB = createReloginFn(prisma, backupAccount.id, payloadB, `align-sync-up-${backupAccount.id}`);
 
         await applyProxyByIndexOrThrow(backupAccount, getProxyIndex(), ctxB);
         await reloginB();
@@ -1943,7 +1893,7 @@ export const alignmentSync = async (req, res) => {
           console.warn(`[ALIGNMENT][SYNC] No se pudieron refrescar métricas backup: ${String(e.message).slice(0, 200)}`);
         }
 
-        try { await runCmd('mega-logout', []); } catch {}
+        await megaLogoutSafe(`align-sync-up-${backupAccount.id}`);
       }, `ALIGN-UP-${backupAccount.id}`);
     }
 
@@ -2277,15 +2227,7 @@ export const alignmentRestore = async (req, res) => {
     console.log(`[ALIGNMENT][RESTORE][DOWNLOAD] Descargando ${assets.length} assets desde backup ${backupAccount.id}...`);
     await withMegaLock(async () => {
       const ctxB = `align-restore-dl backup=${backupAccount.id}`;
-      const reloginB = async () => {
-        /* CÓDIGO ANTERIOR RESPALDADO
-        try { await runCmd('mega-logout', []); } catch {}
-        if (payloadB?.type === 'session' && payloadB.session) await runCmd('mega-login', [payloadB.session]);
-        else if (payloadB?.username && payloadB?.password) await runCmd('mega-login', [payloadB.username, payloadB.password]);
-        else throw new Error('Credenciales backup inválidas');
-        */
-        await loginWithSessionCache(prisma, runCmd, backupAccount.id, payloadB, `align-restore-dl-${backupAccount.id}`, 60000);
-      };
+      const reloginB = createReloginFn(prisma, backupAccount.id, payloadB, `align-restore-dl-${backupAccount.id}`);
 
       await applyProxyByIndexOrThrow(backupAccount, getProxyIndex(), ctxB);
       await reloginB();
@@ -2317,7 +2259,7 @@ export const alignmentRestore = async (req, res) => {
           failCount++;
         }
       }
-      try { await runCmd('mega-logout', []); } catch {}
+      await megaLogoutSafe(`align-restore-dl-${backupAccount.id}`);
     }, `ALIGN-RESTORE-DL-${backupAccount.id}`);
 
     // FASE 2: Subir a Main MEGA
@@ -2326,15 +2268,7 @@ export const alignmentRestore = async (req, res) => {
       console.log(`[ALIGNMENT][RESTORE][UPLOAD] Subiendo ${toUpload.length} assets a main ${mainId}...`);
       await withMegaLock(async () => {
         const ctxM = `align-restore-up main=${mainId}`;
-        const reloginM = async () => {
-          /* CÓDIGO ANTERIOR RESPALDADO
-          try { await runCmd('mega-logout', []); } catch {}
-          if (payloadMain?.type === 'session' && payloadMain.session) await runCmd('mega-login', [payloadMain.session]);
-          else if (payloadMain?.username && payloadMain?.password) await runCmd('mega-login', [payloadMain.username, payloadMain.password]);
-          else throw new Error('Credenciales main inválidas');
-          */
-          await loginWithSessionCache(prisma, runCmd, mainId, payloadMain, `align-restore-up-${mainId}`, 60000);
-        };
+        const reloginM = createReloginFn(prisma, mainId, payloadMain, `align-restore-up-${mainId}`);
 
         await applyProxyByIndexOrThrow(main, getProxyIndex(), ctxM);
         await reloginM();
@@ -2391,7 +2325,7 @@ export const alignmentRestore = async (req, res) => {
           console.warn(`[ALIGNMENT][RESTORE] No se pudieron refrescar métricas main: ${String(e.message).slice(0, 200)}`);
         }
 
-        try { await runCmd('mega-logout', []); } catch {}
+        await megaLogoutSafe(`align-restore-up-${mainId}`);
       }, `ALIGN-RESTORE-UP-${mainId}`);
     }
 

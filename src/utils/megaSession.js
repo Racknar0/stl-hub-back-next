@@ -262,3 +262,35 @@ export async function megaLoginFull(prisma, accountId, payload, ctx = '', opts =
 
   throw lastErr || new Error(`[MEGA-SESSION] Login fallido tras ${maxProxyRetries + 1} intentos accId=${accId} ${ctx}`);
 }
+
+// ─── createReloginFn ─────────────────────────────────────────────
+/**
+ * Fábrica de callbacks de re-login para helpers de transferencia (megaGetWithStallRetry, megaPutWithStallRetry).
+ *
+ * Devuelve una función async que al ser llamada:
+ *   1. Logout preventivo (--keep-session)
+ *   2. Login con session cache
+ *   3. Reset mega-cmd si falla (todo via megaLoginFull)
+ *
+ * El proxy NO se toca (skipProxySetup=true) porque el caller
+ * (sync/alignment) maneja su propio índice de rotación.
+ *
+ * Uso:
+ *   const reloginMain = createReloginFn(prisma, mainId, payloadMain, 'sync-dl');
+ *   await megaGetWithStallRetry({ ..., relogin: reloginMain });
+ *
+ * @param {object} prisma — PrismaClient
+ * @param {number} accountId — ID de la cuenta MEGA
+ * @param {object} payload — Credenciales desencriptadas
+ * @param {string} [ctx] — Contexto para logs
+ * @returns {Function} async () => void — callback de re-login
+ */
+export function createReloginFn(prisma, accountId, payload, ctx = '') {
+  return async () => {
+    await megaLoginFull(prisma, accountId, payload, `relogin ${ctx}`, {
+      skipStorageRefresh: true,
+      skipProxySetup: true,
+      maxProxyRetries: 0,   // sin rotación de proxy (el caller la maneja)
+    });
+  };
+}
