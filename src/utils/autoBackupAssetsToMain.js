@@ -6,10 +6,10 @@ import path from 'path'
 import fs from 'fs'
 import { fileURLToPath } from 'url'
 import { log } from './logger.js'
-import { loginWithSessionCache } from './megaSessionHelper.js'
 import { applyMegaProxy, getStickyProxyForAccount } from './megaProxy.js'
 import { runCmd } from './megaCmd.js'
 import { parseSizeToMB, parseStorageFromDfText } from './megaDfParser.js'
+import { megaLoginFull, megaLogoutSafe, resetMegaServerIfSafe } from './megaSession.js'
 
 /*
   Script: validateAssetsOnLastAccount (FINAL V3 - ZOMBIE KILLER EDITION)
@@ -40,11 +40,7 @@ function uploadsAreActiveNow(){
 
 // Si hay subidas activas, NO debemos tocar la sesión global de MEGAcmd.
 async function safeMegaLogout(ctx, why = ''){
-  if (uploadsAreActiveNow()) {
-    log.warn(`[MEGA][LOGOUT][SKIP] subidas activas. ${why ? `why=${why} ` : ''}${ctx || ''}`.trim());
-    return;
-  }
-  return megaLogout(ctx);
+  await megaLogoutSafe(`${ctx}${why ? ` why=${why}` : ''}`);
 }
 
 async function safeClearProxy(why = ''){
@@ -69,22 +65,9 @@ const STICKY_PROXY_REFRESH_ON_LOGIN_FAIL = true; // si falla login, reintenta re
 const STICKY_PROXY_BY_ACCOUNT = new Map();
 
 // Función para reiniciar el servidor si se queda "tonto"
+// resetMegaServer ahora viene de megaSession.js (resetMegaServerIfSafe)
 async function resetMegaServer() {
-  if (uploadsAreActiveNow()) {
-    log.warn('[MEGA] Reinicio de servidor MEGA BLOQUEADO: hay subidas activas (uploads-active.lock).');
-    return;
-  }
-  log.warn('[MEGA] Ejecutando reinicio de emergencia del servidor MEGA...');
-  try {
-    try { await runCmd('mega-quit', [], { quiet: true, timeoutMs: 5000 }); } catch {}
-    try { execSync('pkill -9 -f mega-cmd-server'); } catch {} // Matar a la fuerza
-    await sleep(5000); // Esperar que el SO libere recursos
-    // Al ejecutar version, el server arranca solo
-    try { await runCmd('mega-version', [], { quiet: true, timeoutMs: 10000 }); } catch {}
-    log.info('[MEGA] Servidor reiniciado correctamente.');
-  } catch (e) {
-    log.error(`[MEGA] Fallo al reiniciar servidor: ${e.message}`);
-  }
+  return resetMegaServerIfSafe('autoBackup');
 }
 
 async function setRandomProxy() {
@@ -212,101 +195,21 @@ async function getAccountMetrics(base){
 }
 
 async function megaLogin(payload, ctx) {
-  let lastErr = null;
   let accountId = null;
   if (ctx) {
     const match = String(ctx).match(/accId=(\d+)/);
     if (match) accountId = Number(match[1]);
   }
-
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      const TIMEOUT_LOGIN = 60000; // 60s para asegurar conexión con proxies lentos
-
-      if (accountId) {
-        /* CÓDIGO ANTERIOR RESPALDADO
-        if (payload?.type === 'session' && payload.session) {
-          await runCmd('mega-login', [payload.session], { quiet: true, timeoutMs: TIMEOUT_LOGIN });
-        } else if (payload?.username && payload?.password) {
-          await runCmd('mega-login', [payload.username, payload.password], { quiet: true, timeoutMs: TIMEOUT_LOGIN });
-        } else {
-          throw new Error('Credenciales inválidas');
-        }
-        */
-        await loginWithSessionCache(prisma, runCmd, accountId, payload, ctx, TIMEOUT_LOGIN);
-      } else {
-        // Fallback simple si no hay accountId
-        if (payload?.type === 'session' && payload.session) {
-          await runCmd('mega-login', [payload.session], { quiet: true, timeoutMs: TIMEOUT_LOGIN });
-        } else if (payload?.username && payload?.password) {
-          await runCmd('mega-login', [payload.username, payload.password], { quiet: true, timeoutMs: TIMEOUT_LOGIN });
-        } else {
-          throw new Error('Credenciales inválidas');
-        }
-      }
-      log.info(`[MEGA][LOGIN][OK] ${ctx} intento=${attempt} proxy=${CURRENT_PROXY || 'off'}`);
-      return;
-    } catch (e) {
-      lastErr = e;
-      log.warn(`[MEGA][LOGIN][FAIL] intento=${attempt} ${ctx} msg=${e.message}`);
-
-      // Si tenemos sticky por cuenta, intentamos refrescar el proxy asignado y reintentar una vez
-      if (STICKY_PROXY_ENABLED && STICKY_PROXY_REFRESH_ON_LOGIN_FAIL && payload && attempt === 1) {
-        try {
-          if (accountId) {
-            // Borramos cualquier asignación que coincida por prefijo id para forzar reasignación
-            for (const k of Array.from(STICKY_PROXY_BY_ACCOUNT.keys())) {
-              if (k.startsWith(`id=${accountId}|`)) STICKY_PROXY_BY_ACCOUNT.delete(k);
-            }
-          }
-          await setValidatedProxy(STICKY_PROXY_MAX_TRIES);
-          // Reintento inmediato con el nuevo estado de proxy
-          if (accountId) {
-            await loginWithSessionCache(prisma, runCmd, accountId, payload, ctx, TIMEOUT_LOGIN);
-          } else {
-            if (payload?.type === 'session') await runCmd('mega-login', [payload.session], { quiet: true, timeoutMs: TIMEOUT_LOGIN });
-            else await runCmd('mega-login', [payload.username, payload.password], { quiet: true, timeoutMs: TIMEOUT_LOGIN });
-          }
-          log.info(`[MEGA][LOGIN][OK][STICKY-REFRESH] ${ctx} proxy=${CURRENT_PROXY || 'off'}`);
-          return;
-        } catch (er) {
-          // seguimos con el flujo normal de reset
-        }
-      }
-      
-      // Si fallamos, asumimos estado corrupto y reiniciamos servidor
-      if (uploadsAreActiveNow()) {
-        log.warn(`[MEGA][LOGIN] No reinicio MEGAcmd por subidas activas. ${ctx}`);
-      } else {
-        await resetMegaServer();
-      }
-
-      // Requisito: nunca caer a IP directa. Reintento solo con proxy (rotando si es posible).
-      try {
-        const proxyState = await setValidatedProxy(STICKY_PROXY_MAX_TRIES);
-        if (!proxyState?.ok) throw new Error(`NO_PROXY: ${proxyState?.reason || 'unknown'}`);
-      } catch (e2) {
-        // si no hay proxy disponible, no tiene sentido seguir
-        throw lastErr;
-      }
-
-      await sleep(2000 * attempt);
-    }
-  }
-
-  throw lastErr || new Error('megaLogin failed');
+  await megaLoginFull(prisma, accountId, payload, ctx, {
+    skipStorageRefresh: true,  // autoBackup does its own getAccountMetrics
+    skipProxySetup: true,      // autoBackup manages its own proxy system
+    maxProxyRetries: 3,
+  });
+  log.info(`[MEGA][LOGIN][OK] ${ctx} proxy=${CURRENT_PROXY || 'off'}`);
 }
 
 async function megaLogout(ctx){
-  try {
-    /* CÓDIGO ANTERIOR RESPALDADO
-    await runCmd('mega-logout',[],{ quiet:true });
-    */
-    await runCmd('mega-logout', ['--keep-session'], { quiet: true });
-    log.info(`[MEGA][LOGOUT][OK] ${ctx}`);
-  } catch(e){
-    log.warn(`[MEGA][LOGOUT][WARN] ${ctx} ${e.message}`);
-  }
+  await megaLogoutSafe(ctx);
 }
 
 // ==========================================

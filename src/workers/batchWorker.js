@@ -36,6 +36,7 @@ import { loginWithSessionCache } from '../utils/megaSessionHelper.js'
 import { runCmd, attachAutoAcceptTerms } from '../utils/megaCmd.js'
 import { parseSizeToMB, parseStorageFromDfText } from '../utils/megaDfParser.js'
 import { killProcessTreeBestEffort } from '../utils/megaTransfer.js'
+import { megaLoginFull, megaLogoutSafe } from '../utils/megaSession.js'
 
 const prisma = new PrismaClient()
 const UPLOADS_DIR  = path.resolve('uploads')
@@ -338,15 +339,7 @@ async function safeMkdir(remotePath) {
 }
 
 async function megaLogout(ctx) {
-  try {
-    /* CÓDIGO ANTERIOR RESPALDADO
-    await runCmd('mega-logout', [], { timeoutMs: MEGA_CMD_TIMEOUT_MS }); console.log(`[BATCH][LOGOUT][OK] ${ctx}`)
-    */
-    await runCmd('mega-logout', ['--keep-session'], { timeoutMs: MEGA_CMD_TIMEOUT_MS });
-    console.log(`[BATCH][LOGOUT][OK] ${ctx}`);
-  } catch {
-    console.log(`[BATCH][LOGOUT][WARN] ${ctx}`);
-  }
+  await megaLogoutSafe(ctx);
 }
 
 async function megaLogin(payload, ctx, accountId = null) {
@@ -354,26 +347,11 @@ async function megaLogin(payload, ctx, accountId = null) {
     const match = String(ctx).match(/accId=(\d+)/);
     if (match) accountId = Number(match[1]);
   }
-
-  if (accountId) {
-    /* CÓDIGO ANTERIOR RESPALDADO
-    if (payload?.type === 'session' && payload.session) {
-      await runCmd('mega-login', [payload.session], { timeoutMs: MEGA_CMD_TIMEOUT_MS })
-    } else if (payload?.username && payload?.password) {
-      await runCmd('mega-login', [payload.username, payload.password], { timeoutMs: MEGA_CMD_TIMEOUT_MS })
-    } else throw new Error('Invalid credentials payload')
-    */
-    const result = await loginWithSessionCache(prisma, runCmd, accountId, payload, ctx, MEGA_CMD_TIMEOUT_MS);
-    console.log(`[BATCH][LOGIN][OK] ${ctx} metodo=${result.method}`);
-  } else {
-    // Fallback simple si no hay accountId
-    if (payload?.type === 'session' && payload.session) {
-      await runCmd('mega-login', [payload.session], { timeoutMs: MEGA_CMD_TIMEOUT_MS })
-    } else if (payload?.username && payload?.password) {
-      await runCmd('mega-login', [payload.username, payload.password], { timeoutMs: MEGA_CMD_TIMEOUT_MS })
-    } else throw new Error('Invalid credentials payload')
-    console.log(`[BATCH][LOGIN][OK] ${ctx} (sin cache)`);
-  }
+  const result = await megaLoginFull(prisma, accountId, payload, ctx, {
+    skipStorageRefresh: true,
+    skipProxySetup: true,  // batchWorker manages its own proxy via applyMegaProxy
+  });
+  console.log(`[BATCH][LOGIN][OK] ${ctx} metodo=${result.method}`);
 }
 
 async function ensureMegaSessionForAccount(payload, accountId, ctx, opts = {}) {

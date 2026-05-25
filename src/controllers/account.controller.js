@@ -8,6 +8,7 @@ import { applyMegaProxy, listMegaProxies, clearMegaProxyIfSafe, getStickyProxyFo
 import { megaCmdWithProgressAndStall, isMegaStallError } from '../utils/megaTransfer.js';
 import { runCmd, attachAutoAcceptTerms } from '../utils/megaCmd.js';
 import { parseSizeToMB, parseStorageFromDfText } from '../utils/megaDfParser.js';
+import { megaLoginFull, megaLogoutSafe } from '../utils/megaSession.js';
 import path from 'path';
 import fs from 'fs';
 
@@ -60,43 +61,17 @@ async function applyProxyByIndexOrThrow(account, idx, ctx){
 }
 
 /**
- * Helper: intenta login con rotación de proxy si falla/timeout.
- * Rota proxy → logout → login. Reintenta hasta agotar todos los proxies.
- * Retorna el proxyIndex final que funcionó.
+ * Helper: login MEGA completo con rotación de proxy.
+ * Usa megaLoginFull del módulo centralizado (incluye: logout preventivo,
+ * session cache, proxy rotation, reset servidor mega-cmd).
+ * Retorna el proxyIndex final (compatibilidad con call-sites).
  */
 async function loginWithProxyRetry({ startProxyIndex, payload, ctx, maxAttempts, accountId }) {
-  const attempts = maxAttempts || 50;
-  let proxyIdx = startProxyIndex;
-  let lastErr = null;
-
-  for (let i = 0; i < attempts; i++) {
-    try {
-      await applyProxyByIndexOrThrow({ id: accountId }, proxyIdx, ctx);
-      try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
-
-      if (accountId) {
-        await loginWithSessionCache(prisma, runCmdWithTimeout, accountId, payload, ctx, MEGA_LOGIN_TIMEOUT_MS);
-      } else {
-        // Fallback simple si no hay accountId disponible
-        if (payload?.type === 'session' && payload.session) {
-          await runCmdWithTimeout('mega-login', [payload.session], MEGA_LOGIN_TIMEOUT_MS);
-        } else if (payload?.username && payload?.password) {
-          await runCmdWithTimeout('mega-login', [payload.username, payload.password], MEGA_LOGIN_TIMEOUT_MS);
-        } else {
-          throw new Error('Credenciales inválidas');
-        }
-      }
-
-      log.info(`[LOGIN-RETRY][OK] intento=${i + 1}/${attempts} proxyIdx=${proxyIdx} ${ctx}`);
-      return proxyIdx; // éxito
-    } catch (e) {
-      lastErr = e;
-      log.warn(`[LOGIN-RETRY][FAIL] intento=${i + 1}/${attempts} proxyIdx=${proxyIdx} ${ctx}: ${String(e.message).slice(0, 200)}`);
-      proxyIdx++;
-    }
-  }
-
-  throw new Error(`Login fallido tras ${attempts} intentos. Último error: ${lastErr?.message || 'desconocido'}`);
+  await megaLoginFull(prisma, accountId, payload, ctx, {
+    maxProxyRetries: maxAttempts || 50,
+    skipStorageRefresh: true,  // testAccount refresca storage por separado
+  });
+  return startProxyIndex;
 }
 
 async function megaGetWithStallRetry({ remoteFile, destLocal, ctx, account, getProxyIndex, setProxyIndex, relogin }){

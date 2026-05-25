@@ -6,8 +6,7 @@ import { log } from './logger.js';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import { withMegaLock } from './megaQueue.js';
-import { applyMegaProxy, getStickyProxyForAccount } from './megaProxy.js';
-import { loginWithSessionCache } from './megaSessionHelper.js';
+import { megaLoginFull, megaLogoutSafe } from './megaSession.js';
 
 /*
   Script: validateLastMeAccount
@@ -29,25 +28,7 @@ const prisma = new PrismaClient();
 
 const DEFAULT_FREE_QUOTA_MB = Number(process.env.MEGA_FREE_QUOTA_MB) || 20480;
 
-async function ensureProxyOrThrow({ accountId, ctx, maxTries = 10 } = {}) {
-  let lastErr = null;
-  for (let i = 0; i < maxTries; i++) {
-    const p = getStickyProxyForAccount({ id: accountId }, i);
-    if (!p) {
-      throw new Error(`[VALIDAR][PROXY] Sin proxies válidos (no se permite IP directa)${ctx ? ` ${ctx}` : ''}`);
-    }
-    try {
-      const r = await applyMegaProxy(p, { ctx: ctx || 'validate:last', timeoutMs: 15000, clearOnFail: false });
-      if (r?.enabled) {
-        log.info(`[VALIDAR][PROXY][OK] ${p.proxyUrl}${ctx ? ` ${ctx}` : ''}`);
-        return p;
-      }
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-  throw new Error(`[VALIDAR][PROXY] Ningún proxy funcionó (no se permite IP directa). lastErr=${String(lastErr?.message || lastErr || '').slice(0, 160)}`);
-}
+// ensureProxyOrThrow ya no es necesario: megaLoginFull maneja proxy + rotación internamente
 
 // runCmd y parseSizeToMB ahora vienen de módulos centralizados (megaCmd.js, megaDfParser.js)
 
@@ -98,30 +79,12 @@ export async function runValidateLastMeAccount() {
     let storageSource = 'none';
 
     await withMegaLock(async () => {
-      await ensureProxyOrThrow({ accountId: account.id, ctx: accCtx, maxTries: 10 });
-
-      // Limpiar sesión previa (ignorar errores)
-      try { await runCmd(logoutCmd, []); } catch {}
-
-      // Login
-      try {
-        /* CÓDIGO ANTERIOR RESPALDADO
-        if (payload?.type === 'session' && payload.session) {
-          await runCmd(loginCmd, [payload.session]);
-        } else if (payload?.username && payload?.password) {
-          await runCmd(loginCmd, [payload.username, payload.password]);
-        } else {
-          throw new Error('Payload de credenciales inválido');
-        }
-        log.info(`[VALIDAR][LOGIN][OK] id=${account.id} alias=${account.alias}`);
-        */
-        const loginResult = await loginWithSessionCache(prisma, runCmd, account.id, payload, accCtx);
-        log.info(`[VALIDAR][LOGIN][OK] id=${account.id} alias=${account.alias} metodo=${loginResult.method}`);
-      } catch (e) {
-        const msg = String(e.message || '').toLowerCase();
-        if (!msg.includes('already logged in')) throw e;
-        log.warn(`[VALIDAR][LOGIN][OMITIDO] sesión ya activa para id=${account.id}`);
-      }
+      // megaLoginFull maneja: proxy, logout preventivo, session cache, retry, reset servidor
+      await megaLoginFull(prisma, account.id, payload, accCtx, {
+        skipStorageRefresh: true,  // este script hace su propia recolección de métricas
+        maxProxyRetries: 10,
+      });
+      log.info(`[VALIDAR][LOGIN][OK] id=${account.id} alias=${account.alias}`);
 
       if (base && base !== '/') {
         try { await runCmd(mkdirCmd, ['-p', base]); log.verbose(`[VALIDAR][MKDIR] carpetaBase=${base}`); } catch {}
@@ -241,17 +204,7 @@ export async function runValidateLastMeAccount() {
   } finally {
     // Evitar mega-logout si no podemos asegurar proxy (no se permite IP directa)
     try {
-      await withMegaLock(async () => {
-        try {
-          await ensureProxyOrThrow({ accountId: account?.id, ctx: 'validate:last cleanup', maxTries: 3 });
-          /* CÓDIGO ANTERIOR RESPALDADO
-          await runCmd('mega-logout', []);
-          */
-          await runCmd('mega-logout', ['--keep-session']);
-        } catch {
-          // skip cleanup
-        }
-      }, 'VALIDATE-LAST-CLEANUP');
+      await megaLogoutSafe('validate:last cleanup');
     } catch {}
     try { await prisma.$disconnect(); } catch {}
   log.info(`[VALIDAR][FIN] duracionMs=${Date.now()-tStart}`);

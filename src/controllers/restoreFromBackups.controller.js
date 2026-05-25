@@ -7,6 +7,8 @@ import { megaCmdWithProgressAndStall, isMegaStallError } from '../utils/megaTran
 import path from 'path'
 import fs from 'fs'
 import { runCmd } from '../utils/megaCmd.js'
+import { megaLoginFull, megaLogoutSafe } from '../utils/megaSession.js'
+import { parseStorageFromDfText } from '../utils/megaDfParser.js'
 
 const prisma = new PrismaClient()
 const UPLOADS_DIR = path.resolve('uploads')
@@ -128,82 +130,12 @@ async function ensureProxyOrThrow(ctx, account = null) {
   throw new Error(`[RESTORE][PROXY] Ningún proxy funcionó. lastErr=${String(lastErr?.message || lastErr || '').slice(0, 160)}`);
 }
 
-async function megaLogin(payload, accCtx) {
-  try {
-    const ctx = accCtx ? ` ${accCtx}` : ''
-    if (payload?.type === 'session' && payload.session) {
-      log.info(`[MEGA][LOGIN] usando session${ctx}`)
-      await runCmd('mega-login', [payload.session], { quiet: true })
-    } else if (payload?.username && payload?.password) {
-      log.info(`[MEGA][LOGIN] usando usuario/password${ctx}`)
-      await runCmd('mega-login', [payload.username, payload.password], { quiet: true })
-    } else throw new Error('Credenciales inválidas')
-    log.info(`[MEGA][LOGIN][OK]${ctx}`)
-  } catch (e){
-    log.error('[MEGA][LOGIN][FAIL] '+e.message + (accCtx?` ${accCtx}`:''))
-    throw e
-  }
-}
-
-async function megaLogout(accCtx) {
-  const ctx = accCtx?` ${accCtx}`:''
-  try { await runCmd('mega-logout', [], { quiet: true }); log.info(`[MEGA][LOGOUT][OK]${ctx}`) } catch (e){ log.warn('[MEGA][LOGOUT][WARN] '+e.message + ctx) }
-}
-
 function pickFirstFileFromLs(lsOut){
   // mega-ls salida típica: nombres en líneas; ignorar directorios sin punto si no hay extensión.
   const lines = String(lsOut).split(/\r?\n/).map(l=>l.trim()).filter(Boolean)
   // Preferir archivos con extensión
   const withExt = lines.filter(l => /\.[A-Za-z0-9]{1,10}$/.test(l))
   return (withExt[0] || lines[0]) || null
-}
-
-function parseSizeToMB(str) {
-  if (!str) return 0
-  const s = String(str).trim().toUpperCase()
-  const m = s.match(/([0-9.,]+)\s*([KMGT]?B)?/)
-  if (!m) return 0
-  const num = parseFloat(m[1].replace(',', '.'))
-  const unit = m[2] || 'B'
-  const factor = unit === 'B' ? 1 / (1024 * 1024) : unit === 'KB' ? 1 / 1024 : unit === 'MB' ? 1 : unit === 'GB' ? 1024 : unit === 'TB' ? 1024 * 1024 : 1 / (1024 * 1024)
-  return Math.round(num * factor)
-}
-
-function parseDfText(txtRaw) {
-  const txt = String(txtRaw || '')
-  let storageUsedMB = 0
-  let storageTotalMB = 0
-
-  let m =
-    txt.match(/(?:USED\s+STORAGE|ALMACENAMIENTO\s+USADO):\s*([0-9.,]+(?:\s*[KMGT]?B)?)\s+[0-9.,]+%?\s+(?:of|de)\s+([0-9.,]+(?:\s*[KMGT]?B)?)/i) ||
-    txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i) ||
-    txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i) ||
-    txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i) ||
-    txt.match(/almacenamiento\s+de\s+la\s+cuenta\s*:\s*([^\n]+?)\s*de\s*([^\n]+)/i) ||
-    txt.match(/almacenamiento\s*:\s*([\d.,]+\s*[KMGT]?B)\s*de\s*([\d.,]+\s*[KMGT]?B)/i)
-
-  if (m) {
-    storageUsedMB = parseSizeToMB(m[1])
-    storageTotalMB = parseSizeToMB(m[2])
-  }
-
-  if (!storageTotalMB) {
-    const p =
-      txt.match(/storage[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:of|de)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:used|usado)?/i) ||
-      txt.match(/almacenamiento[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:de|of)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:usado|used)?/i)
-    if (p) {
-      storageTotalMB = parseSizeToMB(p[2])
-      const pct = parseFloat(String(p[1]).replace(',', '.'))
-      if (!Number.isNaN(pct) && Number.isFinite(pct) && storageTotalMB > 0) {
-        storageUsedMB = Math.round((pct / 100) * storageTotalMB)
-      }
-    }
-  }
-
-  if (!storageTotalMB || storageTotalMB <= 0) storageTotalMB = DEFAULT_FREE_QUOTA_MB
-  if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB
-
-  return { storageUsedMB, storageTotalMB }
 }
 
 async function refreshAccountStorageInCurrentSession(accountId, ctx = '') {
@@ -215,7 +147,7 @@ async function refreshAccountStorageInCurrentSession(accountId, ctx = '') {
   try {
     const out = await runCmd('mega-df', ['-h'], { quiet: true })
     const txt = (out.out || out.err || '').toString()
-    const parsed = parseDfText(txt)
+    const parsed = parseStorageFromDfText(txt)
     const updated = await prisma.megaAccount.update({
       where: { id },
       data: {
@@ -234,7 +166,7 @@ async function refreshAccountStorageInCurrentSession(accountId, ctx = '') {
   try {
     const out = await runCmd('mega-df', [], { quiet: true })
     const txt = (out.out || out.err || '').toString()
-    const parsed = parseDfText(txt)
+    const parsed = parseStorageFromDfText(txt)
     const updated = await prisma.megaAccount.update({
       where: { id },
       data: {
@@ -302,8 +234,8 @@ export const syncBackupsToMain = async (req, res) => {
     await withMegaLock(async () => {
       await applyProxyByIndexOrThrow(main, getProxyIndex(), buildCtx(main))
       const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
-      await megaLogout(buildCtx(main))
-      await megaLogin(payload, buildCtx(main))
+      await megaLogoutSafe(buildCtx(main))
+      await megaLoginFull(prisma, main.id, payload, buildCtx(main), { skipStorageRefresh: true, skipProxySetup: true })
       for (let i=0;i<candidateAssets.length;i++){
         const asset = candidateAssets[i]
         const idx = i+1
@@ -343,7 +275,7 @@ export const syncBackupsToMain = async (req, res) => {
           log.info(`[RESTORE][SCAN] (${idx}/${total}) falta asset=${asset.id}`)
         }
       }
-      await megaLogout(buildCtx(main))
+      await megaLogoutSafe(buildCtx(main))
     }, 'RESTORE-PHASE1')
 
     // =============== FASE 2: DESCARGA BACKUPS (1 login por backup usado) ===============
@@ -354,8 +286,8 @@ export const syncBackupsToMain = async (req, res) => {
         await withMegaLock(async () => {
           const bCtx = buildCtx(b)
           const reloginB = async () => {
-            await megaLogout(bCtx)
-            await megaLogin(payloadB, bCtx)
+            await megaLogoutSafe(bCtx)
+            await megaLoginFull(prisma, b.id, payloadB, bCtx, { skipStorageRefresh: true, skipProxySetup: true })
           }
 
           await applyProxyByIndexOrThrow(b, getProxyIndex(), bCtx)
@@ -402,7 +334,7 @@ export const syncBackupsToMain = async (req, res) => {
           } catch (e) {
             log.warn(`[RESTORE][METRICS][WARN] backup=${b.id} no actualizado: ${String(e?.message || e).slice(0, 200)}`)
           }
-          await megaLogout(buildCtx(b))
+          await megaLogoutSafe(buildCtx(b))
         }, `RESTORE-DL-${b.id}`)
       }
     }
@@ -416,8 +348,8 @@ export const syncBackupsToMain = async (req, res) => {
         const mainCtx = buildCtx(main)
         const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
         const reloginMain = async () => {
-          await megaLogout(mainCtx)
-          await megaLogin(payload, mainCtx)
+          await megaLogoutSafe(mainCtx)
+          await megaLoginFull(prisma, main.id, payload, mainCtx, { skipStorageRefresh: true, skipProxySetup: true })
         }
 
         await applyProxyByIndexOrThrow(main, getProxyIndex(), mainCtx)
@@ -458,7 +390,7 @@ export const syncBackupsToMain = async (req, res) => {
         } catch (e) {
           log.warn(`[RESTORE][METRICS][WARN] main=${main.id} no actualizada: ${String(e?.message || e).slice(0, 200)}`)
         }
-        await megaLogout(mainCtx)
+        await megaLogoutSafe(mainCtx)
       }
     }, 'RESTORE-PHASE3')
 

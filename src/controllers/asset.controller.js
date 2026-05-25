@@ -13,6 +13,7 @@ import { applyMegaProxy, listMegaProxies, getStickyProxyForAccount } from '../ut
 import { createPartFromBase64, GoogleGenAI, PartMediaResolutionLevel } from '@google/genai';
 import qdrantMultimodalService from '../services/qdrantMultimodal.service.js';
 import { parseSizeToMB, parseStorageFromDfText } from '../utils/megaDfParser.js';
+import { megaLoginFull, megaLogoutSafe } from '../utils/megaSession.js';
 import { megaMenuCache } from '../utils/memoryCache.js';
 import { buildNsfwWhere, buildNsfwCategoryWhere, isAssetNSFW as isAssetNSFWBackend } from '../middlewares/nsfwFilter.js';
 
@@ -2226,31 +2227,16 @@ async function applyAnyWorkingProxyOrThrow(role, proxies, ctx, maxTries = 10) {
 
 /** Cerrar sesión MEGA de forma segura (ignorar errores). */
 async function megaLogoutBestEffort(ctx) {
-    try {
-        await runCmd('mega-logout', []);
-        console.log(`[MEGA][LOGOUT][OK] ${ctx}`);
-    } catch {
-        console.log(`[MEGA][LOGOUT][WARN] ${ctx}`);
-    }
+    await megaLogoutSafe(ctx);
 }
 
 /** Iniciar sesión MEGA con credenciales (session string o user/pass). */
 async function megaLoginOrThrow(payload, ctx, accountId = null, timeoutMs = null) {
-    const loginCmd = 'mega-login';
-    const finalTimeout = timeoutMs || Number(process.env.MEGA_LOGIN_TIMEOUT_MS) || 60000;
-    if (accountId) {
-        await loginWithSessionCache(prisma, runCmdCapture, accountId, payload, ctx, finalTimeout);
-    } else {
-        if (payload?.type === 'session' && payload.session) {
-            console.log(`[MEGA][LOGIN] session ${ctx}`);
-            await runCmd(loginCmd, [payload.session], { timeoutMs: finalTimeout });
-        } else if (payload?.username && payload?.password) {
-            console.log(`[MEGA][LOGIN] user/pass ${ctx}`);
-            await runCmd(loginCmd, [payload.username, payload.password], { timeoutMs: finalTimeout });
-        } else {
-            throw new Error('Invalid credentials payload');
-        }
-    }
+    await megaLoginFull(prisma, accountId, payload, ctx, {
+        timeoutMs: timeoutMs || Number(process.env.MEGA_LOGIN_TIMEOUT_MS) || 60000,
+        skipStorageRefresh: true,   // asset operations refresh storage separately
+        skipProxySetup: true,       // asset.controller manages its own proxy via applyAnyWorkingProxyOrThrow
+    });
     console.log(`[MEGA][LOGIN][OK] ${ctx}`);
 }
 /** Listar réplicas de un asset con estado y progreso. GET /api/assets/:id/replicas */
