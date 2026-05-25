@@ -33,6 +33,9 @@ import {
 } from '../utils/batchProxySwitch.js'
 import qdrantMultimodalService from '../services/qdrantMultimodal.service.js'
 import { loginWithSessionCache } from '../utils/megaSessionHelper.js'
+import { runCmd, attachAutoAcceptTerms } from '../utils/megaCmd.js'
+import { parseSizeToMB, parseStorageFromDfText } from '../utils/megaDfParser.js'
+import { killProcessTreeBestEffort } from '../utils/megaTransfer.js'
 
 const prisma = new PrismaClient()
 const UPLOADS_DIR  = path.resolve('uploads')
@@ -116,48 +119,7 @@ function toSafeNumber(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback
 }
 
-function parseSizeToMB(str) {
-  if (!str) return 0
-  const s = String(str).trim().toUpperCase()
-  const m = s.match(/([0-9.,]+)\s*([KMGT]?B)?/)
-  if (!m) return 0
-  const num = parseFloat(m[1].replace(',', '.'))
-  const unit = m[2] || 'B'
-  const factor = unit === 'B' ? 1 / (1024 * 1024) : unit === 'KB' ? 1 / 1024 : unit === 'MB' ? 1 : unit === 'GB' ? 1024 : unit === 'TB' ? 1024 * 1024 : 1 / (1024 * 1024)
-  return Math.round(num * factor)
-}
-
-function parseStorageFromMegaDfText(txt) {
-  const text = String(txt || '')
-  let used = 0
-  let total = 0
-
-  let m = text.match(/(?:USED\s+STORAGE|ALMACENAMIENTO\s+USADO):\s*([0-9.,]+(?:\s*[KMGT]?B)?)\s+[0-9.,]+%?\s+(?:of|de)\s+([0-9.,]+(?:\s*[KMGT]?B)?)/i)
-    || text.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i)
-    || text.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i)
-    || text.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i)
-    || text.match(/almacenamiento\s+de\s+la\s+cuenta\s*:\s*([^\n]+?)\s*de\s*([^\n]+)/i)
-    || text.match(/almacenamiento\s*:\s*([\d.,]+\s*[KMGT]?B)\s*de\s*([\d.,]+\s*[KMGT]?B)/i)
-
-  if (m) {
-    used = parseSizeToMB(m[1])
-    total = parseSizeToMB(m[2])
-  }
-
-  if (!total) {
-    const p = text.match(/storage[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:of|de)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:used|usado)?/i)
-      || text.match(/almacenamiento[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:de|of)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:usado|used)?/i)
-    if (p) {
-      total = parseSizeToMB(p[2])
-      const pct = parseFloat(String(p[1]).replace(',', '.'))
-      if (!Number.isNaN(pct) && Number.isFinite(pct)) {
-        used = Math.round((pct / 100) * total)
-      }
-    }
-  }
-
-  return { used, total }
-}
+// parseSizeToMB y parseStorageFromDfText ahora vienen de módulos centralizados (megaDfParser.js)
 
 function getSessionUploadedMb(accountId) {
   const id = Number(accountId) || 0
@@ -236,20 +198,20 @@ async function refreshMainAccountStorageMetrics(mainAccount, extraCtx = '') {
       await ensureMegaSessionForAccount(payload, accountId, ctx)
 
       try {
-        const out = await runCmd('mega-df', ['-h'])
-        const parsed = parseStorageFromMegaDfText(out)
-        storageUsedMB = parsed.used
-        storageTotalMB = parsed.total
+        const { out } = await runCmd('mega-df', ['-h'])
+        const parsed = parseStorageFromDfText(out)
+        storageUsedMB = parsed.storageUsedMB
+        storageTotalMB = parsed.storageTotalMB
       } catch (e) {
         console.warn(`[BATCH][ACCOUNT][REFRESH][WARN] mega-df -h accId=${accountId}: ${e.message}`)
       }
 
       if (!storageTotalMB) {
         try {
-          const out = await runCmd('mega-df', [])
-          const parsed = parseStorageFromMegaDfText(out)
-          storageUsedMB = parsed.used
-          storageTotalMB = parsed.total
+          const { out } = await runCmd('mega-df', [])
+          const parsed = parseStorageFromDfText(out)
+          storageUsedMB = parsed.storageUsedMB
+          storageTotalMB = parsed.storageTotalMB
         } catch (e) {
           console.warn(`[BATCH][ACCOUNT][REFRESH][WARN] mega-df accId=${accountId}: ${e.message}`)
         }
@@ -257,7 +219,7 @@ async function refreshMainAccountStorageMetrics(mainAccount, extraCtx = '') {
 
       if (!storageUsedMB) {
         try {
-          const out = await runCmd('mega-du', ['-h', baseFolder || '/'])
+          const { out } = await runCmd('mega-du', ['-h', baseFolder || '/'])
           const mm = String(out || '').match(/[\r\n]*\s*([\d.,]+\s*[KMGT]?B)/i) || String(out || '').match(/([\d.,]+\s*[KMGT]?B)/i)
           if (mm) storageUsedMB = parseSizeToMB(mm[1])
         } catch (e) {
@@ -300,49 +262,7 @@ async function refreshMainAccountStorageMetrics(mainAccount, extraCtx = '') {
   }
 }
 
-function runCmd(cmd, args = [], opts = {}) {
-  return new Promise((resolve, reject) => {
-    const timeoutMs = Number(opts?.timeoutMs || MEGA_CMD_TIMEOUT_MS)
-    const child = spawn(cmd, args, { shell: true })
-    let out = '', err = ''
-    let settled = false
-    let timer = null
-
-    const cleanup = () => {
-      if (timer) clearTimeout(timer)
-      timer = null
-    }
-
-    const fail = (error) => {
-      if (settled) return
-      settled = true
-      cleanup()
-      reject(error)
-    }
-
-    const ok = (value) => {
-      if (settled) return
-      settled = true
-      cleanup()
-      resolve(value)
-    }
-
-    if (timeoutMs > 0) {
-      timer = setTimeout(() => {
-        const toKill = Number(child?.pid || 0)
-        try { if (toKill) killProcessTreeBestEffort(child, `RUN-CMD ${cmd}`) } catch {}
-        fail(new Error(`${cmd} timeout after ${timeoutMs}ms`))
-      }, timeoutMs)
-    }
-
-    child.stdout.on('data', d => (out += d.toString()))
-    child.stderr.on('data', d => (err += d.toString()))
-    child.on('error', (e) => fail(new Error(`${cmd} spawn error: ${e.message}`)))
-    child.on('close', code =>
-      code === 0 ? ok(out) : fail(new Error(`${cmd} exited ${code}: ${(err || out).slice(0, 300)}`))
-    )
-  })
-}
+// runCmd ahora viene del módulo centralizado (megaCmd.js)
 
 // Resolver la ruta de 7z según el SO
 const SEVEN_ZIP = (() => {
@@ -411,33 +331,7 @@ async function extractArchiveWithFallback(archivePath, extractDir) {
   }
 }
 
-function killProcessTreeBestEffort(child, label) {
-  try {
-    if (!child?.pid) return
-    if (process.platform === 'win32') {
-      try { spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { shell: true }) } catch {}
-    } else {
-      try { process.kill(-child.pid, 'SIGKILL') } catch {}
-      try { child.kill('SIGKILL') } catch {}
-    }
-    console.warn(`[${label}] kill sent pid=${child.pid}`)
-  } catch {}
-}
-
-function attachAutoAcceptTerms(child, label = 'MEGA') {
-  const EOL = '\n'
-  const ACCEPT_RE = [/Do you accept.*terms\??/i, /Type '\s*yes\s*' to continue/i]
-  const PROMPT_YNA = /\[y\]es\s*\/\s*\[n\]o\s*\/\s*\[a\]ll/i
-  const PROMPT_YN  = /\[(y|Y)\]es\s*\/\s*\[(n|N)\]o/i
-  const safeWrite = (txt) => { try { child.stdin.write(txt) } catch {} }
-  const check = (s) => {
-    if (ACCEPT_RE.some(r => r.test(s))) safeWrite('yes' + EOL)
-    if (PROMPT_YNA.test(s)) safeWrite('a' + EOL)
-    else if (PROMPT_YN.test(s)) safeWrite('y' + EOL)
-  }
-  child.stdout.on('data', d => check(d.toString()))
-  child.stderr.on('data', d => check(d.toString()))
-}
+// killProcessTreeBestEffort y attachAutoAcceptTerms ahora vienen de módulos centralizados
 
 async function safeMkdir(remotePath) {
   try { await runCmd('mega-mkdir', ['-p', remotePath]) } catch {}

@@ -1,13 +1,15 @@
 import { PrismaClient } from '@prisma/client'
 import { decryptToJson } from './cryptoUtils.js'
 import { withMegaLock } from './megaQueue.js'
-import { spawn, execSync } from 'child_process'
+import { execSync } from 'child_process'
 import path from 'path'
 import fs from 'fs'
 import { fileURLToPath } from 'url'
 import { log } from './logger.js'
 import { loginWithSessionCache } from './megaSessionHelper.js'
 import { applyMegaProxy, getStickyProxyForAccount } from './megaProxy.js'
+import { runCmd } from './megaCmd.js'
+import { parseSizeToMB, parseStorageFromDfText } from './megaDfParser.js'
 
 /*
   Script: validateAssetsOnLastAccount (FINAL V3 - ZOMBIE KILLER EDITION)
@@ -132,44 +134,7 @@ function getAccountKey(acc){
   return `id=${acc.id ?? 'NA'}|email=${acc.email ?? 'NA'}`;
 }
 
-function runCmd(cmd, args = [], { quiet = false, timeoutMs = 0 } = {}) {
-  const printable = `${cmd} ${(args || []).join(' ')}`.trim();
-  log.verbose(`[CRON] cmd ${printable}`);
-  return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { shell: true });
-    let out = '', err = '';
-    let settled = false;
-    let timer = null;
-
-    if (timeoutMs > 0) {
-      timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        try { child.kill('SIGKILL'); } catch {} 
-        const msg = `TIMEOUT ${cmd} after ${timeoutMs}ms`;
-        if (!quiet) log.warn(`[CRON] ${msg}`);
-        reject(new Error(msg));
-      }, timeoutMs);
-    }
-
-    child.stdout.on('data', d => out += d.toString());
-    child.stderr.on('data', d => err += d.toString());
-
-    child.on('close', code => {
-      if (timer) clearTimeout(timer);
-      if (settled) return;
-      settled = true;
-      if (code === 0) return resolve({ out, err });
-      if (!quiet && !err.includes('No proxy')) log.warn(`[CRON] fallo cmd ${cmd} code=${code} msg=${(err || out).slice(0, 160)}`);
-      reject(new Error(err || out || `${cmd} exited ${code}`));
-    });
-    
-    child.on('error', e => {
-        if (timer) clearTimeout(timer);
-        if (!settled) { settled = true; reject(e); }
-    });
-  });
-}
+// runCmd ahora viene del módulo centralizado (megaCmd.js)
 
 function pickFirstFileFromLs(lsOut){
   const lines = String(lsOut).split(/\r?\n/).map(l=>l.trim()).filter(Boolean)
@@ -179,16 +144,7 @@ function pickFirstFileFromLs(lsOut){
 
 function sleep(ms){ return new Promise(r=>setTimeout(r, ms)) }
 
-function parseSizeToMB(str){
-  if (!str) return 0
-  const s = String(str).trim().toUpperCase()
-  const m = s.match(/([0-9.,]+)\s*([KMGT]?B)?/)
-  if (!m) return 0
-  const num = parseFloat(m[1].replace(',', '.'))
-  const unit = m[2] || 'B'
-  const factor = unit === 'B' ? 1/(1024*1024) : unit === 'KB' ? 1/1024 : unit === 'MB' ? 1 : unit === 'GB' ? 1024 : unit === 'TB' ? 1024*1024 : 1/(1024*1024)
-  return Math.round(num * factor)
-}
+// parseSizeToMB ahora viene del módulo centralizado (megaDfParser.js)
 
 function truncateBody(s, max = 0) {
   if (s == null) return null;
@@ -220,9 +176,7 @@ async function notifyAutomationError({ title, body }) {
   }
 }
 
-function stripAnsi(s='') {
-  return String(s).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
-}
+// stripAnsi ahora viene del módulo centralizado (megaDfParser.js lo aplica internamente)
 
 async function getAccountMetrics(base){
   // base se deja por compatibilidad (por si luego se usa mega-du/mega-find)
@@ -233,42 +187,18 @@ async function getAccountMetrics(base){
   let txt = '';
   try {
     const df = await runCmd('mega-df', ['-h'], { quiet: true, timeoutMs: 15000 });
-    txt = stripAnsi((df.out || df.err || '').toString());
+    txt = (df.out || df.err || '').toString();
 
-    // Formato nuevo (MEGAcmd recientes):
-    //   USED STORAGE: 18.11 GB  90.53% of 20.00 GB
-    let m = txt.match(/(?:USED\s+STORAGE|ALMACENAMIENTO\s+USADO):\s*([0-9.,]+(?:\s*[KMGT]?B)?)\s+[0-9.,]+%?\s+(?:of|de)\s+([0-9.,]+(?:\s*[KMGT]?B)?)/i) || 
-            txt.match(/USED\s+STORAGE:\s*([\d.,]+\s*[KMGT]?B).*?\bof\s*([\d.,]+\s*[KMGT]?B)/i);
-    if (!m) {
-      // fallback por si cambia el wording
-      m = txt.match(/\bUSED\s+STORAGE\b.*?([\d.,]+\s*[KMGT]?B).*?\bof\s*([\d.,]+\s*[KMGT]?B)/i);
-    }
-    if (m) {
-      storageUsedMB = parseSizeToMB(m[1]);
-      storageTotalMB = parseSizeToMB(m[2]);
-      storageSource = 'df -h USED STORAGE';
-    }
+    // Parser centralizado con todos los regex EN/ES + ANSI strip
+    const parsed = parseStorageFromDfText(txt);
+    storageUsedMB = parsed.storageUsedMB;
+    storageTotalMB = parsed.storageTotalMB;
+    fileCount = parsed.fileCount;
+    folderCount = parsed.folderCount;
+    if (storageTotalMB) storageSource = 'df -h USED STORAGE';
 
-    const c = txt.match(/Cloud\s+drive:\s*[\d.,]+\s*[KMGT]?B\s+in\s+(\d+)\s+file\(s\)\s+and\s+(\d+)\s+folder\(s\)/i);
-    if (c) {
-      fileCount = Number(c[1]) || 0;
-      folderCount = Number(c[2]) || 0;
-      if (storageSource === 'none') storageSource = 'df -h Cloud drive';
-    }
-
-    // Fallback a formatos antiguos que el script ya soportaba (por si el output cambia)
-    if (!storageTotalMB) {
-      const mf = txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i)
-        || txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i)
-        || txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i);
-      if (mf) {
-        storageUsedMB = parseSizeToMB(mf[1]);
-        storageTotalMB = parseSizeToMB(mf[2]);
-        storageSource = storageSource === 'none' ? 'df -h fallback' : storageSource;
-      }
-    }
-
-    if (storageSource === 'none') {
+    // Fallback a formatos más antiguos (si el parser centralizado no encontró total)
+    if (!storageTotalMB && storageSource === 'none') {
       log.warn(`[METRICS] No pude parsear mega-df -h. Output (first 400): ${txt.slice(0,400)}`);
     }
   } catch (e) {

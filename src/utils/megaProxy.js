@@ -1,56 +1,13 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { spawn } from 'child_process';
 import { log, isVerbose } from './logger.js';
+import { runCmd } from './megaCmd.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PROXY_FILE = path.join(__dirname, 'proxies.txt');
 
 let LAST_APPLIED = null; // { proxyUrl, username, password, raw }
-
-function runCmd(cmd, args = [], { quiet = false, timeoutMs = 0 } = {}) {
-  const verbose = typeof isVerbose === 'function' && isVerbose();
-  if (!quiet && verbose) {
-    log.verbose(`[MEGA-PROXY] cmd ${cmd} ${(args || []).join(' ')}`);
-  }
-
-  return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { shell: true });
-    let out = '';
-    let err = '';
-    let settled = false;
-    let timer = null;
-
-    if (timeoutMs > 0) {
-      timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        try { child.kill('SIGKILL'); } catch {}
-        reject(new Error(`${cmd} timeout after ${timeoutMs}ms`));
-      }, timeoutMs);
-    }
-
-    child.stdout.on('data', d => { out += d.toString(); });
-    child.stderr.on('data', d => { err += d.toString(); });
-
-    child.on('close', code => {
-      if (timer) clearTimeout(timer);
-      if (settled) return;
-      settled = true;
-      if (code === 0) return resolve({ out, err });
-      reject(new Error(err || out || `${cmd} exited ${code}`));
-    });
-
-    child.on('error', e => {
-      if (timer) clearTimeout(timer);
-      if (!settled) {
-        settled = true;
-        reject(e);
-      }
-    });
-  });
-}
 
 function readProxyLines(proxyFile = DEFAULT_PROXY_FILE) {
   try {

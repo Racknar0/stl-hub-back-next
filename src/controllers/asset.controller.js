@@ -12,6 +12,7 @@ import { maybeCheckMegaOnVisit } from '../utils/megaCheckFiles/visitTriggeredMeg
 import { applyMegaProxy, listMegaProxies, getStickyProxyForAccount } from '../utils/megaProxy.js';
 import { createPartFromBase64, GoogleGenAI, PartMediaResolutionLevel } from '@google/genai';
 import qdrantMultimodalService from '../services/qdrantMultimodal.service.js';
+import { parseSizeToMB, parseStorageFromDfText } from '../utils/megaDfParser.js';
 import { megaMenuCache } from '../utils/memoryCache.js';
 import { buildNsfwWhere, buildNsfwCategoryWhere, isAssetNSFW as isAssetNSFWBackend } from '../middlewares/nsfwFilter.js';
 
@@ -2093,25 +2094,7 @@ function killProcessTreeBestEffort(child, label = 'PROC') {
     } catch {}
 }
 
-function parseSizeToMB(str) {
-    if (!str) return 0;
-    const s = String(str).trim().toUpperCase();
-    const m = s.match(/([0-9.,]+)\s*([KMGT]?B)?/);
-    if (!m) return 0;
-    const num = parseFloat(m[1].replace(',', '.'));
-    const unit = m[2] || 'B';
-    const factor =
-        unit === 'KB'
-            ? 1 / 1024
-            : unit === 'MB'
-              ? 1
-              : unit === 'GB'
-                ? 1024
-                : unit === 'TB'
-                  ? 1024 * 1024
-                  : 1 / (1024 * 1024);
-    return Math.round(num * factor);
-}
+// parseSizeToMB ahora viene del módulo centralizado (megaDfParser.js)
 
 /** Ejecutar comando de sistema con timeout y captura de stdout/stderr. */
 async function runCmdCapture(cmd, args = [], { timeoutMs = 15000, maxBytes = 1024 * 1024 } = {}) {
@@ -2173,39 +2156,10 @@ async function refreshAccountStorageFromMegaDfInCurrentSession(accountId, ctx = 
     const DEFAULT_FREE_QUOTA_MB = Number(process.env.MEGA_FREE_QUOTA_MB) || 20480;
     const label = ctx ? ` ${ctx}` : '';
     const parseDfText = (txtRaw) => {
-        const txt = String(txtRaw || '');
-        let storageUsedMB = 0;
-        let storageTotalMB = 0;
-
-        let m =
-            txt.match(/(?:USED\s+STORAGE|ALMACENAMIENTO\s+USADO):\s*([0-9.,]+(?:\s*[KMGT]?B)?)\s+[0-9.,]+%?\s+(?:of|de)\s+([0-9.,]+(?:\s*[KMGT]?B)?)/i) ||
-            txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i) ||
-            txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i) ||
-            txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i) ||
-            txt.match(/almacenamiento\s+de\s+la\s+cuenta\s*:\s*([^\n]+?)\s*de\s*([^\n]+)/i) ||
-            txt.match(/almacenamiento\s*:\s*([\d.,]+\s*[KMGT]?B)\s*de\s*([\d.,]+\s*[KMGT]?B)/i);
-
-        if (m) {
-            storageUsedMB = parseSizeToMB(m[1]);
-            storageTotalMB = parseSizeToMB(m[2]);
-        }
-
-        if (!storageTotalMB) {
-            const p =
-                txt.match(/storage[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:of|de)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:used|usado)?/i) ||
-                txt.match(/almacenamiento[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:de|of)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:usado|used)?/i);
-            if (p) {
-                storageTotalMB = parseSizeToMB(p[2]);
-                const pct = parseFloat(String(p[1]).replace(',', '.'));
-                if (!Number.isNaN(pct) && Number.isFinite(pct) && storageTotalMB > 0) {
-                    storageUsedMB = Math.round((pct / 100) * storageTotalMB);
-                }
-            }
-        }
-
+        const parsed = parseStorageFromDfText(txtRaw);
+        let { storageUsedMB, storageTotalMB } = parsed;
         if (!storageTotalMB || storageTotalMB <= 0) storageTotalMB = DEFAULT_FREE_QUOTA_MB;
         if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB;
-
         return { storageUsedMB, storageTotalMB };
     };
 

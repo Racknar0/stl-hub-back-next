@@ -6,6 +6,8 @@ import { spawn } from 'child_process';
 import { withMegaLock } from '../utils/megaQueue.js';
 import { applyMegaProxy, listMegaProxies, clearMegaProxyIfSafe, getStickyProxyForAccount } from '../utils/megaProxy.js';
 import { megaCmdWithProgressAndStall, isMegaStallError } from '../utils/megaTransfer.js';
+import { runCmd, attachAutoAcceptTerms } from '../utils/megaCmd.js';
+import { parseSizeToMB, parseStorageFromDfText } from '../utils/megaDfParser.js';
 import path from 'path';
 import fs from 'fs';
 
@@ -166,121 +168,11 @@ async function megaPutWithStallRetry({ localPath, remoteFolderOrFile, ctx, accou
   }
 }
 
-function attachAutoAcceptTerms(child, label = 'MEGA') {
-  const EOL = '\n';
-  const ACCEPT_REGEXES = [
-    /Do you accept\s+these\s+terms\??/i,
-    /Do you accept.*terms\??/i,
-    /Type '\s*yes\s*' to continue/i,
-    /Acepta[s]? .*t[ée]rminos\??/i,
-    /¿Acepta[s]? los t[ée]rminos\??/i,
-  ];
-  const PROMPT_YNA = /Please enter \[y\]es\/\[n\]o\/\[a\]ll\/none|\[(y|Y)\]es\s*\/\s*\[(n|N)\]o\s*\/\s*\[(a|A)\]ll/i;
-  const PROMPT_YN = /\[(y|Y)\]es\s*\/\s*\[(n|N)\]o/i;
-  const PROMPT_ES_SN = /\[(s|S)\]\s*\/\s*\[(n|N)\]/i;
+// attachAutoAcceptTerms ahora viene del módulo centralizado (megaCmd.js)
 
-  const maybeAnswer = (s) => {
-    try {
-      if (ACCEPT_REGEXES.some(r => r.test(s))) child.stdin.write('yes' + EOL);
-      else if (PROMPT_YNA.test(s)) child.stdin.write('a' + EOL);
-      else if (PROMPT_YN.test(s)) child.stdin.write('y' + EOL);
-      else if (PROMPT_ES_SN.test(s)) child.stdin.write('s' + EOL);
-    } catch (e) {
-      // No es crítico; sólo evita cuelgues por prompts
-      try { log.warn(`[${label}] auto-accept warn: ${e.message}`) } catch {}
-    }
-  };
+// runCmd ahora viene del módulo centralizado (megaCmd.js)
 
-  if (!child?.stdout || !child?.stderr) return;
-  child.stdout.on('data', d => maybeAnswer(d.toString()));
-  child.stderr.on('data', d => maybeAnswer(d.toString()));
-}
-
-// Ejecuta un comando y devuelve stdout/err con logs (sin exponer credenciales) limitando tamaño
-function runCmd(cmd, args = [], { cwd, maxBytes, timeoutMs } = {}) {
-  let finalArgs = [...args];
-  if (cmd === 'mega-logout' && !args.includes('--keep-session') && !args.includes('--hard-logout')) {
-    finalArgs.push('--keep-session');
-  }
-  if (cmd === 'mega-logout' && args.includes('--hard-logout')) {
-    finalArgs = args.filter(a => a !== '--hard-logout');
-  }
-
-  const maskArgs = (c, a) => (c && c.toLowerCase().includes('mega-login') ? ['<hidden>'] : a);
-  const printable = `${cmd} ${(maskArgs(cmd, finalArgs) || []).join(' ')}`.trim();
-  if (cmd === 'mega-login') log.info('[MEGA][LOGIN] iniciando (accounts controller)')
-  if (cmd === 'mega-logout') log.info('[MEGA][LOGOUT] iniciando (accounts controller)')
-  const quiet = QUIET_MEGA_CMDS.has(cmd);
-  const verbose = typeof isVerbose === 'function' && isVerbose();
-  if (!quiet && verbose) log.verbose(`Ejecutando comando: ${printable}`);
-  return new Promise((resolve, reject) => {
-    const child = spawn(cmd, finalArgs, { cwd, shell: true });
-    // mega-login/mega-* a veces pueden pedir aceptar términos; evitar cuelgue interactivo
-    if (cmd === 'mega-login' || cmd === 'mega-export' || cmd === 'mega-put') {
-      try { attachAutoAcceptTerms(child, cmd.toUpperCase()); } catch {}
-    }
-    let out = '', err = '';
-    const limit = maxBytes || MAX_CMD_CAPTURE_BYTES;
-    let truncatedOut = false, truncatedErr = false;
-    let settled = false;
-    let to = null;
-
-    const effectiveTimeoutMs = Number(timeoutMs || 0);
-    if (effectiveTimeoutMs > 0) {
-      to = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        try { child.kill('SIGKILL') } catch {}
-        try { child.kill() } catch {}
-        log.warn(`Timeout comando ${cmd} tras ${effectiveTimeoutMs}ms`);
-        reject(new Error(`${cmd} timeout`));
-      }, effectiveTimeoutMs);
-    }
-
-    child.stdout.on('data', (d) => {
-      if (!truncatedOut) {
-        if (out.length + d.length <= limit) out += d.toString();
-        else {
-          const slice = limit - out.length; if (slice > 0) out += d.toString().slice(0, slice); truncatedOut = true;
-        }
-      }
-    });
-    child.stderr.on('data', (d) => {
-      if (!truncatedErr) {
-        if (err.length + d.length <= limit) err += d.toString();
-        else {
-          const slice = limit - err.length; if (slice > 0) err += d.toString().slice(0, slice); truncatedErr = true;
-        }
-      }
-    });
-    child.on('error', (e) => {
-      if (to) clearTimeout(to);
-      if (settled) return;
-      settled = true;
-      log.error(`Error spawn comando ${cmd}: ${e.message}`);
-      reject(e);
-    });
-    child.on('close', (code) => {
-      if (to) clearTimeout(to);
-      if (settled) return;
-      settled = true;
-      if (code === 0) {
-        if (cmd === 'mega-login') log.info('[MEGA][LOGIN][OK] (accounts controller)')
-        if (cmd === 'mega-logout') log.info('[MEGA][LOGOUT][OK] (accounts controller)')
-        if (!quiet && verbose) log.verbose(`OK comando: ${cmd}`);
-        return resolve({ out, err, truncatedOut, truncatedErr });
-      }
-      // Manejo especial: mega-mkdir code 54 = ya existe -> silenciar si no verbose
-      const msg = (err || out || '').slice(0, 500);
-      if (!(cmd === 'mega-mkdir' && /already exists/i.test(msg)) || verbose) {
-        log.error(`Error comando ${cmd} code=${code} msg=${msg}`);
-      }
-      reject(new Error(err || out || `${cmd} exited with code ${code}`));
-    });
-  });
-}
-
-// Ejecuta comando con timeout (mata el proceso si excede)
+// runCmdWithTimeout ya no es necesario; usar runCmd(cmd, args, { timeoutMs }) directamente
 async function runCmdWithTimeout(cmd, args = [], timeoutMs = 15000, options = {}) {
   return runCmd(cmd, args, { cwd: options.cwd, maxBytes: options.maxBytes, timeoutMs });
 }
@@ -338,55 +230,17 @@ async function runMegaPutWithProgress(localFile, remoteFolder, { assetId, backup
   });
 }
 
-function parseSizeToMB(str) {
-  if (!str) return 0;
-  const s = String(str).trim().toUpperCase();
-  const m = s.match(/([0-9.,]+)\s*([KMGT]?B)?/);
-  if (!m) return 0;
-  const num = parseFloat(m[1].replace(',', '.'));
-  const unit = m[2] || 'B';
-  const factor = unit === 'B' ? 1/(1024*1024) : unit === 'KB' ? 1/1024 : unit === 'MB' ? 1 : unit === 'GB' ? 1024 : unit === 'TB' ? 1024*1024 : 1/(1024*1024);
-  return Math.round(num * factor);
-}
+// parseSizeToMB ahora viene del módulo centralizado (megaDfParser.js)
 
 async function refreshAccountStorageInCurrentSession(accountId, ctx = '') {
   const id = Number(accountId);
   if (!Number.isFinite(id) || id <= 0) return null;
 
   const parseDfText = (txtRaw) => {
-    const txt = String(txtRaw || '');
-    let storageUsedMB = 0;
-    let storageTotalMB = 0;
-
-    let m =
-      txt.match(/(?:USED\s+STORAGE|ALMACENAMIENTO\s+USADO):\s*([0-9.,]+(?:\s*[KMGT]?B)?)\s+[0-9.,]+%?\s+(?:of|de)\s+([0-9.,]+(?:\s*[KMGT]?B)?)/i) ||
-      txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i) ||
-      txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i) ||
-      txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i) ||
-      txt.match(/almacenamiento\s+de\s+la\s+cuenta\s*:\s*([^\n]+?)\s*de\s*([^\n]+)/i) ||
-      txt.match(/almacenamiento\s*:\s*([\d.,]+\s*[KMGT]?B)\s*de\s*([\d.,]+\s*[KMGT]?B)/i);
-
-    if (m) {
-      storageUsedMB = parseSizeToMB(m[1]);
-      storageTotalMB = parseSizeToMB(m[2]);
-    }
-
-    if (!storageTotalMB) {
-      const p =
-        txt.match(/storage[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:of|de)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:used|usado)?/i) ||
-        txt.match(/almacenamiento[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:de|of)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:usado|used)?/i);
-      if (p) {
-        storageTotalMB = parseSizeToMB(p[2]);
-        const pct = parseFloat(String(p[1]).replace(',', '.'));
-        if (!Number.isNaN(pct) && Number.isFinite(pct) && storageTotalMB > 0) {
-          storageUsedMB = Math.round((pct / 100) * storageTotalMB);
-        }
-      }
-    }
-
+    const parsed = parseStorageFromDfText(txtRaw);
+    let { storageUsedMB, storageTotalMB } = parsed;
     if (!storageTotalMB || storageTotalMB <= 0) storageTotalMB = DEFAULT_FREE_QUOTA_MB;
     if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB;
-
     return { storageUsedMB, storageTotalMB };
   };
 
@@ -798,29 +652,9 @@ export const testAccount = async (req, res) => {
       rawDfOutput += `[-h command]:\n${txt}\n`;
       console.log(`\n=== [DEBUG] RAW MEGA-DF -H ACTUAL ACCOUNT ID: ${id} ===\n${txt}\n===============================================\n`);
       
-      // Patrones de almacenamiento used/total (EN/ES)
-      let m = txt.match(/(?:USED\s+STORAGE|ALMACENAMIENTO\s+USADO):\s*([0-9.,]+(?:\s*[KMGT]?B)?)\s+[0-9.,]+%?\s+(?:of|de)\s+([0-9.,]+(?:\s*[KMGT]?B)?)/i)
-           || txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i)
-           || txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i)
-           || txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i)
-           || txt.match(/almacenamiento\s+de\s+la\s+cuenta\s*:\s*([^\n]+?)\s*de\s*([^\n]+)/i)
-           || txt.match(/almacenamiento\s*:\s*([\d.,]+\s*[KMGT]?B)\s*de\s*([\d.,]+\s*[KMGT]?B)/i);
-      if (m) {
-        storageUsedMB = parseSizeToMB(m[1]);
-        storageTotalMB = parseSizeToMB(m[2]);
-      }
-      // Patrón con porcentaje: "X% of Y used" (EN/ES)
-      if (!storageTotalMB) {
-        const p = txt.match(/storage[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:of|de)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:used|usado)?/i)
-               || txt.match(/almacenamiento[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:de|of)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:usado|used)?/i);
-        if (p) {
-          storageTotalMB = parseSizeToMB(p[2]);
-          const pct = parseFloat(String(p[1]).replace(',', '.'));
-          if (!isNaN(pct) && isFinite(pct)) {
-            storageUsedMB = Math.round((pct / 100) * storageTotalMB);
-          }
-        }
-      }
+      const parsed = parseStorageFromDfText(txt);
+      storageUsedMB = parsed.storageUsedMB;
+      storageTotalMB = parsed.storageTotalMB;
       console.log(`[ACCOUNTS] df -h storage usedMB=${storageUsedMB} totalMB=${storageTotalMB}`);
     } catch (e) {
       console.warn('[ACCOUNTS] df -h warn:', String(e.message).slice(0,200));
@@ -833,27 +667,9 @@ export const testAccount = async (req, res) => {
         rawDfOutput += `[without -h]:\n${txt}\n`;
         console.log(`\n=== [DEBUG] RAW MEGA-DF (sin -h) ACTUAL ACCOUNT ID: ${id} ===\n${txt}\n===============================================\n`);
 
-        let m = txt.match(/(?:USED\s+STORAGE|ALMACENAMIENTO\s+USADO):\s*([0-9.,]+(?:\s*[KMGT]?B)?)\s+[0-9.,]+%?\s+(?:of|de)\s+([0-9.,]+(?:\s*[KMGT]?B)?)/i)
-             || txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i)
-             || txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i)
-             || txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i)
-             || txt.match(/almacenamiento\s+de\s+la\s+cuenta\s*:\s*([^\n]+?)\s*de\s*([^\n]+)/i)
-             || txt.match(/almacenamiento\s*:\s*([\d.,]+\s*[KMGT]?B)\s*de\s*([\d.,]+\s*[KMGT]?B)/i);
-        if (m) {
-          storageUsedMB = parseSizeToMB(m[1]);
-          storageTotalMB = parseSizeToMB(m[2]);
-        }
-        if (!storageTotalMB) {
-          const p = txt.match(/storage[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:of|de)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:used|usado)?/i)
-                 || txt.match(/almacenamiento[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:de|of)\s*([\d.,]+\s*[KMGT]?B)[^\n]*?(?:usado|used)?/i);
-          if (p) {
-            storageTotalMB = parseSizeToMB(p[2]);
-            const pct = parseFloat(String(p[1]).replace(',', '.'));
-            if (!isNaN(pct) && isFinite(pct)) {
-              storageUsedMB = Math.round((pct / 100) * storageTotalMB);
-            }
-          }
-        }
+        const parsed = parseStorageFromDfText(txt);
+        storageUsedMB = parsed.storageUsedMB;
+        storageTotalMB = parsed.storageTotalMB;
         console.log(`[ACCOUNTS] df storage usedMB=${storageUsedMB} totalMB=${storageTotalMB}`);
       } catch (e) {
         console.warn('[ACCOUNTS] df warn:', String(e.message).slice(0,200));

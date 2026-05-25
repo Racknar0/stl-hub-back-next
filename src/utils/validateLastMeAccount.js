@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { decryptToJson } from './cryptoUtils.js';
-import { spawn } from 'child_process';
+import { runCmd } from './megaCmd.js';
+import { parseSizeToMB, parseStorageFromDfText } from './megaDfParser.js';
 import { log } from './logger.js';
 import { fileURLToPath } from 'url';
 import path from 'path';
@@ -48,34 +49,7 @@ async function ensureProxyOrThrow({ accountId, ctx, maxTries = 10 } = {}) {
   throw new Error(`[VALIDAR][PROXY] Ningún proxy funcionó (no se permite IP directa). lastErr=${String(lastErr?.message || lastErr || '').slice(0, 160)}`);
 }
 
-function runCmd(cmd, args = [], { cwd } = {}) {
-  const maskArgs = (c, a) => (c && c.toLowerCase().includes('mega-login') ? ['<hidden>'] : a);
-  const printable = `${cmd} ${(maskArgs(cmd, args) || []).join(' ')}`.trim();
-  log.verbose(`Ejecutar: ${printable}`);
-  return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { cwd, shell: true });
-    let out = '', err = '';
-    child.stdout.on('data', (d) => out += d.toString());
-    child.stderr.on('data', (d) => err += d.toString());
-    child.on('close', (code) => {
-      if (code === 0) {
-        return resolve({ out, err });
-      }
-      reject(new Error(err || out || `${cmd} exited ${code}`));
-    });
-  });
-}
-
-function parseSizeToMB(str) {
-  if (!str) return 0;
-  const s = String(str).trim().toUpperCase();
-  const m = s.match(/[\d.,]+\s*[KMGT]?B/);
-  if (!m) return 0;
-  const num = parseFloat((m[0].match(/[\d.,]+/) || ['0'])[0].replace(',', '.'));
-  const unit = (m[0].match(/[KMGT]?B/) || ['MB'])[0];
-  const factor = unit === 'KB' ? 1/1024 : unit === 'MB' ? 1 : unit === 'GB' ? 1024 : unit === 'TB' ? 1024*1024 : 1/(1024*1024);
-  return Math.round(num * factor);
-}
+// runCmd y parseSizeToMB ahora vienen de módulos centralizados (megaCmd.js, megaDfParser.js)
 
 export async function runValidateLastMeAccount() {
   const tStart = Date.now();
@@ -153,30 +127,14 @@ export async function runValidateLastMeAccount() {
         try { await runCmd(mkdirCmd, ['-p', base]); log.verbose(`[VALIDAR][MKDIR] carpetaBase=${base}`); } catch {}
       }
 
-      // Intentar mega-df -h
+      // Intentar mega-df -h (usa parser centralizado con todos los regex EN/ES)
       try {
         const df = await runCmd(dfCmd, ['-h']);
         const txt = (df.out || df.err || '').toString();
-        let m = txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i)
-          || txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i)
-          || txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i)
-          || txt.match(/almacenamiento\s+de\s+la\s+cuenta\s*:\s*([^\n]+?)\s*de\s*([^\n]+)/i)
-          || txt.match(/almacenamiento\s*:\s*([\d.,]+\s*[KMGT]?B)\s*de\s*([\d.,]+\s*[KMGT]?B)/i);
-        if (m) {
-          storageUsedMB = parseSizeToMB(m[1]);
-          storageTotalMB = parseSizeToMB(m[2]);
-          storageSource = 'df -h';
-        }
-        if (!storageTotalMB) {
-          const p = txt.match(/storage[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:of|de)\s*([\d.,]+\s*[KMGT]?B)/i)
-            || txt.match(/almacenamiento[^\n]*?:\s*([\d.,]+)\s*%[^\n]*?(?:de|of)\s*([\d.,]+\s*[KMGT]?B)/i);
-          if (p) {
-            storageTotalMB = parseSizeToMB(p[2]);
-            const pct = parseFloat(String(p[1]).replace(',', '.'));
-            if (!isNaN(pct) && isFinite(pct)) storageUsedMB = Math.round((pct / 100) * storageTotalMB);
-            storageSource = storageSource === 'none' ? 'df -h (pct)' : storageSource;
-          }
-        }
+        const parsed = parseStorageFromDfText(txt);
+        storageUsedMB = parsed.storageUsedMB;
+        storageTotalMB = parsed.storageTotalMB;
+        if (storageTotalMB) storageSource = 'df -h';
       } catch (e) {
         log.warn('df -h advertencia: ' + String(e.message).slice(0,200));
       }
@@ -185,16 +143,10 @@ export async function runValidateLastMeAccount() {
         try {
           const df = await runCmd(dfCmd, []);
           const txt = (df.out || df.err || '').toString();
-          let m = txt.match(/account\s+storage\s*:\s*([^/]+)\/\s*([^\n]+)/i)
-            || txt.match(/storage\s*:\s*([\d.,]+\s*[KMGT]?B)\s*of\s*([\d.,]+\s*[KMGT]?B)/i)
-            || txt.match(/([\d.,]+\s*[KMGT]?B)\s*\/\s*([\d.,]+\s*[KMGT]?B)/i)
-            || txt.match(/almacenamiento\s+de\s+la\s+cuenta\s*:\s*([^\n]+?)\s*de\s*([^\n]+)/i)
-            || txt.match(/almacenamiento\s*:\s*([\d.,]+\s*[KMGT]?B)\s*de\s*([\d.,]+\s*[KMGT]?B)/i);
-          if (m) {
-            storageUsedMB = parseSizeToMB(m[1]);
-            storageTotalMB = parseSizeToMB(m[2]);
-            storageSource = storageSource === 'none' ? 'df' : storageSource;
-          }
+          const parsed = parseStorageFromDfText(txt);
+          storageUsedMB = parsed.storageUsedMB;
+          storageTotalMB = parsed.storageTotalMB;
+          if (storageTotalMB) storageSource = storageSource === 'none' ? 'df' : storageSource;
         } catch (e) {
           log.warn('df advertencia: ' + String(e.message).slice(0,200));
         }

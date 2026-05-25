@@ -6,7 +6,7 @@ import { applyMegaProxy, listMegaProxies, getStickyProxyForAccount } from '../ut
 import { megaCmdWithProgressAndStall, isMegaStallError } from '../utils/megaTransfer.js'
 import path from 'path'
 import fs from 'fs'
-import { spawn } from 'child_process'
+import { runCmd } from '../utils/megaCmd.js'
 
 const prisma = new PrismaClient()
 const UPLOADS_DIR = path.resolve('uploads')
@@ -16,23 +16,6 @@ const DEFAULT_FREE_QUOTA_MB = Number(process.env.MEGA_FREE_QUOTA_MB) || 20480
 function ensureDir(p){ if(!fs.existsSync(p)) fs.mkdirSync(p,{recursive:true}) }
 ensureDir(TEMP_DIR)
 
-// Reutilizamos un runCmd liviano (no exportado en otros controladores)
-function runCmd(cmd, args = [], { quiet=false } = {}) {
-  const printable = `${cmd} ${(args||[]).join(' ')}`.trim()
-  const verbose = typeof isVerbose === 'function' && isVerbose()
-  if (verbose && !quiet) log.verbose(`[RESTORE] cmd ${printable}`)
-  return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { shell: true })
-    let out = '', err = ''
-    child.stdout.on('data', d => out += d.toString())
-    child.stderr.on('data', d => err += d.toString())
-    child.on('close', code => {
-      if (code === 0) return resolve({ out, err })
-      if (!quiet) log.warn(`[RESTORE] fallo cmd ${cmd} code=${code} msg=${(err||out).slice(0,200)}`)
-      reject(new Error(err||out||`${cmd} exited ${code}`))
-    })
-  })
-}
 
 function buildCtx(acc){
   if(!acc) return ''

@@ -1,7 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { decryptToJson } from './cryptoUtils.js';
 import { withMegaLock } from './megaQueue.js';
-import { spawn } from 'child_process';
+import { runCmd } from './megaCmd.js';
 import path from 'path';
 
 const prisma = new PrismaClient();
@@ -43,19 +43,7 @@ const DRY_RUN = process.env.RENAME_DRY_RUN
 
 const ACCOUNT_ID = process.argv[2] ? Number(process.argv[2]) : DEFAULT_ACCOUNT_ID;
 
-function runCmd(cmd, args = [], { print = true } = {}) {
-  if (print) console.log(`[CMD] > ${cmd} ${(args||[]).join(' ')}`);
-  return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { shell: true });
-    let out = '', err = '';
-    child.stdout.on('data', d => out += d.toString());
-    child.stderr.on('data', d => err += d.toString());
-    child.on('close', code => {
-      if (code === 0) return resolve({ out, err });
-      reject(new Error(err || out || `${cmd} exit ${code}`));
-    });
-  });
-}
+
 
 async function megaLogin(payload) {
   if (payload?.type === 'session' && payload.session) {
