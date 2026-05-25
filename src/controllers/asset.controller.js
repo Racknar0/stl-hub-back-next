@@ -2281,28 +2281,18 @@ async function megaLogoutBestEffort(ctx) {
 }
 
 /** Iniciar sesión MEGA con credenciales (session string o user/pass). */
-async function megaLoginOrThrow(payload, ctx, accountId = null) {
+async function megaLoginOrThrow(payload, ctx, accountId = null, timeoutMs = null) {
     const loginCmd = 'mega-login';
+    const finalTimeout = timeoutMs || Number(process.env.MEGA_LOGIN_TIMEOUT_MS) || 60000;
     if (accountId) {
-        await loginWithSessionCache(prisma, runCmdCapture, accountId, payload, ctx, Number(process.env.MEGA_LOGIN_TIMEOUT_MS) || 60000);
+        await loginWithSessionCache(prisma, runCmdCapture, accountId, payload, ctx, finalTimeout);
     } else {
-        /* CÓDIGO ANTERIOR RESPALDADO
         if (payload?.type === 'session' && payload.session) {
             console.log(`[MEGA][LOGIN] session ${ctx}`);
-            await runCmd(loginCmd, [payload.session]);
+            await runCmd(loginCmd, [payload.session], { timeoutMs: finalTimeout });
         } else if (payload?.username && payload?.password) {
             console.log(`[MEGA][LOGIN] user/pass ${ctx}`);
-            await runCmd(loginCmd, [payload.username, payload.password]);
-        } else {
-            throw new Error('Invalid credentials payload');
-        }
-        */
-        if (payload?.type === 'session' && payload.session) {
-            console.log(`[MEGA][LOGIN] session ${ctx}`);
-            await runCmd(loginCmd, [payload.session]);
-        } else if (payload?.username && payload?.password) {
-            console.log(`[MEGA][LOGIN] user/pass ${ctx}`);
-            await runCmd(loginCmd, [payload.username, payload.password]);
+            await runCmd(loginCmd, [payload.username, payload.password], { timeoutMs: finalTimeout });
         } else {
             throw new Error('Invalid credentials payload');
         }
@@ -2409,7 +2399,7 @@ export const deleteAsset = async (req, res) => {
         }
 
         const rmCmd = 'mega-rm';
-        const proxies = listMegaProxies({});
+        const proxies = listMegaProxies({ shuffle: false });
         if (!proxies.length) {
             return res.status(503).json({
                 message:
@@ -2435,15 +2425,39 @@ export const deleteAsset = async (req, res) => {
                 const remotePath = path.posix.join(remoteBase, asset.slug);
                 await withMegaLock(async () => {
                     const ctx = `[DEL][asset=${id}][acc=${acc.id}:${acc.alias || '--'}]`;
-                    const picked = await applyAnyWorkingProxyOrThrow(
-                        'delete',
-                        proxies,
-                        ctx,
-                        10
-                    );
-                    proxyUsed = picked?.proxyUrl || null;
-                    await megaLogoutBestEffort(`PREV ${ctx}`);
-                    await megaLoginOrThrow(payload, ctx, acc.id);
+                    
+                    let loginOk = false;
+                    let lastErr = '';
+                    const maxTries = Math.min(10, proxies.length);
+                    const startIdx = acc.id ? (acc.id % proxies.length) : 0;
+                    const perProxyTimeout = Number(process.env.MEGA_LOGIN_PER_PROXY_TIMEOUT_MS) || 15000;
+
+                    for (let i = 0; i < maxTries; i++) {
+                        const p = proxies[(startIdx + i) % proxies.length];
+                        const proxyCtx = `${ctx} [Try ${i+1}/${maxTries} Proxy=${p.proxyUrl}]`;
+                        try {
+                            const applied = await applyMegaProxy(p, { ctx: proxyCtx, timeoutMs: 15000, clearOnFail: false });
+                            if (!applied?.enabled) {
+                                lastErr = applied?.error || 'apply proxy failed';
+                                continue;
+                            }
+                            
+                            proxyUsed = p.proxyUrl;
+                            await megaLogoutBestEffort(`PREV ${proxyCtx}`);
+                            await megaLoginOrThrow(payload, proxyCtx, acc.id, perProxyTimeout);
+                            loginOk = true;
+                            break;
+                        } catch (err) {
+                            lastErr = err?.message || String(err);
+                            console.warn(`[ASSETS][DEL][LOGIN-FAIL] Proxy ${p.proxyUrl} falló:`, lastErr);
+                            try { await megaLogoutBestEffort(`CLEAN ${proxyCtx}`); } catch {}
+                        }
+                    }
+
+                    if (!loginOk) {
+                        throw new Error(`Ningún proxy funcionó para iniciar sesión en acc=${acc.id}. Último error: ${lastErr}`);
+                    }
+
                     try {
                         console.log(`[ASSETS][DEL][MEGA-RM][START] acc=${acc.id} path=${remotePath} proxy=${proxyUsed || '--'} ${ctx}`);
                         await runCmd(rmCmd, ['-rf', remotePath]);
