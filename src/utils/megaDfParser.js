@@ -120,3 +120,17 @@ export function parseStorageFromDfText(rawText) {
 
   return { storageUsedMB, storageTotalMB, fileCount, folderCount };
 }
+
+// ─── pickFirstFileFromLs ──────────────────────────────────────────
+/**
+ * Selecciona el primer archivo de la salida de mega-ls, priorizando archivos con extensión.
+ *
+ * @param {string} lsOut — Salida raw de mega-ls
+ * @returns {string|null} Nombre del archivo seleccionado o null
+ */
+export function pickFirstFileFromLs(lsOut) {
+  const lines = String(lsOut).split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const withExt = lines.filter(l => /\.[A-Za-z0-9]{1,10}$/.test(l));
+  return (withExt[0] || lines[0]) || null;
+}
+

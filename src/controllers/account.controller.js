@@ -5,8 +5,8 @@ import { log, isVerbose } from '../utils/logger.js';
 import { spawn } from 'child_process';
 import { withMegaLock } from '../utils/megaQueue.js';
 import { applyMegaProxy, listMegaProxies, clearMegaProxyIfSafe, getStickyProxyForAccount } from '../utils/megaProxy.js';
-import { megaCmdWithProgressAndStall, isMegaStallError } from '../utils/megaTransfer.js';
-import { runCmd, attachAutoAcceptTerms, safeMkdir } from '../utils/megaCmd.js';
+import { megaCmdWithProgressAndStall, isMegaStallError, applyProxyByIndexOrThrow, megaGetWithStallRetry, megaPutWithStallRetry } from '../utils/megaTransfer.js';
+import { runCmd, attachAutoAcceptTerms, safeMkdir, getArchiveFileName } from '../utils/megaCmd.js';
 import { parseSizeToMB, parseStorageFromDfText } from '../utils/megaDfParser.js';
 import { megaLoginFull, megaLogoutSafe, createReloginFn, refreshStorageMetrics } from '../utils/megaSession.js';
 import path from 'path';
@@ -41,19 +41,6 @@ function isTruthyFlag(value) {
   return ['1', 'true', 'yes', 'y', 'on'].includes(String(value ?? '').trim().toLowerCase());
 }
 
-function getArchiveFileName(archiveName) {
-  const normalized = String(archiveName || '').replaceAll('\\', '/').trim();
-  return path.posix.basename(normalized);
-}
-
-async function applyProxyByIndexOrThrow(account, idx, ctx){
-  const p = getStickyProxyForAccount(account, idx);
-  if (!p) throw new Error(`[SYNC][PROXY] Sin proxies válidos (no se permite IP directa)${ctx ? ` ${ctx}` : ''}`);
-  const r = await applyMegaProxy(p, { ctx: ctx || 'sync', timeoutMs: 15000, clearOnFail: false });
-  if (!r?.enabled) throw new Error(`[SYNC][PROXY] apply failed proxy=${p?.proxyUrl || '--'} err=${String(r?.error || '').slice(0,160)}`);
-  log.info(`[SYNC][PROXY][OK] ${p.proxyUrl}${ctx ? ` ${ctx}` : ''}`);
-  return p;
-}
 
 /**
  * Helper: login MEGA completo con rotación de proxy.
@@ -69,74 +56,6 @@ async function loginWithProxyRetry({ startProxyIndex, payload, ctx, maxAttempts,
   return startProxyIndex;
 }
 
-async function megaGetWithStallRetry({ remoteFile, destLocal, ctx, account, getProxyIndex, setProxyIndex, relogin }){
-  let attempt = 0;
-  while (true) {
-    attempt++;
-    try {
-      log.info(`[SYNC][DL][START] attempt=${attempt} proxyIdx=${getProxyIndex()} remote=${remoteFile} -> ${destLocal} ${ctx}`);
-      await megaCmdWithProgressAndStall({
-        cmd: 'mega-get',
-        args: [remoteFile, destLocal],
-        label: 'SYNC-DL',
-        stallTimeoutMs: MEGA_TRANSFER_STALL_TIMEOUT_MS,
-        heartbeatMs: 30000,
-        onProgress: ({ pct }) => {
-          log.info(`[SYNC][DL][PROGRESS] ${pct}% ${ctx}`);
-        },
-        onHeartbeat: ({ idleMs, lastPct }) => {
-          log.info(`[SYNC][DL][HB] idle=${Math.round(idleMs / 1000)}s pct=${lastPct ?? '--'} ${ctx}`);
-        },
-      });
-      log.info(`[SYNC][DL][DONE] remote=${remoteFile} ${ctx}`);
-      return;
-    } catch (e) {
-      if (!isMegaStallError(e) || attempt > MEGA_TRANSFER_STALL_MAX_RETRIES) throw e;
-      log.warn(`[SYNC][STALL][DL] sin progreso, rotate proxy + relogin (attempt=${attempt}/${MEGA_TRANSFER_STALL_MAX_RETRIES}) ${ctx}`);
-      setProxyIndex(getProxyIndex() + 1);
-      await applyProxyByIndexOrThrow(account, getProxyIndex(), ctx);
-      await relogin();
-      await new Promise(r => setTimeout(r, MEGA_TRANSFER_STALL_BACKOFF_MS));
-    }
-  }
-}
-
-async function megaPutWithStallRetry({ localPath, remoteFolderOrFile, ctx, account, getProxyIndex, setProxyIndex, relogin, asFilePath = false, useProxy = true }){
-  let attempt = 0;
-  while (true) {
-    attempt++;
-    try {
-      const args = asFilePath ? [localPath, remoteFolderOrFile] : [localPath, remoteFolderOrFile];
-      log.info(`[SYNC][UP][START] attempt=${attempt} proxyIdx=${useProxy ? getProxyIndex() : 'NONE'} local=${localPath} -> remote=${remoteFolderOrFile} ${ctx}`);
-      await megaCmdWithProgressAndStall({
-        cmd: 'mega-put',
-        args,
-        label: 'SYNC-UP',
-        stallTimeoutMs: MEGA_TRANSFER_STALL_TIMEOUT_MS,
-        heartbeatMs: 30000,
-        onProgress: ({ pct }) => {
-          log.info(`[SYNC][UP][PROGRESS] ${pct}% ${ctx}`);
-        },
-        onHeartbeat: ({ idleMs, lastPct }) => {
-          log.info(`[SYNC][UP][HB] idle=${Math.round(idleMs / 1000)}s pct=${lastPct ?? '--'} ${ctx}`);
-        },
-      });
-      log.info(`[SYNC][UP][DONE] remote=${remoteFolderOrFile} ${ctx}`);
-      return;
-    } catch (e) {
-      if (!isMegaStallError(e) || attempt > MEGA_TRANSFER_STALL_MAX_RETRIES) throw e;
-      log.warn(`[SYNC][STALL][UP] sin progreso, rotate proxy + relogin (attempt=${attempt}/${MEGA_TRANSFER_STALL_MAX_RETRIES}) ${ctx}`);
-      if (useProxy) {
-        setProxyIndex(getProxyIndex() + 1);
-        await applyProxyByIndexOrThrow(account, getProxyIndex(), ctx);
-      } else {
-        await runCmd('mega-proxy', ['--none']); // asegurar que seguimos limpios
-      }
-      await relogin();
-      await new Promise(r => setTimeout(r, MEGA_TRANSFER_STALL_BACKOFF_MS));
-    }
-  }
-}
 
 // attachAutoAcceptTerms ahora viene del módulo centralizado (megaCmd.js)
 

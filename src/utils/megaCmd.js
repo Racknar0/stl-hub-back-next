@@ -13,8 +13,10 @@
  * Siempre retorna { out, err } con strings.
  */
 import { spawn } from 'child_process';
+import path from 'path';
 import { log, isVerbose } from './logger.js';
 import { killProcessTreeBestEffort } from './megaTransfer.js';
+
 
 // ─── Configuración por env ───────────────────────────────────────
 const MAX_CMD_CAPTURE_BYTES = (Number(process.env.MEGA_MAX_CAPTURE_KB) || 1024) * 1024; // 1 MB por defecto
@@ -211,3 +213,16 @@ export async function safeMkdir(remotePath, opts = {}) {
     if (!/54/.test(msg) && !/already exists/i.test(msg) && !/exists/i.test(msg)) throw e;
   }
 }
+
+// ─── getArchiveFileName ──────────────────────────────────────────
+/**
+ * Normaliza y extrae el nombre base de archivo de un path (soporta Windows y POSIX).
+ *
+ * @param {string} archiveName — Nombre o ruta del archivo de backup/asset
+ * @returns {string} Nombre base del archivo
+ */
+export function getArchiveFileName(archiveName) {
+  const normalized = String(archiveName || '').replaceAll('\\', '/').trim();
+  return path.posix.basename(normalized);
+}
+

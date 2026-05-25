@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url'
 import { log } from './logger.js'
 import { applyMegaProxy, getStickyProxyForAccount } from './megaProxy.js'
 import { runCmd } from './megaCmd.js'
-import { parseSizeToMB, parseStorageFromDfText } from './megaDfParser.js'
+import { parseSizeToMB, parseStorageFromDfText, pickFirstFileFromLs } from './megaDfParser.js'
 import { megaLoginFull, megaLogoutSafe, resetMegaServerIfSafe } from './megaSession.js'
 
 /*
@@ -79,11 +79,6 @@ function getAccountKey(acc){
 
 // runCmd ahora viene del módulo centralizado (megaCmd.js)
 
-function pickFirstFileFromLs(lsOut){
-  const lines = String(lsOut).split(/\r?\n/).map(l=>l.trim()).filter(Boolean)
-  const withExt = lines.filter(l => /\.[A-Za-z0-9]{1,10}$/.test(l))
-  return (withExt[0] || lines[0]) || null
-}
 
 function sleep(ms){ return new Promise(r=>setTimeout(r, ms)) }
 

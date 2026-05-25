@@ -2,13 +2,13 @@ import { PrismaClient } from '@prisma/client'
 import { decryptToJson } from '../utils/cryptoUtils.js'
 import { withMegaLock } from '../utils/megaQueue.js'
 import { log, isVerbose } from '../utils/logger.js'
-import { applyMegaProxy, listMegaProxies, getStickyProxyForAccount } from '../utils/megaProxy.js'
-import { megaCmdWithProgressAndStall, isMegaStallError } from '../utils/megaTransfer.js'
+import { listMegaProxies } from '../utils/megaProxy.js'
+import { megaCmdWithProgressAndStall, isMegaStallError, applyProxyByIndexOrThrow, megaGetWithStallRetry, megaPutWithStallRetry } from '../utils/megaTransfer.js'
 import path from 'path'
 import fs from 'fs'
 import { runCmd } from '../utils/megaCmd.js'
 import { megaLoginFull, megaLogoutSafe, refreshStorageMetrics } from '../utils/megaSession.js'
-import { parseStorageFromDfText } from '../utils/megaDfParser.js'
+import { parseStorageFromDfText, pickFirstFileFromLs } from '../utils/megaDfParser.js'
 
 const prisma = new PrismaClient()
 const UPLOADS_DIR = path.resolve('uploads')
@@ -29,90 +29,7 @@ const MEGA_TRANSFER_STALL_TIMEOUT_MS = Number(process.env.MEGA_TRANSFER_STALL_TI
 const MEGA_TRANSFER_STALL_MAX_RETRIES = Number(process.env.MEGA_TRANSFER_STALL_MAX_RETRIES || 2);
 const MEGA_TRANSFER_STALL_BACKOFF_MS = Number(process.env.MEGA_TRANSFER_STALL_BACKOFF_MS || 30000);
 
-async function applyProxyByIndexOrThrow(account, idx, ctx){
-  const p = getStickyProxyForAccount(account, idx);
-  if (!p) throw new Error(`[RESTORE][PROXY] Sin proxies válidos (no se permite IP directa)${ctx ? ` ${ctx}` : ''}`);
-  const r = await applyMegaProxy(p, { ctx: ctx || 'restore', timeoutMs: 15000, clearOnFail: false });
-  if (!r?.enabled) throw new Error(`[RESTORE][PROXY] apply failed proxy=${p?.proxyUrl || '--'} err=${String(r?.error || '').slice(0,160)}`);
-  log.info(`[RESTORE][PROXY][OK] ${p.proxyUrl}${ctx ? ` ${ctx}` : ''}`);
-  return p;
-}
 
-async function megaGetWithStallRetry({ remoteFile, localTemp, ctx, account, getProxyIndex, setProxyIndex, relogin }){
-  let attempt = 0;
-  while (true) {
-    attempt++;
-    try {
-      log.info(`[RESTORE][DL][START] attempt=${attempt} proxyIdx=${getProxyIndex()} remote=${remoteFile} -> ${localTemp} ${ctx}`);
-      await megaCmdWithProgressAndStall({
-        cmd: 'mega-get',
-        args: [remoteFile, localTemp],
-        label: 'RESTORE-DL',
-        stallTimeoutMs: MEGA_TRANSFER_STALL_TIMEOUT_MS,
-        heartbeatMs: 30000,
-        onProgress: ({ pct }) => {
-          log.info(`[RESTORE][DL][PROGRESS] ${pct}% ${ctx}`);
-        },
-        onHeartbeat: ({ idleMs, lastPct }) => {
-          log.info(`[RESTORE][DL][HB] idle=${Math.round(idleMs / 1000)}s pct=${lastPct ?? '--'} ${ctx}`);
-        },
-      });
-      log.info(`[RESTORE][DL][DONE] remote=${remoteFile} ${ctx}`);
-      return;
-    } catch (e) {
-      if (!isMegaStallError(e) || attempt > MEGA_TRANSFER_STALL_MAX_RETRIES) throw e;
-      log.warn(`[RESTORE][STALL][DL] sin progreso, rotate proxy + relogin (attempt=${attempt}/${MEGA_TRANSFER_STALL_MAX_RETRIES}) ${ctx}`);
-      setProxyIndex(getProxyIndex() + 1);
-      await applyProxyByIndexOrThrow(account, getProxyIndex(), ctx);
-      await relogin();
-      await new Promise(r => setTimeout(r, MEGA_TRANSFER_STALL_BACKOFF_MS));
-    }
-  }
-}
-
-async function megaPutWithStallRetry({ localTemp, remoteFile, ctx, account, getProxyIndex, setProxyIndex, relogin, useProxy = true }){
-  let attempt = 0;
-  while (true) {
-    attempt++;
-    try {
-      log.info(`[RESTORE][UP][START] attempt=${attempt} proxyIdx=${useProxy ? getProxyIndex() : 'NONE'} local=${localTemp} -> remote=${remoteFile} ${ctx}`);
-      await megaCmdWithProgressAndStall({
-        cmd: 'mega-put',
-        args: [localTemp, remoteFile],
-        label: 'RESTORE-UP',
-        stallTimeoutMs: MEGA_TRANSFER_STALL_TIMEOUT_MS,
-        heartbeatMs: 30000,
-        onProgress: ({ pct }) => {
-          log.info(`[RESTORE][UP][PROGRESS] ${pct}% ${ctx}`);
-        },
-        onHeartbeat: ({ idleMs, lastPct }) => {
-          log.info(`[RESTORE][UP][HB] idle=${Math.round(idleMs / 1000)}s pct=${lastPct ?? '--'} ${ctx}`);
-        },
-      });
-      log.info(`[RESTORE][UP][DONE] remote=${remoteFile} ${ctx}`);
-      return;
-    } catch (e) {
-      if (!isMegaStallError(e) || attempt > MEGA_TRANSFER_STALL_MAX_RETRIES) throw e;
-      log.warn(`[RESTORE][STALL][UP] sin progreso, rotate proxy + relogin (attempt=${attempt}/${MEGA_TRANSFER_STALL_MAX_RETRIES}) ${ctx}`);
-      if (useProxy) {
-        setProxyIndex(getProxyIndex() + 1);
-        await applyProxyByIndexOrThrow(account, getProxyIndex(), ctx);
-      } else {
-        await runCmd('mega-proxy', ['--none'], { quiet: true });
-      }
-      await relogin();
-      await new Promise(r => setTimeout(r, MEGA_TRANSFER_STALL_BACKOFF_MS));
-    }
-  }
-}
-
-function pickFirstFileFromLs(lsOut){
-  // mega-ls salida típica: nombres en líneas; ignorar directorios sin punto si no hay extensión.
-  const lines = String(lsOut).split(/\r?\n/).map(l=>l.trim()).filter(Boolean)
-  // Preferir archivos con extensión
-  const withExt = lines.filter(l => /\.[A-Za-z0-9]{1,10}$/.test(l))
-  return (withExt[0] || lines[0]) || null
-}
 
 async function refreshAccountStorageInCurrentSession(accountId, ctx = '') {
   return refreshStorageMetrics(prisma, accountId, ctx)
@@ -238,7 +155,7 @@ export const syncBackupsToMain = async (req, res) => {
             try {
               await megaGetWithStallRetry({
                 remoteFile,
-                localTemp,
+                destLocal: localTemp,
                 ctx: `${bCtx} asset=${asset.id}`,
                 account: b,
                 getProxyIndex,
@@ -297,8 +214,8 @@ export const syncBackupsToMain = async (req, res) => {
           const t0 = Date.now()
           try {
             await megaPutWithStallRetry({
-              localTemp: info.localTemp,
-              remoteFile,
+              localPath: info.localTemp,
+              remoteFolderOrFile: remoteFile,
               ctx: `${mainCtx} asset=${assetId}`,
               account: main,
               getProxyIndex,
