@@ -13,7 +13,7 @@ const getAesKey = () => {
 
 const ALGO = 'aes-256-gcm';
 
-export const encryptBlob = (buf) => {
+const encryptBlob = (buf) => {
   const key = getAesKey();
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv(ALGO, key, iv);
@@ -22,7 +22,7 @@ export const encryptBlob = (buf) => {
   return { enc, iv, tag };
 };
 
-export const decryptBlob = ({ enc, iv, tag }) => {
+const decryptBlob = ({ enc, iv, tag }) => {
   const key = getAesKey();
   const decipher = crypto.createDecipheriv(ALGO, key, iv);
   decipher.setAuthTag(tag);

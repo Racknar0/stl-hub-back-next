@@ -51,10 +51,6 @@ export function listMegaProxies({ proxyFile, shuffle = true } = {}) {
   return shuffle ? shuffleInPlace(parsed) : parsed;
 }
 
-export function getAppliedMegaProxy() {
-  return LAST_APPLIED ? { ...LAST_APPLIED, password: '<hidden>' } : null;
-}
-
 export async function applyMegaProxy(picked, { ctx, timeoutMs = 15000, clearOnFail = true } = {}) {
   if (!picked || !picked.proxyUrl) throw new Error('Proxy inválido');
   try {
@@ -73,22 +69,6 @@ export async function applyMegaProxy(picked, { ctx, timeoutMs = 15000, clearOnFa
     }
     return { enabled: false, error: e.message };
   }
-}
-
-function pickRandomProxy(lines) {
-  if (!lines || lines.length === 0) return null;
-  const raw = lines[Math.floor(Math.random() * lines.length)];
-  return parseProxyLine(raw);
-}
-
-export async function applyRandomMegaProxy({ proxyFile, ctx } = {}) {
-  const lines = readProxyLines(proxyFile);
-  const picked = pickRandomProxy(lines);
-  if (!picked) {
-    log.warn(`[MEGA-PROXY] Sin proxies válidos.${ctx ? ` ${ctx}` : ''}`);
-    return { enabled: false };
-  }
-  return applyMegaProxy(picked, { ctx, timeoutMs: 15000, clearOnFail: true });
 }
 
 async function uploadsAreActiveNow() {

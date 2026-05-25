@@ -43,13 +43,6 @@ async function safeMegaLogout(ctx, why = ''){
   await megaLogoutSafe(`${ctx}${why ? ` why=${why}` : ''}`);
 }
 
-async function safeClearProxy(why = ''){
-  if (uploadsAreActiveNow()) {
-    log.warn(`[PROXY][CLEAR][SKIP] subidas activas.${why ? ` why=${why}` : ''}`);
-    return;
-  }
-  return clearProxy();
-}
 
 // ==========================================
 // SISTEMA DE PROXIES
@@ -64,39 +57,6 @@ const STICKY_PROXY_REFRESH_ON_LOGIN_FAIL = true; // si falla login, reintenta re
 // Cache en memoria: accountKey -> { p, proxyUrl } donde p es el objeto proxy completo
 const STICKY_PROXY_BY_ACCOUNT = new Map();
 
-// Función para reiniciar el servidor si se queda "tonto"
-// resetMegaServer ahora viene de megaSession.js (resetMegaServerIfSafe)
-async function resetMegaServer() {
-  return resetMegaServerIfSafe('autoBackup');
-}
-
-async function setRandomProxy() {
-  if (!PROXY_LIST || PROXY_LIST.length === 0) return;
-  
-  // Limpiamos primero por seguridad
-  await clearProxy();
-
-  const raw = PROXY_LIST[Math.floor(Math.random() * PROXY_LIST.length)];
-  const parts = raw.split(':');
-  
-  // Asumimos formato IP:PORT:USER:PASS (el de Webshare)
-  if (parts.length === 4) {
-    const [ip, port, user, pass] = parts;
-    const proxyUrl = `http://${ip}:${port}`;
-    try {
-      // Usamos flags separadas, es más robusto
-      await runCmd('mega-proxy', [proxyUrl, `--username=${user}`, `--password=${pass}`], { quiet: true });
-      CURRENT_PROXY = proxyUrl;
-      log.info(`[PROXY] Aplicado: ${proxyUrl}`);
-    } catch (e) {
-      log.warn(`[PROXY] Falló al aplicar ${proxyUrl}: ${e.message}`);
-      await clearProxy();
-    }
-  } else {
-    // Fallback para otros formatos
-    log.warn(`[PROXY] Formato desconocido, saltando: ${raw}`);
-  }
-}
 
 async function clearProxy() {
   // No se permite desactivar proxy (eso implicaría IP directa). No-op a nivel MEGAcmd.
@@ -208,9 +168,6 @@ async function megaLogin(payload, ctx) {
   log.info(`[MEGA][LOGIN][OK] ${ctx} proxy=${CURRENT_PROXY || 'off'}`);
 }
 
-async function megaLogout(ctx){
-  await megaLogoutSafe(ctx);
-}
 
 // ==========================================
 // LÓGICA PRINCIPAL

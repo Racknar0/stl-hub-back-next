@@ -341,24 +341,3 @@ export async function checkMegaLinkAlive(
     return false;
   }
 }
-
-// Helpers de depuración / tests
-export function getLinkCacheSnapshot(log = DEFAULT_DEBUG) {
-  dbg(log, '[MEGA CHECK] getLinkCacheSnapshot()');
-  const out = {};
-  for (const [k, v] of linkCache.entries()) {
-    out[k] = {
-      alive: v.alive,
-      checkedAt: v.checkedAt,
-      failCount: v.failCount,
-      cooldownUntil: v.cooldownUntil,
-    };
-  }
-  dbg(log, '[MEGA CHECK] getLinkCacheSnapshot() OUT keys=', Object.keys(out).length);
-  return out;
-}
-export function clearLinkCache(log = DEFAULT_DEBUG) {
-  dbg(log, '[MEGA CHECK] clearLinkCache()');
-  linkCache.clear();
-  dbg(log, '[MEGA CHECK] clearLinkCache() OUT size=', linkCache.size);
-}

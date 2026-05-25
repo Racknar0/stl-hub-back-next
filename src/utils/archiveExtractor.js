@@ -101,7 +101,7 @@ export function run7z(args, options = {}) {
  * @param {function} [options.onProgress] — Callback opcional: ({ percent, file, line, tool, source }) => void
  * @returns {Promise<string>} stdout
  */
-export function runUnrar(args, options = {}) {
+function runUnrar(args, options = {}) {
   const onProgress = typeof options?.onProgress === 'function' ? options.onProgress : null;
   return new Promise((resolve, reject) => {
     const child = spawn('unrar', args, { shell: false });

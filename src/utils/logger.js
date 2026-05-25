@@ -1,12 +1,5 @@
 const VERBOSE = /^(1|true|yes)$/i.test(String(process.env.VERBOSE_MODE || ''));
 
-function ts() {
-    return new Date()
-        .toISOString()
-        .replace('T', ' ')
-        .replace(/\.\d{3}Z$/, 'Z');
-}
-
 function base(level, msg, meta) {
     let prefix = ''
     switch (level) {

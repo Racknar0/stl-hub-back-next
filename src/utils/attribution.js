@@ -137,7 +137,7 @@ const getTrackingFromCookies = (req, prefer = 'first') => {
   return prefer === 'last' ? (last || first) : (first || last);
 };
 
-export const extractTrackingFromRequest = (req, prefer = 'first') => {
+const extractTrackingFromRequest = (req, prefer = 'first') => {
   const fromCookies = getTrackingFromCookies(req, prefer);
   if (fromCookies) return fromCookies;
   return extractTrackingFromBody(req?.body || {});

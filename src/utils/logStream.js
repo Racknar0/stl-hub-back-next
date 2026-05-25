@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 
 // Emite eventos 'log' con { level, messages, timestamp }
 class LogBus extends EventEmitter {}
-export const logBus = new LogBus();
+const logBus = new LogBus();
 
 function buildPayload(level, args) {
   // Quitar prefijo para console.log "normal" (nivel 'log')

@@ -41,11 +41,6 @@ function isTruthyFlag(value) {
   return ['1', 'true', 'yes', 'y', 'on'].includes(String(value ?? '').trim().toLowerCase());
 }
 
-function rotateIndex(i, len){
-  if (!len) return 0;
-  return (Number(i || 0) + 1) % len;
-}
-
 function getArchiveFileName(archiveName) {
   const normalized = String(archiveName || '').replaceAll('\\', '/').trim();
   return path.posix.basename(normalized);
@@ -146,59 +141,6 @@ async function megaPutWithStallRetry({ localPath, remoteFolderOrFile, ctx, accou
 // attachAutoAcceptTerms ahora viene del módulo centralizado (megaCmd.js)
 
 // runCmd ahora viene del módulo centralizado (megaCmd.js)
-
-// Subida con progreso leyendo stderr/stdout incremental de mega-put
-async function runMegaPutWithProgress(localFile, remoteFolder, { assetId, backupId, index, total, globalDone, totalPlanned }) {
-  return new Promise((resolve, reject) => {
-    const fileSize = fs.existsSync(localFile) ? fs.statSync(localFile).size : 0;
-    const child = spawn('mega-put', [localFile, remoteFolder], { shell: true });
-    let out = '', err = '';
-    let lastLoggedPct = -1;
-    const startTs = Date.now();
-    let anyPct = false;
-    const fallbackTimer = setTimeout(() => {
-      if (!anyPct) {
-        console.log(`[SYNC][SUBIDA][INFO] asset=${assetId} backup=${backupId} sin progreso granular (MEGAcmd no emitió %) tamaño=${fileSize}B`)
-      }
-    }, 4000)
-    function logProgress(pct, transferred) {
-      console.log(`[SYNC][SUBIDA][PROGRESO] asset=${assetId} backup=${backupId} ${(index)}/${total} global(${globalDone}/${totalPlanned}) ${pct}% ${transferred}/${fileSize}B`);
-    }
-    child.stdout.on('data', d => {
-      const txt = d.toString();
-      out += txt;
-      // Buscar todos los porcentajes y usar el último
-      const matches = [...txt.matchAll(/(\d{1,3})%/g)]
-      if (matches.length) {
-        const pct = Math.min(100, Number(matches[matches.length - 1][1]))
-        anyPct = true
-        if (pct !== lastLoggedPct) { lastLoggedPct = pct; logProgress(pct, Math.round(fileSize * pct / 100)); }
-      }
-    });
-    child.stderr.on('data', d => {
-      const txt = d.toString();
-      err += txt;
-      const matches = [...txt.matchAll(/(\d{1,3})%/g)]
-      if (matches.length) {
-        const pct = Math.min(100, Number(matches[matches.length - 1][1]))
-        anyPct = true
-        if (pct !== lastLoggedPct) { lastLoggedPct = pct; logProgress(pct, Math.round(fileSize * pct / 100)); }
-      }
-    });
-    child.on('close', code => {
-      clearTimeout(fallbackTimer)
-      if (code === 0) {
-        if (lastLoggedPct < 100) logProgress(100, fileSize);
-        const ms = Date.now() - startTs;
-        console.log(`[SYNC][SUBIDA][OK] asset=${assetId} backup=${backupId} size=${fileSize}B ms=${ms}`);
-        resolve({ out, err });
-      } else {
-        console.warn(`[SYNC][SUBIDA][ERROR] asset=${assetId} backup=${backupId} code=${code} err=${(err||out).slice(0,200)}`);
-        reject(new Error(err || out || `mega-put exit ${code}`));
-      }
-    });
-  });
-}
 
 // parseSizeToMB ahora viene del módulo centralizado (megaDfParser.js)
 

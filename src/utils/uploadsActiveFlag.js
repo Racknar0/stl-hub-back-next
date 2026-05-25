@@ -49,9 +49,5 @@ export function startUploadsActive(label=''){
   }
 }
 
-export async function withUploadsActive(fn, label=''){
-  const stop = startUploadsActive(label)
-  try { return await fn() } finally { try { stop() } catch{} }
-}
 
 export function isUploadsActive(){ return activeCount > 0 }

@@ -29,11 +29,6 @@ const MEGA_TRANSFER_STALL_TIMEOUT_MS = Number(process.env.MEGA_TRANSFER_STALL_TI
 const MEGA_TRANSFER_STALL_MAX_RETRIES = Number(process.env.MEGA_TRANSFER_STALL_MAX_RETRIES || 2);
 const MEGA_TRANSFER_STALL_BACKOFF_MS = Number(process.env.MEGA_TRANSFER_STALL_BACKOFF_MS || 30000);
 
-function rotateIndex(i, len){
-  if (!len) return 0;
-  return (Number(i || 0) + 1) % len;
-}
-
 async function applyProxyByIndexOrThrow(account, idx, ctx){
   const p = getStickyProxyForAccount(account, idx);
   if (!p) throw new Error(`[RESTORE][PROXY] Sin proxies válidos (no se permite IP directa)${ctx ? ` ${ctx}` : ''}`);
@@ -109,25 +104,6 @@ async function megaPutWithStallRetry({ localTemp, remoteFile, ctx, account, getP
       await new Promise(r => setTimeout(r, MEGA_TRANSFER_STALL_BACKOFF_MS));
     }
   }
-}
-
-async function ensureProxyOrThrow(ctx, account = null) {
-  const tries = 10;
-  let lastErr = null;
-  for (let i = 0; i < tries; i++) {
-    const p = getStickyProxyForAccount(account, i);
-    if (!p) break;
-    try {
-      const r = await applyMegaProxy(p, { ctx: ctx || 'restore', timeoutMs: 15000, clearOnFail: false });
-      if (r?.enabled) {
-        log.info(`[RESTORE][PROXY][OK] ${p.proxyUrl}${ctx ? ` ${ctx}` : ''}`);
-        return p;
-      }
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-  throw new Error(`[RESTORE][PROXY] Ningún proxy funcionó. lastErr=${String(lastErr?.message || lastErr || '').slice(0, 160)}`);
 }
 
 function pickFirstFileFromLs(lsOut){

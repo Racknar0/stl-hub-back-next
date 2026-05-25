@@ -5,7 +5,7 @@ const VERBOSE_MEGA = /^(1|true|yes)$/i.test(String(process.env.MEGA_VERBOSE || '
 const AUTO_LOGOUT_DELAY_MS = Number(process.env.MEGA_AUTO_LOGOUT_DELAY_MS) || 45000;
 let chain = Promise.resolve();
 let active = 0;
-const listeners = new Set();
+
 let pendingLogoutTimer = null;
 
 let current = null; // { label, startedAt, id }
@@ -27,7 +27,7 @@ export function withMegaLock(fn, label = 'MEGA') {
   clearTimeout(waitTimer);
   active++; 
   current = { label, startedAt: Date.now(), id: waitId };
-  emit();
+
   if (VERBOSE_MEGA) console.log(`[MEGA-LOCK] ACQUIRE (${active}) -> ${label}`);
     try {
       const res = await fn();
@@ -36,7 +36,7 @@ export function withMegaLock(fn, label = 'MEGA') {
   active = Math.max(0, active - 1);
   if (current && current.id === waitId) current = null;
   if (VERBOSE_MEGA) console.log(`[MEGA-LOCK] RELEASE (${active}) <- ${label}`);
-      emit();
+
       // Programar mega-logout forzado si la cola queda vacía (seguridad de sesión)
       if (active === 0) {
         if (pendingLogoutTimer) { clearTimeout(pendingLogoutTimer); pendingLogoutTimer = null; }
@@ -64,18 +64,6 @@ export function withMegaLock(fn, label = 'MEGA') {
   return next;
 }
 
-function emit() { for (const l of listeners) { try { l({ active }); } catch {} } }
-
-export function onMegaQueue(cb) { listeners.add(cb); return () => listeners.delete(cb); }
-
-export function megaQueueStatus() {
-  return {
-    active,
-    current: current
-      ? { label: current.label, startedAt: current.startedAt, heldForMs: Date.now() - current.startedAt, id: current.id }
-      : null,
-  };
-}
 
 /**
  * Cancela el timer de auto-logout pendiente.

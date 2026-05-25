@@ -120,17 +120,3 @@ export function clearBatchStopRequest(itemId) {
   stopRequests.delete(id);
 }
 
-export function getActiveBatchUploadInfo(itemId) {
-  const id = toItemId(itemId);
-  if (!id) return null;
-  const active = activeUploads.get(id);
-  if (!active) return null;
-  return {
-    itemId: id,
-    phase: active.phase,
-    accountId: active.accountId,
-    proxyUrl: active.proxyUrl,
-    startedAt: active.startedAt,
-    runningForMs: Date.now() - Number(active.startedAt || Date.now()),
-  };
-}

@@ -3,9 +3,6 @@ import { log } from '../utils/logger.js'
 
 const prisma = new PrismaClient()
 
-// Helpers
-function parseIntOrNull(v){ const n = Number(v); return Number.isNaN(n)?null:n }
-
 export const listNotifications = async (req,res) => {
   try {
   const { status, q, take='50', skip='0' } = req.query

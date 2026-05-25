@@ -11,7 +11,7 @@
 /**
  * Elimina secuencias de escape ANSI (colores, cursor) de un string.
  */
-export function stripAnsi(s = '') {
+function stripAnsi(s = '') {
   return String(s).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
 }
 

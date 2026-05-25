@@ -181,7 +181,7 @@ export const appendCopSnapshotToRawResponse = (rawResponse, snapshot) => {
   return base;
 };
 
-export const getCopSnapshotFromRawResponse = (rawResponse) => {
+const getCopSnapshotFromRawResponse = (rawResponse) => {
   const parsed = parseRawResponse(rawResponse);
   if (!parsed) return null;
 

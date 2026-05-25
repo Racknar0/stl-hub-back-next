@@ -49,27 +49,6 @@ const IMAGES_DIR = path.join(UPLOADS_DIR, 'images');
 const ARCHIVES_DIR = path.join(UPLOADS_DIR, 'archives');
 const SYNC_CACHE_DIR = path.join(UPLOADS_DIR, 'sync-cache');
 
-/** Eliminar todo el contenido de un directorio recursivamente. */
-function purgeDirContents(dir) {
-    try {
-        if (!fs.existsSync(dir)) return;
-        const entries = fs.readdirSync(dir);
-        for (const name of entries) {
-            const p = path.join(dir, name);
-            try {
-                const st = fs.statSync(p);
-                if (st.isDirectory())
-                    fs.rmSync(p, { recursive: true, force: true });
-                else fs.unlinkSync(p);
-            } catch (e) {
-                console.warn('[CLEANUP] purge warn:', e.message);
-            }
-        }
-    } catch (e) {
-        console.warn('[CLEANUP] purge root warn:', e.message);
-    }
-}
-
 
 /** Crear directorio si no existe, incluyendo padres. */
 function ensureDir(p) {
@@ -97,17 +76,6 @@ function normalizePairForStore(assetAId, assetBId) {
     return a < b ? { assetAId: a, assetBId: b } : { assetAId: b, assetBId: a };
 }
 
-/** Convertir valor a array de strings no vacíos. */
-function toStringArray(value) {
-    if (!Array.isArray(value)) return [];
-    return value.map((v) => String(v || '').trim()).filter(Boolean);
-}
-
-/** Resolver ruta relativa a absoluta dentro de uploads/, con validación de path traversal. */
-function getSafeUploadAbsolutePath(relPath) {
-    const rel = String(relPath || '').replace(/^[/\\]+/, '');
-    if (!rel) return null;
-    const abs = path.resolve(path.join(UPLOADS_DIR, rel));
 function isPrismaMissingTableError(err) {
     const code = String(err?.code || '');
     const msg = String(err?.message || '').toLowerCase();
@@ -118,21 +86,6 @@ function isPrismaMissingTableError(err) {
     );
 }
 
-/** Sincronizar hashes perceptuales de imágenes de un asset en la DB. */
-/** Ejecutar backfill masivo: recalcular hashes para todos los assets. */
-}
-
-
-/** Sanitizar nombre de archivo para almacenamiento seguro. */
-function safeFileName(originalName) {
-    const ext = path.extname(originalName) || '';
-    const base =
-        path
-            .basename(originalName, ext)
-            .replace(/[^a-zA-Z0-9-_]+/g, '_')
-            .slice(0, 120) || 'file';
-    return `${base}${ext}`;
-}
 // Limpieza de archivos temporales antiguos en uploads/tmp
 /** Limpiar archivos temporales antiguos en uploads/tmp (por antigüedad). */
 function cleanTempDir(maxAgeMs = 20 * 60 * 1000) {
@@ -159,42 +112,7 @@ function cleanTempDir(maxAgeMs = 20 * 60 * 1000) {
     }
 }
 
-/** Limpiar uploads/tmp recursivamente por antigüedad, respetando carpetas de staging activas (batch_*). */
-function cleanTempDirRecursive(maxAgeMs = 48 * 60 * 60 * 1000, { skipDirRegex = /^batch_/ } = {}) {
-    try {
-        const now = Date.now();
-        const walk = (dir) => {
-            if (!fs.existsSync(dir)) return;
-            const entries = fs.readdirSync(dir);
-            for (const name of entries) {
-                const p = path.join(dir, name);
-                try {
-                    const st = fs.statSync(p);
-                    if (st.isDirectory()) {
-                        if (skipDirRegex && skipDirRegex.test(name)) {
-                            // No entrar en carpetas de staging activas
-                            continue;
-                        }
-                        walk(p);
-                        // Intentar borrar si quedó vacía
-                        try {
-                            const items = fs.readdirSync(p);
-                            if (items.length === 0) fs.rmdirSync(p);
-                        } catch {}
-                    } else if (st.isFile()) {
-                        const age = now - Number(st.mtimeMs);
-                        if (age > maxAgeMs) {
-                            try { fs.unlinkSync(p); } catch {}
-                        }
-                    }
-                } catch {}
-            }
-        };
-        walk(TEMP_DIR);
-    } catch (e) {
-        console.warn('[CLEANUP] recursive temp cleanup warn:', e.message);
-    }
-}
+
 /** Eliminar directorios vacíos hacia arriba hasta llegar al directorio tope. */
 function removeEmptyDirsUp(startDir, stopDir) {
     try {
@@ -217,16 +135,6 @@ function removeEmptyDirsUp(startDir, stopDir) {
     } catch (e) {
         console.warn('[CLEANUP] removeEmptyDirsUp warn:', e.message);
     }
-}
-
-/** Leer variable de entorno como booleano (soporta 1/true/yes/on). */
-function envFlag(name, defaultValue = false) {
-    const raw = process.env[name];
-    if (raw == null) return !!defaultValue;
-    const v = String(raw).trim().toLowerCase();
-    if (['1', 'true', 'yes', 'y', 'on'].includes(v)) return true;
-    if (['0', 'false', 'no', 'n', 'off'].includes(v)) return false;
-    return !!defaultValue;
 }
 
 
@@ -361,20 +269,6 @@ async function buildAssetImageParts(asset) {
     }
 
     return { parts, attachedImages };
-}
-
-/** Actualizar descripción de un asset y sincronizar vector en Qdrant. */
-async function updateAssetDescriptionSafely(assetId, rawDescription) {
-    const numericAssetId = Number(assetId);
-    const safe = normalizeDescriptionText(rawDescription) || ASSET_DESCRIPTION_FALLBACK;
-    await prisma.asset.update({
-        where: { id: numericAssetId },
-        data: { description: safe },
-    });
-    qdrantMultimodalService
-        .upsertAssetMultimodalVector(numericAssetId)
-        .catch((err) => console.error('[QDRANT] Description update error:', err));
-    return safe;
 }
 
 /** Actualizar descripciones bilingües (ES/EN) de un asset y sincronizar con Qdrant. */
@@ -1947,30 +1841,6 @@ async function refreshAccountStorageFromMegaDfInCurrentSession(accountId, ctx = 
     return refreshStorageMetrics(prisma, accountId, ctx);
 }
 
-/** Aplicar proxy MEGA via mega-proxy o fallar con error. */
-async function applyProxyOrThrow(role, picked, ctx) {
-    if (!picked) throw new Error(`[BATCH] Sin proxy para ${role}`);
-    const r = await applyMegaProxy(picked, { ctx, timeoutMs: 15000, clearOnFail: false });
-    if (!r?.enabled) throw new Error(`[BATCH] No pude aplicar proxy (${role})`);
-    return r;
-}
-
-/** Intentar proxies MEGA en secuencia hasta encontrar uno funcional. */
-async function applyAnyWorkingProxyOrThrow(role, proxies, ctx, maxTries = 10) {
-    const tries = Math.min(Math.max(1, Number(maxTries) || 1), proxies.length);
-    let lastErr = '';
-    for (let i = 0; i < tries; i++) {
-        const p = proxies[i];
-        try {
-            await applyProxyOrThrow(role, p, ctx);
-            return p;
-        } catch (e) {
-            lastErr = e?.message || String(e);
-        }
-    }
-    throw new Error(`[BATCH] Ningún proxy funcionó para ${role}. lastErr=${String(lastErr).slice(0, 200)}`);
-}
-
 
 /** Listar réplicas de un asset con estado y progreso. GET /api/assets/:id/replicas */
 export const listAssetReplicas = async (req, res) => {
@@ -2397,7 +2267,7 @@ function normalizeToken(v) {
 }
 
 /** Generar colecciones temáticas estacionales según el mes actual. */
-export function getSeasonalCollections(month = new Date().getMonth()) {
+function getSeasonalCollections(month = new Date().getMonth()) {
     const m = Number(month);
     if (!Number.isFinite(m)) return [];
     return (SEASONAL_COLLECTIONS_BY_MONTH[m] || []).map((it) => ({ ...it }));

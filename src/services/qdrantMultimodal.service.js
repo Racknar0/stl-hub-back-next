@@ -21,7 +21,6 @@ if (geminiApiKey) {
   ai = new GoogleGenAI({ apiKey: geminiApiKey, httpOptions: { apiVersion: 'v1alpha' } });
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const IMAGE_MIME_BY_EXT = {
     '.png': 'image/png',
@@ -90,7 +89,7 @@ const ensureCollectionExists = async () => {
   }
 };
 
-export const generateMultimodalVectorText = (asset) => {
+const generateMultimodalVectorText = (asset) => {
   const titleEs = String(asset.title || '').trim() || 'Sin título';
   const titleEn = String(asset.titleEn || asset.title || '').trim() || 'Untitled';
 
@@ -334,7 +333,6 @@ export const searchByImage = async (imageBuffer, mimeType, textContext = '', lim
 };
 
 export default {
-  generateMultimodalVectorText,
   upsertAssetMultimodalVector,
   deleteAssetMultimodalVector,
   getMultimodalSyncStatus,
