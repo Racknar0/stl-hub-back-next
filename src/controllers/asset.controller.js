@@ -1938,18 +1938,9 @@ export const getScpCommand = async (req, res) => {
 
 // ─── MEGA helpers centralizados ──────────────────────────────────────
 // runCmd ahora viene de megaCmd.js (importado arriba)
-import { runCmd } from '../utils/megaCmd.js';
+import { runCmd, safeMkdir } from '../utils/megaCmd.js';
 
-// mega-mkdir retorna código 54 cuando la carpeta ya existe; lo tratamos como éxito silencioso.
-async function safeMkdir(remotePath) {
-    try {
-        await runCmd('mega-mkdir', ['-p', remotePath]);
-    } catch (e) {
-        // Código 54 = carpeta ya existe → OK
-        if (!/exited 54|Folder already exists/i.test(String(e.message))) throw e;
-        console.log(`[MEGA] mkdir exists -> ok`);
-    }
-}
+
 
 // refreshAccountStorageFromMegaDfInCurrentSession ahora usa refreshStorageMetrics de megaSession.js
 async function refreshAccountStorageFromMegaDfInCurrentSession(accountId, ctx = '') {
@@ -1980,20 +1971,7 @@ async function applyAnyWorkingProxyOrThrow(role, proxies, ctx, maxTries = 10) {
     throw new Error(`[BATCH] Ningún proxy funcionó para ${role}. lastErr=${String(lastErr).slice(0, 200)}`);
 }
 
-/** Cerrar sesión MEGA de forma segura (ignorar errores). */
-async function megaLogoutBestEffort(ctx) {
-    await megaLogoutSafe(ctx);
-}
 
-/** Iniciar sesión MEGA con credenciales (session string o user/pass). */
-async function megaLoginOrThrow(payload, ctx, accountId = null, timeoutMs = null) {
-    await megaLoginFull(prisma, accountId, payload, ctx, {
-        timeoutMs: timeoutMs || Number(process.env.MEGA_LOGIN_TIMEOUT_MS) || 60000,
-        skipStorageRefresh: true,   // asset operations refresh storage separately
-        skipProxySetup: true,       // asset.controller manages its own proxy via applyAnyWorkingProxyOrThrow
-    });
-    console.log(`[MEGA][LOGIN][OK] ${ctx}`);
-}
 /** Listar réplicas de un asset con estado y progreso. GET /api/assets/:id/replicas */
 export const listAssetReplicas = async (req, res) => {
     try {
@@ -2138,14 +2116,18 @@ export const deleteAsset = async (req, res) => {
                             }
                             
                             proxyUsed = p.proxyUrl;
-                            await megaLogoutBestEffort(`PREV ${proxyCtx}`);
-                            await megaLoginOrThrow(payload, proxyCtx, acc.id, perProxyTimeout);
+                            await megaLogoutSafe(`PREV ${proxyCtx}`);
+                            await megaLoginFull(prisma, acc.id, payload, proxyCtx, {
+                                timeoutMs: perProxyTimeout,
+                                skipStorageRefresh: true,
+                                skipProxySetup: true,
+                            });
                             loginOk = true;
                             break;
                         } catch (err) {
                             lastErr = err?.message || String(err);
                             console.warn(`[ASSETS][DEL][LOGIN-FAIL] Proxy ${p.proxyUrl} falló:`, lastErr);
-                            try { await megaLogoutBestEffort(`CLEAN ${proxyCtx}`); } catch {}
+                            try { await megaLogoutSafe(`CLEAN ${proxyCtx}`); } catch {}
                         }
                     }
 
@@ -2174,7 +2156,7 @@ export const deleteAsset = async (req, res) => {
                         );
                     } catch {}
 
-                    await megaLogoutBestEffort(`POST ${ctx}`);
+                    await megaLogoutSafe(`POST ${ctx}`);
                 }, `DEL-${acc.id}`);
             } catch (e) {
                 console.warn(

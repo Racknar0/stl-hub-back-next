@@ -7,7 +7,7 @@ import { megaCmdWithProgressAndStall, isMegaStallError } from '../utils/megaTran
 import path from 'path'
 import fs from 'fs'
 import { runCmd } from '../utils/megaCmd.js'
-import { megaLoginFull, megaLogoutSafe } from '../utils/megaSession.js'
+import { megaLoginFull, megaLogoutSafe, refreshStorageMetrics } from '../utils/megaSession.js'
 import { parseStorageFromDfText } from '../utils/megaDfParser.js'
 
 const prisma = new PrismaClient()
@@ -139,49 +139,7 @@ function pickFirstFileFromLs(lsOut){
 }
 
 async function refreshAccountStorageInCurrentSession(accountId, ctx = '') {
-  const id = Number(accountId)
-  if (!Number.isFinite(id) || id <= 0) return null
-
-  const suffix = ctx ? ` ${ctx}` : ''
-
-  try {
-    const out = await runCmd('mega-df', ['-h'], { quiet: true })
-    const txt = (out.out || out.err || '').toString()
-    const parsed = parseStorageFromDfText(txt)
-    const updated = await prisma.megaAccount.update({
-      where: { id },
-      data: {
-        storageUsedMB: parsed.storageUsedMB,
-        storageTotalMB: parsed.storageTotalMB,
-        lastCheckAt: new Date(),
-      },
-      select: { id: true, storageUsedMB: true, storageTotalMB: true },
-    })
-    log.info(`[RESTORE][METRICS][OK] accId=${id} used=${updated.storageUsedMB}MB total=${updated.storageTotalMB}MB${suffix}`)
-    return updated
-  } catch (e) {
-    log.warn(`[RESTORE][METRICS][WARN] mega-df -h accId=${id}${suffix}: ${String(e.message || e).slice(0, 200)}`)
-  }
-
-  try {
-    const out = await runCmd('mega-df', [], { quiet: true })
-    const txt = (out.out || out.err || '').toString()
-    const parsed = parseStorageFromDfText(txt)
-    const updated = await prisma.megaAccount.update({
-      where: { id },
-      data: {
-        storageUsedMB: parsed.storageUsedMB,
-        storageTotalMB: parsed.storageTotalMB,
-        lastCheckAt: new Date(),
-      },
-      select: { id: true, storageUsedMB: true, storageTotalMB: true },
-    })
-    log.info(`[RESTORE][METRICS][OK] fallback accId=${id} used=${updated.storageUsedMB}MB total=${updated.storageTotalMB}MB${suffix}`)
-    return updated
-  } catch (e) {
-    log.warn(`[RESTORE][METRICS][WARN] mega-df fallback accId=${id}${suffix}: ${String(e.message || e).slice(0, 200)}`)
-    return null
-  }
+  return refreshStorageMetrics(prisma, accountId, ctx)
 }
 
 

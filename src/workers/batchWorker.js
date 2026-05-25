@@ -32,8 +32,8 @@ import {
   clearBatchStopRequest,
 } from '../utils/batchProxySwitch.js'
 import qdrantMultimodalService from '../services/qdrantMultimodal.service.js'
-import { loginWithSessionCache } from '../utils/megaSessionHelper.js'
-import { runCmd, attachAutoAcceptTerms } from '../utils/megaCmd.js'
+import { runCmd, attachAutoAcceptTerms, safeMkdir } from '../utils/megaCmd.js'
+import { extractArchiveWithFallback } from '../utils/archiveExtractor.js'
 import { parseSizeToMB, parseStorageFromDfText } from '../utils/megaDfParser.js'
 import { killProcessTreeBestEffort } from '../utils/megaTransfer.js'
 import { megaLoginFull, megaLogoutSafe } from '../utils/megaSession.js'
@@ -265,82 +265,8 @@ async function refreshMainAccountStorageMetrics(mainAccount, extraCtx = '') {
 
 // runCmd ahora viene del módulo centralizado (megaCmd.js)
 
-// Resolver la ruta de 7z según el SO
-const SEVEN_ZIP = (() => {
-  if (process.platform !== 'win32') return '7z'
-  const candidates = [
-    'C:\\Program Files\\7-Zip\\7z.exe',
-    'C:\\Program Files (x86)\\7-Zip\\7z.exe',
-    path.join(process.env.LOCALAPPDATA || '', '7-Zip', '7z.exe'),
-  ]
-  for (const p of candidates) { if (fs.existsSync(p)) return p }
-  return '7z' // fallback: asume que está en el PATH
-})()
-
-function run7z(args) {
-  return new Promise((resolve, reject) => {
-    // shell: false evita problemas de escape de rutas con espacios en Windows
-    const child = spawn(SEVEN_ZIP, args, { shell: false })
-    let out = '', err = ''
-    child.stdout.on('data', d => (out += d.toString()))
-    child.stderr.on('data', d => (err += d.toString()))
-    child.on('error', (e) => reject(new Error(`Spawn error: ${e.message}`)))
-    child.on('close', code =>
-      code === 0 ? resolve(out) : reject(new Error(`7z exited ${code}: ${(err || out).slice(0, 300)}`))
-    )
-  })
-}
-
-function runUnrar(args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn('unrar', args, { shell: false })
-    let out = '', err = ''
-    child.stdout.on('data', d => (out += d.toString()))
-    child.stderr.on('data', d => (err += d.toString()))
-    child.on('error', (e) => reject(new Error(`Spawn error: ${e.message}`)))
-    child.on('close', code =>
-      code === 0 ? resolve(out) : reject(new Error(`unrar exited ${code}: ${(err || out).slice(0, 300)}`))
-    )
-  })
-}
-
-function isUnsupportedArchiveMethodError(msg = '') {
-  return /unsupported method|no implementado|not implemented/i.test(String(msg || ''))
-}
-
-async function extractArchiveWithFallback(archivePath, extractDir) {
-  try {
-    await run7z(['x', archivePath, `-o${extractDir}`, '-y', '-aoa'])
-    return { tool: '7z' }
-  } catch (e) {
-    const firstErr = String(e?.message || e)
-    const ext = path.extname(String(archivePath || '')).toLowerCase()
-    if (ext !== '.rar' || !isUnsupportedArchiveMethodError(firstErr)) {
-      throw e
-    }
-
-    try {
-      await runUnrar(['x', '-o+', '-y', archivePath, `${extractDir}${path.sep}`])
-      return { tool: 'unrar' }
-    } catch (e2) {
-      const secondErr = String(e2?.message || e2)
-      if (/spawn error:.*unrar/i.test(secondErr)) {
-        throw new Error(`RAR no soportado por 7z y no existe 'unrar' instalado. Detalle 7z: ${firstErr.slice(0, 180)}`)
-      }
-      throw new Error(`7z: ${firstErr.slice(0, 160)} | unrar: ${secondErr.slice(0, 160)}`)
-    }
-  }
-}
 
 // killProcessTreeBestEffort y attachAutoAcceptTerms ahora vienen de módulos centralizados
-
-async function safeMkdir(remotePath) {
-  try { await runCmd('mega-mkdir', ['-p', remotePath]) } catch {}
-}
-
-async function megaLogout(ctx) {
-  await megaLogoutSafe(ctx);
-}
 
 async function megaLogin(payload, ctx, accountId = null) {
   if (!accountId && ctx) {
@@ -368,19 +294,19 @@ async function ensureMegaSessionForAccount(payload, accountId, ctx, opts = {}) {
   }
 
   if (forceRelogin && activeMegaSessionAccountId === Number(accountId)) {
-    try { await megaLogout(`FORCE_RELOGIN acc ${accountId} ${ctx}`) } catch {}
+    try { await megaLogoutSafe(`FORCE_RELOGIN acc ${accountId} ${ctx}`) } catch {}
     activeMegaSessionAccountId = 0
   }
 
   if (activeMegaSessionAccountId > 0 && activeMegaSessionAccountId !== Number(accountId)) {
-    try { await megaLogout(`SWITCH acc ${activeMegaSessionAccountId} -> ${accountId}`) } catch {}
+    try { await megaLogoutSafe(`SWITCH acc ${activeMegaSessionAccountId} -> ${accountId}`) } catch {}
     activeMegaSessionAccountId = 0
   }
 
   // Preemptive logout: if our tracker says 0 (unknown state) but a system-level
   // session might be lingering, clear it to avoid "Already logged in" errors.
   if (activeMegaSessionAccountId === 0) {
-    try { await megaLogout(`PREEMPTIVE_CLEAR before login accId=${accountId} ${ctx}`) } catch {}
+    try { await megaLogoutSafe(`PREEMPTIVE_CLEAR before login accId=${accountId} ${ctx}`) } catch {}
   }
 
   await megaLogin(payload, ctx, accountId)
@@ -914,7 +840,7 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
         updateActiveBatchUpload(account.__batchItemId, { proxyUrl: picked.proxyUrl })
 
         if (forceReloginNextAttempt) {
-          try { await megaLogout(`STALL_RECOVERY acc ${account.id} ${ctx}`) } catch {}
+          try { await megaLogoutSafe(`STALL_RECOVERY acc ${account.id} ${ctx}`) } catch {}
           activeMegaSessionAccountId = 0
         }
 
@@ -987,7 +913,7 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
         forceReloginNextAttempt = true
         activeMegaSessionAccountId = 0 // reset tracker so ensureMegaSession does full logout→login
         console.warn(`[BATCH][${role.toUpperCase()}][RECOVERY] 'Already logged in' detectado, forzando logout+relogin accId=${account.id}`)
-        try { await megaLogout(`ALREADY_LOGGED_IN_RECOVERY acc ${account.id}`) } catch {}
+        try { await megaLogoutSafe(`ALREADY_LOGGED_IN_RECOVERY acc ${account.id}`) } catch {}
       }
 
       if (attempt >= MAX_STALL_RETRIES) {

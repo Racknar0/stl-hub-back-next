@@ -6,9 +6,9 @@ import { spawn } from 'child_process';
 import { withMegaLock } from '../utils/megaQueue.js';
 import { applyMegaProxy, listMegaProxies, clearMegaProxyIfSafe, getStickyProxyForAccount } from '../utils/megaProxy.js';
 import { megaCmdWithProgressAndStall, isMegaStallError } from '../utils/megaTransfer.js';
-import { runCmd, attachAutoAcceptTerms } from '../utils/megaCmd.js';
+import { runCmd, attachAutoAcceptTerms, safeMkdir } from '../utils/megaCmd.js';
 import { parseSizeToMB, parseStorageFromDfText } from '../utils/megaDfParser.js';
-import { megaLoginFull, megaLogoutSafe, createReloginFn } from '../utils/megaSession.js';
+import { megaLoginFull, megaLogoutSafe, createReloginFn, refreshStorageMetrics } from '../utils/megaSession.js';
 import path from 'path';
 import fs from 'fs';
 
@@ -147,11 +147,6 @@ async function megaPutWithStallRetry({ localPath, remoteFolderOrFile, ctx, accou
 
 // runCmd ahora viene del módulo centralizado (megaCmd.js)
 
-// runCmdWithTimeout ya no es necesario; usar runCmd(cmd, args, { timeoutMs }) directamente
-async function runCmdWithTimeout(cmd, args = [], timeoutMs = 15000, options = {}) {
-  return runCmd(cmd, args, { cwd: options.cwd, maxBytes: options.maxBytes, timeoutMs });
-}
-
 // Subida con progreso leyendo stderr/stdout incremental de mega-put
 async function runMegaPutWithProgress(localFile, remoteFolder, { assetId, backupId, index, total, globalDone, totalPlanned }) {
   return new Promise((resolve, reject) => {
@@ -208,56 +203,7 @@ async function runMegaPutWithProgress(localFile, remoteFolder, { assetId, backup
 // parseSizeToMB ahora viene del módulo centralizado (megaDfParser.js)
 
 async function refreshAccountStorageInCurrentSession(accountId, ctx = '') {
-  const id = Number(accountId);
-  if (!Number.isFinite(id) || id <= 0) return null;
-
-  const parseDfText = (txtRaw) => {
-    const parsed = parseStorageFromDfText(txtRaw);
-    let { storageUsedMB, storageTotalMB } = parsed;
-    if (!storageTotalMB || storageTotalMB <= 0) storageTotalMB = DEFAULT_FREE_QUOTA_MB;
-    if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB;
-    return { storageUsedMB, storageTotalMB };
-  };
-
-  const label = ctx ? ` ${ctx}` : '';
-  try {
-    const out = await runCmdWithTimeout('mega-df', ['-h'], MEGA_READONLY_TIMEOUT_MS);
-    const txt = (out.out || out.err || '').toString();
-    const parsed = parseDfText(txt);
-    const updated = await prisma.megaAccount.update({
-      where: { id },
-      data: {
-        storageUsedMB: parsed.storageUsedMB,
-        storageTotalMB: parsed.storageTotalMB,
-        lastCheckAt: new Date(),
-      },
-      select: { id: true, storageUsedMB: true, storageTotalMB: true },
-    });
-    log.info(`[SYNC][METRICS][OK] accId=${id} used=${updated.storageUsedMB}MB total=${updated.storageTotalMB}MB${label}`);
-    return updated;
-  } catch (e) {
-    log.warn(`[SYNC][METRICS][WARN] mega-df -h accId=${id}${label}: ${String(e.message || e).slice(0, 200)}`);
-  }
-
-  try {
-    const out = await runCmdWithTimeout('mega-df', [], MEGA_READONLY_TIMEOUT_MS);
-    const txt = (out.out || out.err || '').toString();
-    const parsed = parseDfText(txt);
-    const updated = await prisma.megaAccount.update({
-      where: { id },
-      data: {
-        storageUsedMB: parsed.storageUsedMB,
-        storageTotalMB: parsed.storageTotalMB,
-        lastCheckAt: new Date(),
-      },
-      select: { id: true, storageUsedMB: true, storageTotalMB: true },
-    });
-    log.info(`[SYNC][METRICS][OK] fallback accId=${id} used=${updated.storageUsedMB}MB total=${updated.storageTotalMB}MB${label}`);
-    return updated;
-  } catch (e) {
-    log.warn(`[SYNC][METRICS][WARN] mega-df fallback accId=${id}${label}: ${String(e.message || e).slice(0, 200)}`);
-    return null;
-  }
+  return refreshStorageMetrics(prisma, accountId, ctx);
 }
 
 // Flag central para habilitar/deshabilitar exportación de links públicos en sincronizaciones
@@ -551,7 +497,7 @@ export const testAccount = async (req, res) => {
 
         // Limpiar sesiones previas
         try {
-          await runCmdWithTimeout(logoutCmd, [], MEGA_LOGOUT_TIMEOUT_MS);
+          await runCmd(logoutCmd, [], { timeoutMs: MEGA_LOGOUT_TIMEOUT_MS });
           console.log('[ACCOUNTS] pre-logout ok');
         } catch (e) {
           console.warn('[ACCOUNTS] pre-logout warn:', String(e.message).slice(0, 200));
@@ -561,14 +507,14 @@ export const testAccount = async (req, res) => {
         try {
           /* CÓDIGO ANTERIOR RESPALDADO
           if (payload?.type === 'session' && payload.session) {
-            await runCmdWithTimeout(loginCmd, [payload.session], MEGA_LOGIN_PER_PROXY_TIMEOUT_MS);
+            await runCmd(loginCmd, [payload.session], { timeoutMs: MEGA_LOGIN_PER_PROXY_TIMEOUT_MS });
           } else if (payload?.username && payload?.password) {
-            await runCmdWithTimeout(loginCmd, [payload.username, payload.password], MEGA_LOGIN_PER_PROXY_TIMEOUT_MS);
+            await runCmd(loginCmd, [payload.username, payload.password], { timeoutMs: MEGA_LOGIN_PER_PROXY_TIMEOUT_MS });
           } else {
             throw new Error('Invalid credentials payload');
           }
           */
-          const loginResult = await loginWithSessionCache(prisma, runCmdWithTimeout, id, payload, ctx, MEGA_LOGIN_PER_PROXY_TIMEOUT_MS);
+          const loginResult = await loginWithSessionCache(prisma, runCmd, id, payload, ctx, MEGA_LOGIN_PER_PROXY_TIMEOUT_MS);
           didLogin = true;
           loginOk = true;
           log.info(`[ACCOUNTS][TEST] Login OK via proxy ${p.proxyUrl} ${ctx} metodo=${loginResult.method}`);
@@ -611,7 +557,7 @@ export const testAccount = async (req, res) => {
       }
 
       if (base && base !== '/') {
-        try { await runCmdWithTimeout(mkdirCmd, ['-p', base], MEGA_MKDIR_TIMEOUT_MS); } catch (e) { /* silencio mkdir */ }
+        try { await runCmd(mkdirCmd, ['-p', base], { timeoutMs: MEGA_MKDIR_TIMEOUT_MS }); } catch (e) { /* silencio mkdir */ }
       }
     }, 'ACCOUNTS-TEST')
 
@@ -732,13 +678,13 @@ export const testAccount = async (req, res) => {
     try {
       const { isUploadsActive } = await import('../utils/uploadsActiveFlag.js');
       if (!isUploadsActive()) {
-        try { await withMegaLock(() => runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS), 'ACCOUNTS-TEST-LOGOUT'); } catch {}
+        try { await withMegaLock(() => runCmd('mega-logout', [], { timeoutMs: MEGA_LOGOUT_TIMEOUT_MS }), 'ACCOUNTS-TEST-LOGOUT'); } catch {}
       } else {
         log.warn('[ACCOUNTS][TEST][FINALLY] uploads activos: skip mega-logout');
       }
     } catch {
       // fallback al comportamiento anterior si no podemos cargar helper
-      try { await withMegaLock(() => runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS), 'ACCOUNTS-TEST-LOGOUT'); } catch {}
+      try { await withMegaLock(() => runCmd('mega-logout', [], { timeoutMs: MEGA_LOGOUT_TIMEOUT_MS }), 'ACCOUNTS-TEST-LOGOUT'); } catch {}
     }
 
     // Si esta llamada aplicó proxy, intentamos limpiar al final (sin afectar subidas activas)
@@ -769,10 +715,10 @@ export const getAccountDetail = async (req, res) => {
         skipStorageRefresh: true,
       });
       if (base && base !== '/') {
-        try { await runCmdWithTimeout(mkdirCmd, ['-p', base], MEGA_MKDIR_TIMEOUT_MS) } catch {}
+        try { await runCmd(mkdirCmd, ['-p', base], { timeoutMs: MEGA_MKDIR_TIMEOUT_MS }) } catch {}
       }
       try {
-        const ls = await runCmdWithTimeout(lsCmd, ['-l', base || '/'], MEGA_READONLY_TIMEOUT_MS)
+        const ls = await runCmd(lsCmd, ['-l', base || '/'], { timeoutMs: MEGA_READONLY_TIMEOUT_MS })
         items = (ls.out || '').split(/\r?\n/).filter(Boolean)
       } catch {}
       await megaLogoutSafe('get-acc-detail');
@@ -918,7 +864,7 @@ async function megaLsExistsWithRetries(remoteFile, { attempts = 2, waitMs = 600,
   let lastErr = null;
   for (let i = 0; i <= attempts; i++) {
     try {
-      await runCmdWithTimeout('mega-ls', [remoteFile], timeoutMs);
+      await runCmd('mega-ls', [remoteFile], { timeoutMs });
       return true;
     } catch (e) {
       lastErr = e;
@@ -1108,7 +1054,7 @@ export const syncMainToBackups = async (req, res) => {
       let lastErr = null;
       for (let i = 1; i <= attempts; i++) {
         try {
-          const exp = await runCmdWithTimeout('mega-export', ['-a', remoteFile], 15000);
+          const exp = await runCmd('mega-export', ['-a', remoteFile], { timeoutMs: 15000 });
             const all = (exp.out + exp.err) || '';
             const m = all.match(/https?:\/\/mega\.nz\/\S+/i);
             if (m) {
@@ -1139,7 +1085,7 @@ export const syncMainToBackups = async (req, res) => {
           skipProxySetup: true,
         });
 
-        try { await runCmd('mega-mkdir', ['-p', baseB]); } catch {}
+        try { await runCmd('mega-mkdir', ['-p', baseB], { timeoutMs: MEGA_MKDIR_TIMEOUT_MS }); } catch {}
 
         scanStats.set(b.id, { existing: 0, missing: 0, createdReplicaRows: 0 });
 
@@ -1268,13 +1214,7 @@ export const syncMainToBackups = async (req, res) => {
     const SYNC_DIR = path.join(UPLOADS_DIR, 'sync-cache', `main-${mainId}`);
     fs.mkdirSync(SYNC_DIR, { recursive: true });
 
-    const safeMkdir = async remotePath => {
-      try { await runCmd('mega-mkdir', ['-p', remotePath]); }
-      catch (e) {
-        const msg = String(e.message || '');
-        if (!/54/.test(msg) && !/exists/i.test(msg)) throw e;
-      }
-    };
+
 
     // 5. Descargar SIEMPRE desde la cuenta main cada asset faltante (no se inspecciona disco previo)
     const payloadMain = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag);
@@ -1604,16 +1544,16 @@ export const alignmentAudit = async (req, res) => {
         ctx: `align-audit main=${mainId}`, accountId: mainId
       });
 
-      try { await runCmdWithTimeout('mega-mkdir', ['-p', baseMain], MEGA_MKDIR_TIMEOUT_MS); } catch {}
+      try { await runCmd('mega-mkdir', ['-p', baseMain], { timeoutMs: MEGA_MKDIR_TIMEOUT_MS }); } catch {}
 
       try {
-        const ls = await runCmdWithTimeout('mega-ls', [baseMain], 60000);
+        const ls = await runCmd('mega-ls', [baseMain], { timeoutMs: 60000 });
         mainFolders = (ls.out || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
       } catch (e) {
         console.warn(`[ALIGNMENT][AUDIT] Error listando main: ${e.message}`);
       }
 
-      try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
+      try { await runCmd('mega-logout', [], { timeoutMs: MEGA_LOGOUT_TIMEOUT_MS }); } catch {}
     }, `ALIGN-AUDIT-MAIN-${mainId}`);
     console.log(`[ALIGNMENT][AUDIT] Main MEGA: ${mainFolders.length} carpetas encontradas`);
 
@@ -1629,16 +1569,16 @@ export const alignmentAudit = async (req, res) => {
         ctx: `align-audit backup=${backupAccount.id}`, accountId: backupAccount.id
       });
 
-      try { await runCmdWithTimeout('mega-mkdir', ['-p', baseB], MEGA_MKDIR_TIMEOUT_MS); } catch {}
+      try { await runCmd('mega-mkdir', ['-p', baseB], { timeoutMs: MEGA_MKDIR_TIMEOUT_MS }); } catch {}
 
       try {
-        const ls = await runCmdWithTimeout('mega-ls', [baseB], 60000);
+        const ls = await runCmd('mega-ls', [baseB], { timeoutMs: 60000 });
         backupFolders = (ls.out || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
       } catch (e) {
         console.warn(`[ALIGNMENT][AUDIT] Error listando backup: ${e.message}`);
       }
 
-      try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
+      try { await runCmd('mega-logout', [], { timeoutMs: MEGA_LOGOUT_TIMEOUT_MS }); } catch {}
     }, `ALIGN-AUDIT-BACKUP-${backupAccount.id}`);
     console.log(`[ALIGNMENT][AUDIT] Backup MEGA: ${backupFolders.length} carpetas encontradas`);
 
@@ -1818,13 +1758,7 @@ export const alignmentSync = async (req, res) => {
         await applyProxyByIndexOrThrow(backupAccount, getProxyIndex(), ctxB);
         await reloginB();
 
-        const safeMkdir = async remotePath => {
-          try { await runCmd('mega-mkdir', ['-p', remotePath]); }
-          catch (e) {
-            const msg = String(e.message || '');
-            if (!/54/.test(msg) && !/exists/i.test(msg)) throw e;
-          }
-        };
+
         await safeMkdir(baseB);
 
         for (let i = 0; i < toUpload.length; i++) {
@@ -1992,7 +1926,7 @@ export const alignmentCleanup = async (req, res) => {
         const remotePath = path.posix.join(baseTarget, folder);
         console.log(`[ALIGNMENT][CLEANUP][${target.toUpperCase()}] ${i + 1}/${safeToDelete.length} Eliminando: ${remotePath}`);
         try {
-          await runCmdWithTimeout('mega-rm', ['-rf', remotePath], 30000);
+          await runCmd('mega-rm', ['-rf', remotePath], { timeoutMs: 30000 });
           console.log(`[ALIGNMENT][CLEANUP][${target.toUpperCase()}][OK] ${folder}`);
           results.push({ folder, status: 'DELETED' });
           deletedCount++;
@@ -2009,7 +1943,7 @@ export const alignmentCleanup = async (req, res) => {
         console.warn(`[ALIGNMENT][CLEANUP] No se pudieron refrescar métricas: ${String(e.message).slice(0, 200)}`);
       }
 
-      try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
+      try { await runCmd('mega-logout', [], { timeoutMs: MEGA_LOGOUT_TIMEOUT_MS }); } catch {}
     }, `ALIGN-CLEANUP-${target.toUpperCase()}-${targetAccount.id}`);
 
     console.log(`[ALIGNMENT][CLEANUP][${target.toUpperCase()}][DONE] deleted=${deletedCount} failed=${safeToDelete.length - deletedCount} blocked=${blocked.length}`);
@@ -2097,7 +2031,7 @@ export const alignmentCleanupUnified = async (req, res) => {
           const remotePath = path.posix.join(baseMain, folder);
           console.log(`[ALIGNMENT][CLEANUP-UNIFIED][MAIN] ${i + 1}/${safeMainFolders.length} Eliminando: ${remotePath}`);
           try {
-            await runCmdWithTimeout('mega-rm', ['-rf', remotePath], 30000);
+            await runCmd('mega-rm', ['-rf', remotePath], { timeoutMs: 30000 });
             mainResults.push({ folder, status: 'DELETED' });
             mainDeleted++;
           } catch (e) {
@@ -2113,7 +2047,7 @@ export const alignmentCleanupUnified = async (req, res) => {
           console.warn(`[ALIGNMENT][CLEANUP-UNIFIED] No se pudieron refrescar métricas main: ${String(e.message).slice(0, 200)}`);
         }
 
-        try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
+        try { await runCmd('mega-logout', [], { timeoutMs: MEGA_LOGOUT_TIMEOUT_MS }); } catch {}
       }, `ALIGN-CLEANUP-UNIFIED-MAIN-${mainId}`);
     }
 
@@ -2133,7 +2067,7 @@ export const alignmentCleanupUnified = async (req, res) => {
           const remotePath = path.posix.join(baseB, folder);
           console.log(`[ALIGNMENT][CLEANUP-UNIFIED][BACKUP] ${i + 1}/${safeBackupFolders.length} Eliminando: ${remotePath}`);
           try {
-            await runCmdWithTimeout('mega-rm', ['-rf', remotePath], 30000);
+            await runCmd('mega-rm', ['-rf', remotePath], { timeoutMs: 30000 });
             backupResults.push({ folder, status: 'DELETED' });
             backupDeleted++;
           } catch (e) {
@@ -2149,7 +2083,7 @@ export const alignmentCleanupUnified = async (req, res) => {
           console.warn(`[ALIGNMENT][CLEANUP-UNIFIED] No se pudieron refrescar métricas backup: ${String(e.message).slice(0, 200)}`);
         }
 
-        try { await runCmdWithTimeout('mega-logout', [], MEGA_LOGOUT_TIMEOUT_MS); } catch {}
+        try { await runCmd('mega-logout', [], { timeoutMs: MEGA_LOGOUT_TIMEOUT_MS }); } catch {}
       }, `ALIGN-CLEANUP-UNIFIED-BACKUP-${backupAccount.id}`);
     }
 
@@ -2273,13 +2207,7 @@ export const alignmentRestore = async (req, res) => {
         await applyProxyByIndexOrThrow(main, getProxyIndex(), ctxM);
         await reloginM();
 
-        const safeMkdir = async remotePath => {
-          try { await runCmd('mega-mkdir', ['-p', remotePath]); }
-          catch (e) {
-            const msg = String(e.message || '');
-            if (!/54/.test(msg) && !/exists/i.test(msg)) throw e;
-          }
-        };
+
         await safeMkdir(baseMain);
 
         for (let i = 0; i < toUpload.length; i++) {
@@ -2413,7 +2341,7 @@ async function getOrCreatePublicLink(remoteFile, ctx) {
       // 1. Intentar leer link existente (sin -a)
       try {
         console.log(`[SYNC][EXPORT][TRY-GET] intento=${attempt}/${MEGA_EXPORT_ATTEMPTS} timeout=${timeout}ms ${ctx}`);
-        const exp = await runCmdWithTimeout('mega-export', [remoteFile], timeout);
+        const exp = await runCmd('mega-export', [remoteFile], { timeoutMs: timeout });
         const raw = (exp.out + exp.err) || '';
         const mGet = raw.match(/https?:\/\/mega\.nz\/\S+/i);
         if (mGet) {
@@ -2427,7 +2355,7 @@ async function getOrCreatePublicLink(remoteFile, ctx) {
 
       // 2. Crear link (-a)
         console.log(`[SYNC][EXPORT][CREATE] intento=${attempt}/${MEGA_EXPORT_ATTEMPTS} timeout=${timeout}ms ${ctx}`);
-      const expCreate = await runCmdWithTimeout('mega-export', ['-a', remoteFile], timeout);
+        const expCreate = await runCmd('mega-export', ['-a', remoteFile], { timeoutMs: timeout });
       const all = (expCreate.out + expCreate.err) || '';
       const m = all.match(/https?:\/\/mega\.nz\/\S+/i);
       if (m) {

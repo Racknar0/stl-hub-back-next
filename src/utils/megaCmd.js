@@ -190,3 +190,24 @@ export function runCmd(cmd, args = [], opts = {}) {
     });
   });
 }
+
+// ─── safeMkdir ───────────────────────────────────────────────────
+/**
+ * Crear carpeta remota en MEGA de forma segura.
+ *
+ * Ejecuta `mega-mkdir -p <remotePath>` y silencia errores de
+ * "already exists" (código 54). Cualquier otro error se relanza.
+ *
+ * @param {string} remotePath — Ruta remota a crear
+ * @param {object} [opts]
+ * @param {number} [opts.timeoutMs=30000] — Timeout del comando
+ */
+export async function safeMkdir(remotePath, opts = {}) {
+  const { timeoutMs = 30000 } = opts;
+  try {
+    await runCmd('mega-mkdir', ['-p', remotePath], { timeoutMs });
+  } catch (e) {
+    const msg = String(e.message || '');
+    if (!/54/.test(msg) && !/already exists/i.test(msg) && !/exists/i.test(msg)) throw e;
+  }
+}
