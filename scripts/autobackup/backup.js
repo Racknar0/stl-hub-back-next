@@ -302,6 +302,11 @@ async function rotateLocal(currentDir) {
 
 // ── Step 8: Dashboard Notification ────────────────────────────
 async function sendNotification(success, errorMsg = null) {
+  if (success) {
+    log('📢 Saltando notificación de éxito (sólo se notifican fallos)');
+    return;
+  }
+
   const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
 
   const lines = results.map(r =>
