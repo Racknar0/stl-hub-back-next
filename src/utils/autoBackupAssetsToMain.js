@@ -9,6 +9,7 @@ import { log } from './logger.js'
 import { applyMegaProxy, getStickyProxyForAccount } from './megaProxy.js'
 import { runCmd } from './megaCmd.js'
 import { parseSizeToMB, parseStorageFromDfText, pickFirstFileFromLs } from './megaDfParser.js'
+import { megaGetWithStallRetry, megaPutWithStallRetry, applyProxyByIndexOrThrow } from './megaTransfer.js'
 import { megaLoginFull, megaLogoutSafe, resetMegaServerIfSafe } from './megaSession.js'
 
 /*
@@ -377,6 +378,15 @@ export async function runAutoRestoreMain(){
           const px = await setStickyProxyForAccount(b);
           if (!px?.ok) throw new Error(`NO_PROXY backup phase2: ${px?.reason || 'unknown'}`);
           await safeMegaLogout(buildCtx(b), 'phase2-backup-pre'); await megaLogin(payloadB, buildCtx(b))
+
+          let proxyIndex = 0;
+          const getProxyIndex = () => proxyIndex;
+          const setProxyIndex = (v) => { proxyIndex = v };
+          const reloginB = async () => {
+            await safeMegaLogout(buildCtx(b), 'stall-relogin');
+            await megaLogin(payloadB, buildCtx(b));
+          };
+
           for (const [assetId, asset] of Array.from(needDownload.entries())){
             const remoteBaseB = (b.baseFolder||'/').replaceAll('\\','/')
             const remoteFolderB = path.posix.join(remoteBaseB, asset.slug)
@@ -385,7 +395,15 @@ export async function runAutoRestoreMain(){
             const remoteFile = path.posix.join(remoteFolderB, fileName)
             const localTemp = path.join(TEMP_DIR, `restore-${asset.id}-${Date.now()}-${fileName}`)
             try {
-              await runCmd('mega-get',[remoteFile, localTemp],{ quiet:true })
+              await megaGetWithStallRetry({
+                remoteFile,
+                destLocal: localTemp,
+                ctx: `${buildCtx(b)} asset=${asset.id}`,
+                account: b,
+                getProxyIndex,
+                setProxyIndex,
+                relogin: reloginB,
+              });
               if (fs.existsSync(localTemp)){
                 const size = fs.statSync(localTemp).size
                 recovered.set(asset.id,{ fileName, localTemp, size }); needDownload.delete(asset.id)
@@ -394,6 +412,7 @@ export async function runAutoRestoreMain(){
             } catch (e){ log.warn(`[CRON][DESCARGA] fallo asset=${asset.id} desde backup=${b.id} -> ${e.message}`) }
           }
           await safeMegaLogout(buildCtx(b), 'phase2-backup-post')
+
         }, `CRON-DL-${b.id}`)
       }
     }
@@ -405,6 +424,14 @@ export async function runAutoRestoreMain(){
         if (!px?.ok) throw new Error(`NO_PROXY main phase3: ${px?.reason || 'unknown'}`);
         const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
         await safeMegaLogout(buildCtx(main), 'phase3-main-pre'); await megaLogin(payload, buildCtx(main))
+        let proxyIndex = 0;
+        const getProxyIndex = () => proxyIndex;
+        const setProxyIndex = (v) => { proxyIndex = v };
+        const reloginMain = async () => {
+          await safeMegaLogout(buildCtx(main), 'stall-relogin');
+          await megaLogin(payload, buildCtx(main));
+        };
+
         for (const [assetId, info] of recovered.entries()){
           const asset = assetMap.get(assetId)
           const remoteBase = (main.baseFolder||'/').replaceAll('\\','/')
@@ -412,7 +439,15 @@ export async function runAutoRestoreMain(){
             try { await runCmd('mega-mkdir',['-p', remoteFolder],{ quiet:true }) } catch{}
           const remoteFile = path.posix.join(remoteFolder, info.fileName)
           try {
-            await runCmd('mega-put',[info.localTemp, remoteFile],{ quiet:true })
+            await megaPutWithStallRetry({
+              localPath: info.localTemp,
+              remoteFolderOrFile: remoteFolder,
+              ctx: `${buildCtx(main)} asset=${assetId}`,
+              account: main,
+              getProxyIndex,
+              setProxyIndex,
+              relogin: reloginMain,
+            });
             try { await runCmd('mega-export',['-d', remoteFile],{ quiet:true }) } catch{}
             const exp = await runCmd('mega-export',['-a', remoteFile],{ quiet:true })
             const m = exp.out.match(/https?:\/\/mega\.nz\/\S+/i)

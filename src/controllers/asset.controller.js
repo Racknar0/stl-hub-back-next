@@ -13,6 +13,7 @@ import { createPartFromBase64, GoogleGenAI, PartMediaResolutionLevel } from '@go
 import qdrantMultimodalService from '../services/qdrantMultimodal.service.js';
 import { parseSizeToMB, parseStorageFromDfText } from '../utils/megaDfParser.js';
 import { megaLoginFull, megaLogoutSafe, refreshStorageMetrics } from '../utils/megaSession.js';
+import { megaGetWithStallRetry, megaPutWithStallRetry, applyProxyByIndexOrThrow } from '../utils/megaTransfer.js';
 import { megaMenuCache } from '../utils/memoryCache.js';
 import { buildNsfwWhere, buildNsfwCategoryWhere, isAssetNSFW as isAssetNSFWBackend } from '../middlewares/nsfwFilter.js';
 
@@ -3607,6 +3608,11 @@ export async function restoreAssetFromBackup(req, res) {
     try { if (fs.existsSync(localPath)) fs.unlinkSync(localPath); } catch {}
 
     // 5) LOGIN backup -> mega-get
+    let proxyIndex = 0;
+    const getProxyIndex = () => proxyIndex;
+    const setProxyIndex = (v) => { proxyIndex = v };
+
+    // 5) LOGIN backup -> mega-get
     const backupCred = decryptToJson(
       backupAcc.credentials.encData,
       backupAcc.credentials.encIv,
@@ -3614,12 +3620,25 @@ export async function restoreAssetFromBackup(req, res) {
     );
 
     await withMegaLock(async () => {
-      await megaLoginFull(prisma, backupAcc.id, backupCred, `restore-backup-${backupAcc.id}`, {
-        skipStorageRefresh: true,  // solo descargamos, no necesitamos métricas
-      });
+      const bCtx = `restore-backup-${backupAcc.id}`;
+      const reloginB = async () => {
+        await megaLogoutSafe(bCtx);
+        await megaLoginFull(prisma, backupAcc.id, backupCred, bCtx, { skipStorageRefresh: true, skipProxySetup: true });
+      };
+
+      await applyProxyByIndexOrThrow(backupAcc, getProxyIndex(), bCtx);
+      await reloginB();
 
       console.log(`[RESTORE] Download from backup acc=${backupAcc.id} path=${backupRemoteFile}`);
-      await runCmd('mega-get', [backupRemoteFile, '.'], { cwd: TEMP_DIR });
+      await megaGetWithStallRetry({
+        remoteFile: backupRemoteFile,
+        destLocal: TEMP_DIR,
+        ctx: bCtx,
+        account: backupAcc,
+        getProxyIndex,
+        setProxyIndex,
+        relogin: reloginB,
+      });
 
       // Asegurar existencia local
       if (!fs.existsSync(localPath)) {
@@ -3649,9 +3668,14 @@ export async function restoreAssetFromBackup(req, res) {
     let publicLink = null;
 
     await withMegaLock(async () => {
-      await megaLoginFull(prisma, mainAcc.id, mainCred, `restore-main-${mainAcc.id}`, {
-        skipStorageRefresh: true,  // refrescamos storage manualmente abajo
-      });
+      const mainCtx = `restore-main-${mainAcc.id}`;
+      const reloginMain = async () => {
+        await megaLogoutSafe(mainCtx);
+        await megaLoginFull(prisma, mainAcc.id, mainCred, mainCtx, { skipStorageRefresh: true, skipProxySetup: true });
+      };
+
+      await applyProxyByIndexOrThrow(mainAcc, getProxyIndex(), mainCtx);
+      await reloginMain();
 
       await safeMkdir(mainRemoteFolder);
 
@@ -3661,7 +3685,15 @@ export async function restoreAssetFromBackup(req, res) {
 
       if (!existsMain) {
         console.log(`[RESTORE] Upload to main acc=${mainAcc.id} dest=${mainRemoteFolder}`);
-        await runCmd('mega-put', [localPath, mainRemoteFolder]);
+        await megaPutWithStallRetry({
+          localPath,
+          remoteFolderOrFile: mainRemoteFolder,
+          ctx: mainCtx,
+          account: mainAcc,
+          getProxyIndex,
+          setProxyIndex,
+          relogin: reloginMain,
+        });
       } else {
         console.log('[RESTORE] Archivo ya existe en main. No se re-sube.');
       }
