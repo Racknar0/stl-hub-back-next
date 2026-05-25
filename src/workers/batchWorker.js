@@ -18,6 +18,7 @@ import fs from 'fs'
 import path from 'path'
 import { spawn } from 'child_process'
 import sharp from 'sharp'
+import crypto from 'crypto'
 import { withMegaLock, cancelPendingAutoLogout } from '../utils/megaQueue.js'
 import { applyMegaProxy, listMegaProxies, getStickyProxyForAccount } from '../utils/megaProxy.js'
 import { decryptToJson } from '../utils/cryptoUtils.js'
@@ -877,9 +878,34 @@ async function recompressFolder(folderPath, outputName) {
   return { outputPath: outputZipPath, ext: 'zip' }
 }
 
+function getFileHash(filePath) {
+  try {
+    const buffer = fs.readFileSync(filePath)
+    return crypto.createHash('md5').update(buffer).digest('hex')
+  } catch {
+    return null
+  }
+}
+
 async function extractImages(folderPath, slug) {
-  const images = getAllFiles(folderPath).filter(f => IMAGE_EXTS.includes(path.extname(f).toLowerCase()))
+  const allImages = getAllFiles(folderPath).filter(f => IMAGE_EXTS.includes(path.extname(f).toLowerCase()))
   const saved = []
+  if (!allImages.length) return saved
+
+  const seenHashes = new Set()
+  const images = []
+  for (const img of allImages) {
+    const hash = getFileHash(img)
+    if (hash) {
+      if (seenHashes.has(hash)) {
+        console.log(`[BATCH][IMG][DEDUPE] Omitiendo imagen duplicada: ${path.basename(img)}`)
+        continue
+      }
+      seenHashes.add(hash)
+    }
+    images.push(img)
+  }
+
   if (!images.length) return saved
 
   // Misma estructura que el uploader: images/{slug}/ + images/{slug}/thumbs/
