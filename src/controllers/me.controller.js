@@ -102,7 +102,7 @@ export const getMyProfile = async (req, res) => {
 
     const lastSub = await prisma.subscription.findFirst({
       where: { userId },
-      orderBy: { id: 'desc' },
+      orderBy: { currentPeriodEnd: 'desc' },
       select: { id: true, status: true, currentPeriodEnd: true, startedAt: true }
     });
 

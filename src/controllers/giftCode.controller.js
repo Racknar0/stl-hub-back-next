@@ -169,32 +169,30 @@ export const redeemGiftCode = async (req, res) => {
 
     // Create or extend subscription
     const now = new Date();
-    const activeSubscription = await prisma.subscription.findFirst({
-      where: { userId, status: 'ACTIVE', currentPeriodEnd: { gt: now } },
+    const userSubscription = await prisma.subscription.findFirst({
+      where: { userId },
       orderBy: { currentPeriodEnd: 'desc' },
     });
 
-    if (activeSubscription) {
-      // Extend existing subscription
-      const newEnd = new Date(activeSubscription.currentPeriodEnd);
-      newEnd.setDate(newEnd.getDate() + gc.days);
-      await prisma.subscription.update({
-        where: { id: activeSubscription.id },
-        data: { currentPeriodEnd: newEnd },
-      });
-    } else {
-      // Create new subscription
-      const endDate = new Date(now);
-      endDate.setDate(endDate.getDate() + gc.days);
-      await prisma.subscription.create({
-        data: {
-          userId,
-          status: 'ACTIVE',
-          startedAt: now,
-          currentPeriodEnd: endDate,
-        },
-      });
-    }
+    const startDate = userSubscription && userSubscription.status === 'ACTIVE' && userSubscription.currentPeriodEnd > now
+      ? userSubscription.currentPeriodEnd
+      : now;
+
+    const newExpiryDate = new Date(startDate);
+    newExpiryDate.setDate(newExpiryDate.getDate() + gc.days);
+
+    await prisma.subscription.upsert({
+      where: { id: userSubscription?.id || 0 },
+      update: {
+        currentPeriodEnd: newExpiryDate,
+        status: 'ACTIVE',
+      },
+      create: {
+        userId,
+        currentPeriodEnd: newExpiryDate,
+        status: 'ACTIVE',
+      },
+    });
 
     // Record redemption and increment counter
     await prisma.$transaction([

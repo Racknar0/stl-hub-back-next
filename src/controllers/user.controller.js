@@ -285,10 +285,10 @@ export const extendSubscription = async (req, res) => {
     const addMonths = (date, m) => { const d = new Date(date); d.setMonth(d.getMonth() + m); return d; };
     const addDays = (date, days) => { const d = new Date(date); d.setDate(d.getDate() + days); return d; };
 
-    // Última suscripción activa
-    const activeSub = await prisma.subscription.findFirst({
-      where: { userId, status: 'ACTIVE' },
-      orderBy: { startedAt: 'desc' },
+    // Última suscripción (activa o expirada)
+    const latestSub = await prisma.subscription.findFirst({
+      where: { userId },
+      orderBy: { currentPeriodEnd: 'desc' },
     });
 
     let newEnd;
@@ -307,7 +307,7 @@ export const extendSubscription = async (req, res) => {
     } else if (daysToAdd !== undefined) {
       const days = Number(daysToAdd);
       if (Number.isFinite(days) && days > 0) {
-        const base = (activeSub && activeSub.currentPeriodEnd > now) ? activeSub.currentPeriodEnd : now;
+        const base = (latestSub && latestSub.currentPeriodEnd > now) ? latestSub.currentPeriodEnd : now;
         const safeDays = Math.min(days, 3650); // Máx ~10 años
         newEnd = addDays(base, safeDays);
       } else {
@@ -319,20 +319,20 @@ export const extendSubscription = async (req, res) => {
       if (![3, 6, 12].includes(m)) {
         return res.status(400).json({ message: 'Provide daysRemaining, daysToAdd (>0) or valid months (3, 6 or 12).' });
       }
-      const base = (activeSub && activeSub.currentPeriodEnd > now) ? activeSub.currentPeriodEnd : now;
+      const base = (latestSub && latestSub.currentPeriodEnd > now) ? latestSub.currentPeriodEnd : now;
       newEnd = addMonths(base, m);
     }
 
     // Si daysRemaining es 0 y no hay suscripción activa, no hace falta hacer nada
-    if (daysRemaining !== undefined && Number(daysRemaining) === 0 && !activeSub) {
+    if (daysRemaining !== undefined && Number(daysRemaining) === 0 && !latestSub) {
       return res.status(200).json({ message: 'Subscription already inactive/expired' });
     }
 
     let updatedSub;
-    if (activeSub) {
+    if (latestSub) {
       updatedSub = await prisma.subscription.update({
-        where: { id: activeSub.id },
-        data: { currentPeriodEnd: newEnd, startedAt: activeSub.startedAt ?? now, status: status },
+        where: { id: latestSub.id },
+        data: { currentPeriodEnd: newEnd, startedAt: latestSub.startedAt ?? now, status: status },
       });
     } else {
       updatedSub = await prisma.subscription.create({

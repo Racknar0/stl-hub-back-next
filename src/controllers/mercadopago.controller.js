@@ -137,6 +137,7 @@ const applySubscriptionIfNeeded = async (userId, selectedPlan, shouldActivate) =
 
   const userSubscription = await prisma.subscription.findFirst({
     where: { userId },
+    orderBy: { currentPeriodEnd: 'desc' },
   });
 
   const newExpiryDate = computeNewExpiryDate(userSubscription?.currentPeriodEnd, selectedPlan.durationDays);

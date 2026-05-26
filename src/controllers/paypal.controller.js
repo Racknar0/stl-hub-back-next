@@ -149,7 +149,8 @@ async function capturePayPalOrder(req, res) {
 
             // 4. ACTUALIZAR la suscripción del usuario
             const userSubscription = await prisma.subscription.findFirst({
-                where: { userId: parsedUserId }
+                where: { userId: parsedUserId },
+                orderBy: { currentPeriodEnd: 'desc' }
             });
 
             const now = new Date();
