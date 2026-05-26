@@ -33,7 +33,7 @@ import {
 } from '../utils/batchProxySwitch.js'
 import qdrantMultimodalService from '../services/qdrantMultimodal.service.js'
 import { runCmd, attachAutoAcceptTerms, safeMkdir } from '../utils/megaCmd.js'
-import { extractArchiveWithFallback } from '../utils/archiveExtractor.js'
+import { extractArchiveWithFallback, run7z } from '../utils/archiveExtractor.js'
 import { parseSizeToMB, parseStorageFromDfText } from '../utils/megaDfParser.js'
 import { killProcessTreeBestEffort } from '../utils/megaTransfer.js'
 import { megaLoginFull, megaLogoutSafe } from '../utils/megaSession.js'
