@@ -1047,7 +1047,8 @@ async function prepareItemForMain(item, updateItem) {
       },
     })
 
-    const accountsWithSpace = candidates
+    // Intento 1: Reasignar en bloque toda la cola restante
+    let accountsWithSpace = candidates
       .map(acc => {
         const u = toSafeNumber(acc.storageUsedMB, 0)
         const s = getSessionUploadedMb(acc.id)
@@ -1082,11 +1083,48 @@ async function prepareItemForMain(item, updateItem) {
       mainAccount = newAccount
       backupAccounts = (mainAccount.backups || []).map((b) => b.backupAccount).filter((b) => b && b.type === 'backup')
     } else {
-      throw new Error(
-        `NO_ACCOUNTS_WITH_SPACE_AND_HEALTHY_BACKUPS: cuenta original ${originalAccountId} llena. ` +
-        `Necesita ${totalRemainingMb.toFixed(2)}MB en main + backup. ` +
-        `No hay cuentas alternativas con espacio suficiente y backups saludables.`
-      )
+      // FALLBACK: Si no caben todos juntos (o supera el límite de una sola cuenta), reasignar INDIVIDUALMENTE solo el item actual
+      console.warn(`[BATCH][MAIN] La cola restante (${totalRemainingMb.toFixed(2)} MB) no cabe en ninguna cuenta. Reasignando únicamente el item actual #${item.id} (${archiveSizeMb.toFixed(2)} MB)...`)
+
+      let accountsWithSpaceSingle = candidates
+        .map(acc => {
+          const u = toSafeNumber(acc.storageUsedMB, 0)
+          const s = getSessionUploadedMb(acc.id)
+          const mainProjected = u + s + archiveSizeMb
+
+          // Validar que al menos 1 backup vinculado tenga espacio
+          const linkedBackups = (acc.backups || []).map(b => b.backupAccount).filter(b => b && b.type === 'backup')
+          const hasHealthyBackup = linkedBackups.some(backup => {
+            const backupUsed = toSafeNumber(backup.storageUsedMB, 0)
+            return (backupUsed + archiveSizeMb) <= MAX_ACCOUNT_UPLOAD_MB
+          })
+
+          return { acc, mainProjected, hasHealthyBackup, backupCount: linkedBackups.length }
+        })
+        .filter(x => x.mainProjected <= MAX_ACCOUNT_UPLOAD_MB && x.hasHealthyBackup)
+
+      if (accountsWithSpaceSingle.length > 0) {
+        accountsWithSpaceSingle.sort((a, b) => a.mainProjected - b.mainProjected)
+        const newAccount = accountsWithSpaceSingle[0].acc
+
+        // Reasignar SOLO el item actual
+        await prisma.batchImportItem.update({
+          where: { id: item.id },
+          data: { targetAccount: newAccount.id },
+        })
+
+        console.log(`[BATCH][MAIN][SINGLE_REASSIGN] Item #${item.id} reasignado individualmente: cuenta ${originalAccountId} → ${newAccount.id} (${newAccount.alias}) | MB=${archiveSizeMb.toFixed(2)}`)
+
+        item.targetAccount = newAccount.id
+        mainAccount = newAccount
+        backupAccounts = (mainAccount.backups || []).map((b) => b.backupAccount).filter((b) => b && b.type === 'backup')
+      } else {
+        throw new Error(
+          `NO_ACCOUNTS_WITH_SPACE_AND_HEALTHY_BACKUPS: cuenta original ${originalAccountId} llena. ` +
+          `Necesita ${archiveSizeMb.toFixed(2)}MB para este item en main + backup. ` +
+          `No hay cuentas alternativas con espacio suficiente y backups saludables.`
+        )
+      }
     }
   }
   // -- END SMART AUTO DISTRIBUTION --
