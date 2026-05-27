@@ -1,33 +1,16 @@
 import fs from 'fs';
 import path from 'path';
 import telegramDownloaderService from './telegramDownloader.service.js';
+import { PrismaClient } from '@prisma/client';
 
-const CHANNELS_FILE = path.join(process.cwd(), 'data', 'telegram_channels.json');
+const prisma = new PrismaClient();
+
 const AVATARS_DIR = path.join(process.cwd(), 'uploads', 'telegram_avatars');
 
-function getChannels() {
-    if (!fs.existsSync(CHANNELS_FILE)) {
-        return [];
-    }
-    try {
-        const content = fs.readFileSync(CHANNELS_FILE, 'utf8').trim();
-        if (!content) {
-            fs.writeFileSync(CHANNELS_FILE, JSON.stringify([]));
-            return [];
-        }
-        return JSON.parse(content);
-    } catch {
-        try {
-            fs.writeFileSync(CHANNELS_FILE, JSON.stringify([]));
-        } catch {}
-        return [];
-    }
-}
-
-function saveChannels(channels) {
-    const dir = path.dirname(CHANNELS_FILE);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(CHANNELS_FILE, JSON.stringify(channels, null, 2), 'utf8');
+async function getChannels() {
+    return await prisma.telegramChannel.findMany({
+        orderBy: { name: 'asc' }
+    });
 }
 
 class TelegramCheckerService {
@@ -57,13 +40,18 @@ class TelegramCheckerService {
         return intervalMs;
     }
 
-    scheduleNextCheck(delayMs) {
+    async scheduleNextCheck(delayMs) {
         if (this.timeoutId) clearTimeout(this.timeoutId);
         
-        const channels = getChannels();
-        const interval = delayMs !== undefined ? delayMs : this.calculateInterval(channels.length);
-        
-        this.timeoutId = setTimeout(() => this.checkNextChannel(), interval);
+        try {
+            const channels = await getChannels();
+            const interval = delayMs !== undefined ? delayMs : this.calculateInterval(channels.length);
+            this.timeoutId = setTimeout(() => this.checkNextChannel(), interval);
+        } catch (err) {
+            console.error('[Telegram Checker] Error programando siguiente chequeo:', err);
+            // Reintentar en 1 minuto en caso de error de BD
+            this.timeoutId = setTimeout(() => this.checkNextChannel(), 60000);
+        }
     }
 
     async checkNextChannel() {
@@ -71,27 +59,26 @@ class TelegramCheckerService {
         this.isProcessing = true;
 
         try {
-            const channels = getChannels();
+            const channels = await getChannels();
             if (channels.length === 0) {
-                this.scheduleNextCheck();
+                await this.scheduleNextCheck();
                 return;
             }
 
             // 1. Evitar interrumpir descargas activas en curso
             if (telegramDownloaderService.isDownloading) {
-                this.scheduleNextCheck(2 * 60 * 1000);
+                await this.scheduleNextCheck(2 * 60 * 1000);
                 return;
             }
 
             // 2. Verificar autenticación
             const isAuth = await telegramDownloaderService.checkAuth();
             if (!isAuth) {
-                this.scheduleNextCheck(10 * 60 * 1000);
+                await this.scheduleNextCheck(10 * 60 * 1000);
                 return;
             }
 
             // 3. Buscar el canal más antiguo o nunca verificado
-            // Clonamos para ordenar de forma segura
             const sorted = [...channels].sort((a, b) => {
                 const dateA = a.lastCheckedAt ? new Date(a.lastCheckedAt).getTime() : 0;
                 const dateB = b.lastCheckedAt ? new Date(b.lastCheckedAt).getTime() : 0;
@@ -102,34 +89,35 @@ class TelegramCheckerService {
             await this.syncChannelData(targetChannel.name);
 
             // Programar el siguiente chequeo normal
-            this.scheduleNextCheck();
+            await this.scheduleNextCheck();
         } catch (error) {
             console.error('[Telegram Checker] Error en ciclo de chequeo:', error);
             // Si hay un error general (como desconexión), reintentar en 5 minutos
-            this.scheduleNextCheck(5 * 60 * 1000);
+            await this.scheduleNextCheck(5 * 60 * 1000);
         } finally {
             this.isProcessing = false;
         }
     }
 
     async syncChannelData(channelName) {
-        const channels = getChannels();
-        const idx = channels.findIndex(c => c.name === channelName);
-        if (idx === -1) return;
+        const channel = await prisma.telegramChannel.findUnique({ where: { name: channelName } });
+        if (!channel) return;
 
         try {
+            console.info(`[Telegram Checker] Iniciando chequeo de: ${channelName}${channel.label ? ` (${channel.label})` : ''}`);
             await telegramDownloaderService.initClient();
             const client = telegramDownloaderService.client;
 
             // 1. Obtener datos de la entidad en Telegram
             const entity = await client.getEntity(channelName);
             
-            // Actualizar label si existe un título real y no hay conflicto
+            let label = channel.label || '';
             if (entity.title) {
-                channels[idx].label = entity.title;
+                label = entity.title;
             }
 
             // 2. Descargar Avatar
+            let avatarUrl = channel.avatarUrl;
             if (entity.photo) {
                 try {
                     if (!fs.existsSync(AVATARS_DIR)) {
@@ -139,40 +127,49 @@ class TelegramCheckerService {
                     if (avatarBuffer) {
                         const avatarPath = path.join(AVATARS_DIR, `${channelName}.jpg`);
                         fs.writeFileSync(avatarPath, avatarBuffer);
-                        channels[idx].avatarUrl = `/uploads/telegram_avatars/${channelName}.jpg`;
+                        avatarUrl = `/uploads/telegram_avatars/${channelName}.jpg`;
                     }
                 } catch (photoErr) {
                     console.error(`[Telegram Checker] Error descargando avatar de ${channelName}:`, photoErr.message);
                 }
             } else {
-                channels[idx].avatarUrl = null;
+                avatarUrl = null;
             }
 
             // 3. Ejecutar escaneo rápido de archivos pendientes
             const scan = await telegramDownloaderService.quickScanFiles(channelName);
             
-            channels[idx].lastScanResult = {
-                newFiles: scan.newFiles,
-                totalSize: scan.totalSize,
-                totalSizeBytes: scan.totalSizeBytes,
-                maxId: scan.maxId,
-                error: false
-            };
-            channels[idx].lastCheckedAt = new Date().toISOString();
+            await prisma.telegramChannel.update({
+                where: { name: channelName },
+                data: {
+                    label,
+                    avatarUrl,
+                    newFiles: scan.newFiles,
+                    totalSize: scan.totalSize,
+                    totalSizeBytes: scan.totalSizeBytes,
+                    maxId: scan.maxId,
+                    hasError: false,
+                    errorMessage: null,
+                    lastCheckedAt: new Date()
+                }
+            });
 
+            console.info(`[Telegram Checker] Sincronización exitosa: ${channelName} | ${scan.newFiles} archivos nuevos (${scan.totalSize})`);
         } catch (error) {
             console.error(`[Telegram Checker] Error sincronizando canal ${channelName}:`, error.message);
             
-            // Para evitar loops infinitos, marcamos el canal como comprobado con error
-            channels[idx].lastCheckedAt = new Date().toISOString();
-            channels[idx].lastScanResult = {
-                newFiles: 0,
-                totalSize: '—',
-                totalSizeBytes: 0,
-                maxId: channels[idx].lastScanResult?.maxId || 0,
-                error: true,
-                errorMessage: error.message
-            };
+            try {
+                await prisma.telegramChannel.update({
+                    where: { name: channelName },
+                    data: {
+                        lastCheckedAt: new Date(),
+                        hasError: true,
+                        errorMessage: error.message
+                    }
+                });
+            } catch (dbErr) {
+                console.error('[Telegram Checker] Error guardando estado de error en BD:', dbErr);
+            }
 
             // Si es un error de FloodWait de Telegram, capturamos los segundos para pausar el worker
             if (error.message && error.message.includes('FLOOD_WAIT_')) {
@@ -180,14 +177,10 @@ class TelegramCheckerService {
                 if (match) {
                     const waitSeconds = parseInt(match[1]) || 60;
                     console.warn(`[Telegram Checker] Detectado FLOOD_WAIT. Pausando el checker por ${waitSeconds + 10} segundos.`);
-                    // Reprogramamos con la espera solicitada + 10 segundos de colchón
-                    this.scheduleNextCheck((waitSeconds + 10) * 1000);
+                    await this.scheduleNextCheck((waitSeconds + 10) * 1000);
                 }
             }
         }
-
-        // Guardamos los cambios en el archivo JSON
-        saveChannels(channels);
     }
 }
 

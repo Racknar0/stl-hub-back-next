@@ -724,3 +724,32 @@ model PinterestPinQueue {
   @@index([scheduledAt])
   @@map("pinterestpinqueue")
 }
+
+model TelegramChannel {
+  id              Int       @id @default(autoincrement())
+  name            String    @unique
+  label           String?
+  avatarUrl       String?
+  addedAt         DateTime  @default(now())
+  lastCheckedAt   DateTime?
+  
+  // Estado del último escaneo rápido (antes en lastScanResult)
+  newFiles        Int       @default(0)
+  totalSize       String    @default("0 B")
+  totalSizeBytes  BigInt    @default(0) @db.UnsignedBigInt
+  maxId           Int       @default(0)
+  hasError        Boolean   @default(false)
+  errorMessage    String?   @db.Text
+  
+  // Información de la última descarga realizada (antes en last_downloads.json)
+  lastMsgId       Int?
+  lastFileName    String?   @db.VarChar(512)
+  lastDownloadedAt DateTime?
+  lastDownloadUrl  String?   @db.VarChar(512)
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@map("telegramchannel")
+}
+

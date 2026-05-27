@@ -2,34 +2,39 @@ import fs from 'fs';
 import path from 'path';
 import telegramDownloaderService from '../services/telegramDownloader.service.js';
 import telegramCheckerService from '../services/telegramChecker.service.js';
+import { PrismaClient } from '@prisma/client';
 
-const CHANNELS_FILE = path.join(process.cwd(), 'data', 'telegram_channels.json');
+const prisma = new PrismaClient();
 
-// Helper para leer canales
-function getChannels() {
-    if (!fs.existsSync(CHANNELS_FILE)) {
-        if (!fs.existsSync(path.dirname(CHANNELS_FILE))) {
-            fs.mkdirSync(path.dirname(CHANNELS_FILE), { recursive: true });
-        }
-        fs.writeFileSync(CHANNELS_FILE, JSON.stringify([]));
-        return [];
-    }
-    try {
-        const content = fs.readFileSync(CHANNELS_FILE, 'utf8').trim();
-        if (!content) {
-            fs.writeFileSync(CHANNELS_FILE, JSON.stringify([]));
-            return [];
-        }
-        return JSON.parse(content);
-    } catch (e) {
-        console.error('[getChannels] Error parsing JSON, resetting to empty array:', e);
-        try {
-            fs.writeFileSync(CHANNELS_FILE, JSON.stringify([]));
-        } catch (writeErr) {
-            console.error('[getChannels] Failed to reset file:', writeErr);
-        }
-        return [];
-    }
+const formatDbDate = (d) => {
+    if (!d) return null;
+    const now = new Date(d);
+    const pad = (n) => n.toString().padStart(2, '0');
+    return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+};
+
+function mapChannelToFrontend(c) {
+    return {
+        name: c.name,
+        label: c.label || '',
+        avatarUrl: c.avatarUrl || null,
+        addedAt: c.addedAt.toISOString(),
+        lastCheckedAt: c.lastCheckedAt ? c.lastCheckedAt.toISOString() : null,
+        lastScanResult: {
+            newFiles: c.newFiles,
+            totalSize: c.totalSize || '0 B',
+            totalSizeBytes: Number(c.totalSizeBytes),
+            maxId: c.maxId,
+            error: c.hasError,
+            errorMessage: c.errorMessage || null
+        },
+        lastDownload: c.lastMsgId ? {
+            lastMsgId: c.lastMsgId,
+            lastFileName: c.lastFileName || '',
+            lastDownloadedAt: formatDbDate(c.lastDownloadedAt),
+            url: c.lastDownloadUrl || ''
+        } : null
+    };
 }
 
 export const checkAuth = async (req, res) => {
@@ -85,17 +90,12 @@ export const providePassword = (req, res) => {
     res.json({ success: true, message: 'Password provided' });
 };
 
-export const listChannels = (req, res) => {
+export const listChannels = async (req, res) => {
     try {
-        const channels = getChannels();
-        const allLastDownloads = telegramDownloaderService.getLastDownloads();
-        
-        // Enrich each channel with its last download info
-        const enriched = channels.map(c => ({
-            ...c,
-            lastDownload: allLastDownloads[c.name] || null
-        }));
-        
+        const channels = await prisma.telegramChannel.findMany({
+            orderBy: { name: 'asc' }
+        });
+        const enriched = channels.map(mapChannelToFrontend);
         res.json({ success: true, channels: enriched });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
@@ -107,20 +107,19 @@ export const addChannel = async (req, res) => {
         const { name, label, lastMsgId } = req.body;
         if (!name) return res.status(400).json({ success: false, message: 'Name is required' });
 
-        const channels = getChannels();
-        if (!channels.find(c => c.name === name)) {
-            channels.push({ 
-                name, 
-                label: label || '', 
-                addedAt: new Date().toISOString(),
-                lastCheckedAt: new Date().toISOString(),
-                avatarUrl: null
+        let channel = await prisma.telegramChannel.findUnique({ where: { name } });
+        if (!channel) {
+            channel = await prisma.telegramChannel.create({
+                data: {
+                    name,
+                    label: label || '',
+                    avatarUrl: null
+                }
             });
-            fs.writeFileSync(CHANNELS_FILE, JSON.stringify(channels, null, 2));
         }
 
         if (lastMsgId !== undefined && lastMsgId !== null && lastMsgId !== '') {
-            telegramDownloaderService.saveLastDownload(name, Number(lastMsgId), 'Inicialización manual');
+            await telegramDownloaderService.saveLastDownload(name, Number(lastMsgId), 'Inicialización manual');
         }
 
         // Si Telegram está autenticado, intentar sincronizar de inmediato
@@ -134,12 +133,10 @@ export const addChannel = async (req, res) => {
         }
 
         // Retornar listado de canales enriquecido
-        const updatedChannels = getChannels();
-        const allLastDownloads = telegramDownloaderService.getLastDownloads();
-        const enriched = updatedChannels.map(c => ({
-            ...c,
-            lastDownload: allLastDownloads[c.name] || null
-        }));
+        const updatedChannels = await prisma.telegramChannel.findMany({
+            orderBy: { name: 'asc' }
+        });
+        const enriched = updatedChannels.map(mapChannelToFrontend);
 
         res.json({ success: true, channels: enriched });
     } catch (error) {
@@ -147,15 +144,16 @@ export const addChannel = async (req, res) => {
     }
 };
 
-export const updateChannel = (req, res) => {
+export const updateChannel = async (req, res) => {
     try {
         const { name } = req.params;
         const { label, newName, lastMsgId } = req.body;
-        const channels = getChannels();
-        const idx = channels.findIndex(c => c.name === name);
-        if (idx === -1) return res.status(404).json({ success: false, message: 'Channel not found' });
+        const channel = await prisma.telegramChannel.findUnique({ where: { name } });
+        if (!channel) return res.status(404).json({ success: false, message: 'Channel not found' });
 
-        if (label !== undefined) channels[idx].label = label;
+        const data = {};
+        if (label !== undefined) data.label = label;
+        
         if (newName && newName !== name) {
             // Renombrar archivo de avatar si existe
             const oldAvatarPath = path.join(process.cwd(), 'uploads', 'telegram_avatars', `${name}.jpg`);
@@ -163,35 +161,33 @@ export const updateChannel = (req, res) => {
             if (fs.existsSync(oldAvatarPath)) {
                 try {
                     fs.renameSync(oldAvatarPath, newAvatarPath);
-                    channels[idx].avatarUrl = `/uploads/telegram_avatars/${newName}.jpg`;
+                    data.avatarUrl = `/uploads/telegram_avatars/${newName}.jpg`;
                 } catch (err) {
                     console.error('[Telegram Controller] Error renombrando avatar:', err);
                 }
-            } else if (channels[idx].avatarUrl && channels[idx].avatarUrl.includes(name)) {
-                channels[idx].avatarUrl = `/uploads/telegram_avatars/${newName}.jpg`;
+            } else if (channel.avatarUrl && channel.avatarUrl.includes(name)) {
+                data.avatarUrl = `/uploads/telegram_avatars/${newName}.jpg`;
             }
-
-            // Also update last_downloads key
-            const allLd = telegramDownloaderService.getLastDownloads();
-            if (allLd[name]) {
-                allLd[newName] = allLd[name];
-                delete allLd[name];
-                const ldPath = path.join(process.cwd(), 'data', 'last_downloads.json');
-                fs.writeFileSync(ldPath, JSON.stringify(allLd, null, 2), 'utf8');
-            }
-            channels[idx].name = newName;
+            data.name = newName;
         }
 
         if (lastMsgId !== undefined && lastMsgId !== null && lastMsgId !== '') {
             const targetName = newName || name;
-            telegramDownloaderService.saveLastDownload(targetName, Number(lastMsgId), 'Modificado manualmente');
+            await telegramDownloaderService.saveLastDownload(targetName, Number(lastMsgId), 'Modificado manualmente');
         }
 
-        fs.writeFileSync(CHANNELS_FILE, JSON.stringify(channels, null, 2));
+        if (Object.keys(data).length > 0) {
+            await prisma.telegramChannel.update({
+                where: { name },
+                data
+            });
+        }
 
-        // Re-enrich with lastDownload
-        const allLastDownloads = telegramDownloaderService.getLastDownloads();
-        const enriched = channels.map(c => ({ ...c, lastDownload: allLastDownloads[c.name] || null }));
+        // Re-enrich
+        const updatedChannels = await prisma.telegramChannel.findMany({
+            orderBy: { name: 'asc' }
+        });
+        const enriched = updatedChannels.map(mapChannelToFrontend);
         res.json({ success: true, channels: enriched });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
@@ -203,36 +199,35 @@ export const quickScan = async (req, res) => {
         const { channelName } = req.query;
         if (!channelName) return res.status(400).json({ success: false, message: 'channelName required' });
 
-        // Ejecutar sincronización completa (descarga avatar, actualiza nombre y escanea)
         await telegramCheckerService.syncChannelData(channelName);
 
-        const channels = getChannels();
-        const chan = channels.find(c => c.name === channelName);
+        const chan = await prisma.telegramChannel.findUnique({ where: { name: channelName } });
         if (!chan) {
             return res.status(404).json({ success: false, message: 'Channel not found after sync' });
         }
 
-        const scan = chan.lastScanResult || {};
         res.json({
             success: true,
-            newFiles: scan.newFiles ?? 0,
-            totalMessages: scan.totalMessages ?? 0,
-            totalSize: scan.totalSize ?? '0 B',
-            totalSizeBytes: scan.totalSizeBytes ?? 0,
-            maxId: scan.maxId ?? 0
+            newFiles: chan.newFiles ?? 0,
+            totalMessages: chan.maxId ?? 0,
+            totalSize: chan.totalSize ?? '0 B',
+            totalSizeBytes: Number(chan.totalSizeBytes ?? 0),
+            maxId: chan.maxId ?? 0
         });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
 };
 
-export const deleteChannel = (req, res) => {
+export const deleteChannel = async (req, res) => {
     try {
         const { name } = req.params;
-        let channels = getChannels();
-        channels = channels.filter(c => c.name !== name);
-        fs.writeFileSync(CHANNELS_FILE, JSON.stringify(channels, null, 2));
-        res.json({ success: true, channels });
+        await prisma.telegramChannel.delete({ where: { name } });
+        const channels = await prisma.telegramChannel.findMany({
+            orderBy: { name: 'asc' }
+        });
+        const enriched = channels.map(mapChannelToFrontend);
+        res.json({ success: true, channels: enriched });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }

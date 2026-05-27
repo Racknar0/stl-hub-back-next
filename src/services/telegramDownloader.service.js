@@ -6,6 +6,9 @@ import { getFileInfo } from 'telegram/Utils.js';
 import bigInt from 'big-integer';
 import fs from 'fs';
 import path from 'path';
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient();
 
 // Api ID and Hash for the client
 const apiId = 32505903;
@@ -177,49 +180,78 @@ class TelegramDownloaderService {
     }
 
     // --- Last Downloads Tracking ---
-    getLastDownloads() {
-        if (!fs.existsSync(LAST_DOWNLOADS_PATH)) return {};
-        try {
-            const content = fs.readFileSync(LAST_DOWNLOADS_PATH, 'utf8').trim();
-            if (!content) {
-                fs.writeFileSync(LAST_DOWNLOADS_PATH, JSON.stringify({}, null, 2), 'utf8');
-                return {};
-            }
-            return JSON.parse(content);
-        } catch {
-            try {
-                fs.writeFileSync(LAST_DOWNLOADS_PATH, JSON.stringify({}, null, 2), 'utf8');
-            } catch {}
-            return {};
-        }
-    }
-
-    saveLastDownload(channelName, msgId, fileName) {
-        const data = this.getLastDownloads();
+    async getLastDownloads() {
+        const channels = await prisma.telegramChannel.findMany({
+            where: { lastMsgId: { not: null } },
+            select: { name: true, lastMsgId: true, lastFileName: true, lastDownloadedAt: true, lastDownloadUrl: true }
+        });
+        
         const now = new Date();
         const pad = (n) => n.toString().padStart(2, '0');
-        const dateStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+        const formatD = (d) => {
+            if (!d) return null;
+            const now = new Date(d);
+            return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+        };
 
+        const res = {};
+        for (const c of channels) {
+            res[c.name] = {
+                lastMsgId: c.lastMsgId,
+                lastFileName: c.lastFileName || '',
+                lastDownloadedAt: formatD(c.lastDownloadedAt),
+                url: c.lastDownloadUrl || ''
+            };
+        }
+        return res;
+    }
+
+    async saveLastDownload(channelName, msgId, fileName) {
         let urlPath = channelName;
         if (String(channelName).startsWith('-100')) {
             urlPath = `c/${String(channelName).substring(4)}`;
         }
+        const url = `https://t.me/${urlPath}/${msgId}`;
 
-        data[channelName] = {
-            lastMsgId: msgId,
-            lastFileName: fileName,
-            lastDownloadedAt: dateStr,
-            url: `https://t.me/${urlPath}/${msgId}`
-        };
-
-        const dir = path.dirname(LAST_DOWNLOADS_PATH);
-        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-        fs.writeFileSync(LAST_DOWNLOADS_PATH, JSON.stringify(data, null, 2), 'utf8');
+        await prisma.telegramChannel.upsert({
+            where: { name: channelName },
+            create: {
+                name: channelName,
+                lastMsgId: msgId,
+                lastFileName: fileName,
+                lastDownloadedAt: new Date(),
+                lastDownloadUrl: url
+            },
+            update: {
+                lastMsgId: msgId,
+                lastFileName: fileName,
+                lastDownloadedAt: new Date(),
+                lastDownloadUrl: url
+            }
+        });
     }
 
-    getLastDownloadForChannel(channelName) {
-        const data = this.getLastDownloads();
-        return data[channelName] || null;
+    async getLastDownloadForChannel(channelName) {
+        const channel = await prisma.telegramChannel.findUnique({
+            where: { name: channelName },
+            select: { lastMsgId: true, lastFileName: true, lastDownloadedAt: true, lastDownloadUrl: true }
+        });
+        if (!channel || !channel.lastMsgId) return null;
+        
+        const now = new Date();
+        const pad = (n) => n.toString().padStart(2, '0');
+        const formatD = (d) => {
+            if (!d) return null;
+            const now = new Date(d);
+            return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+        };
+
+        return {
+            lastMsgId: channel.lastMsgId,
+            lastFileName: channel.lastFileName || '',
+            lastDownloadedAt: formatD(channel.lastDownloadedAt),
+            url: channel.lastDownloadUrl || ''
+        };
     }
 
     // --- Channel Info with smart suggestions ---
@@ -232,7 +264,7 @@ class TelegramDownloaderService {
         }
 
         const maxId = messages[0].id;
-        const lastDownload = this.getLastDownloadForChannel(channelName);
+        const lastDownload = await this.getLastDownloadForChannel(channelName);
         const suggestedStart = lastDownload ? lastDownload.lastMsgId + 1 : Math.max(1, maxId - 100);
         const newMessages = maxId - suggestedStart + 1;
 
@@ -250,7 +282,7 @@ class TelegramDownloaderService {
     async quickScanFiles(channelName) {
         await this.initClient();
 
-        const lastDownload = this.getLastDownloadForChannel(channelName);
+        const lastDownload = await this.getLastDownloadForChannel(channelName);
         const messages = await this.client.getMessages(channelName, { limit: 1 });
         if (!messages || messages.length === 0) {
             throw new Error('No se encontraron mensajes en el canal o no tienes acceso.');
