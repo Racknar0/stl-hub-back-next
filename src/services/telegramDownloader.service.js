@@ -179,7 +179,19 @@ class TelegramDownloaderService {
     // --- Last Downloads Tracking ---
     getLastDownloads() {
         if (!fs.existsSync(LAST_DOWNLOADS_PATH)) return {};
-        try { return JSON.parse(fs.readFileSync(LAST_DOWNLOADS_PATH, 'utf8')); } catch { return {}; }
+        try {
+            const content = fs.readFileSync(LAST_DOWNLOADS_PATH, 'utf8').trim();
+            if (!content) {
+                fs.writeFileSync(LAST_DOWNLOADS_PATH, JSON.stringify({}, null, 2), 'utf8');
+                return {};
+            }
+            return JSON.parse(content);
+        } catch {
+            try {
+                fs.writeFileSync(LAST_DOWNLOADS_PATH, JSON.stringify({}, null, 2), 'utf8');
+            } catch {}
+            return {};
+        }
     }
 
     saveLastDownload(channelName, msgId, fileName) {

@@ -10,8 +10,16 @@ function getChannels() {
         return [];
     }
     try {
-        return JSON.parse(fs.readFileSync(CHANNELS_FILE, 'utf8'));
+        const content = fs.readFileSync(CHANNELS_FILE, 'utf8').trim();
+        if (!content) {
+            fs.writeFileSync(CHANNELS_FILE, JSON.stringify([]));
+            return [];
+        }
+        return JSON.parse(content);
     } catch {
+        try {
+            fs.writeFileSync(CHANNELS_FILE, JSON.stringify([]));
+        } catch {}
         return [];
     }
 }

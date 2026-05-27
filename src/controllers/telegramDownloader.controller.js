@@ -14,7 +14,22 @@ function getChannels() {
         fs.writeFileSync(CHANNELS_FILE, JSON.stringify([]));
         return [];
     }
-    return JSON.parse(fs.readFileSync(CHANNELS_FILE, 'utf8'));
+    try {
+        const content = fs.readFileSync(CHANNELS_FILE, 'utf8').trim();
+        if (!content) {
+            fs.writeFileSync(CHANNELS_FILE, JSON.stringify([]));
+            return [];
+        }
+        return JSON.parse(content);
+    } catch (e) {
+        console.error('[getChannels] Error parsing JSON, resetting to empty array:', e);
+        try {
+            fs.writeFileSync(CHANNELS_FILE, JSON.stringify([]));
+        } catch (writeErr) {
+            console.error('[getChannels] Failed to reset file:', writeErr);
+        }
+        return [];
+    }
 }
 
 export const checkAuth = async (req, res) => {
