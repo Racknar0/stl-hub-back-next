@@ -276,6 +276,7 @@ async function megaLogin(payload, ctx, accountId = null) {
   const result = await megaLoginFull(prisma, accountId, payload, ctx, {
     skipStorageRefresh: true,
     skipProxySetup: true,  // batchWorker manages its own proxy via applyMegaProxy
+    maxProxyRetries: 0,
   });
   console.log(`[BATCH][LOGIN][OK] ${ctx} metodo=${result.method}`);
 }

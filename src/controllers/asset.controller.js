@@ -1992,6 +1992,7 @@ export const deleteAsset = async (req, res) => {
                                 timeoutMs: perProxyTimeout,
                                 skipStorageRefresh: true,
                                 skipProxySetup: true,
+                                maxProxyRetries: 0,
                             });
                             loginOk = true;
                             break;
@@ -3623,7 +3624,11 @@ export async function restoreAssetFromBackup(req, res) {
       const bCtx = `restore-backup-${backupAcc.id}`;
       const reloginB = async () => {
         await megaLogoutSafe(bCtx);
-        await megaLoginFull(prisma, backupAcc.id, backupCred, bCtx, { skipStorageRefresh: true, skipProxySetup: true });
+        await megaLoginFull(prisma, backupAcc.id, backupCred, bCtx, {
+          skipStorageRefresh: true,
+          skipProxySetup: true,
+          maxProxyRetries: 0,
+        });
       };
 
       await applyProxyByIndexOrThrow(backupAcc, getProxyIndex(), bCtx);
@@ -3671,7 +3676,11 @@ export async function restoreAssetFromBackup(req, res) {
       const mainCtx = `restore-main-${mainAcc.id}`;
       const reloginMain = async () => {
         await megaLogoutSafe(mainCtx);
-        await megaLoginFull(prisma, mainAcc.id, mainCred, mainCtx, { skipStorageRefresh: true, skipProxySetup: true });
+        await megaLoginFull(prisma, mainAcc.id, mainCred, mainCtx, {
+          skipStorageRefresh: true,
+          skipProxySetup: true,
+          maxProxyRetries: 0,
+        });
       };
 
       await applyProxyByIndexOrThrow(mainAcc, getProxyIndex(), mainCtx);

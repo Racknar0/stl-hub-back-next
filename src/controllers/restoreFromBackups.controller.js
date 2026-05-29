@@ -86,7 +86,11 @@ export const syncBackupsToMain = async (req, res) => {
       await applyProxyByIndexOrThrow(main, getProxyIndex(), buildCtx(main))
       const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
       await megaLogoutSafe(buildCtx(main))
-      await megaLoginFull(prisma, main.id, payload, buildCtx(main), { skipStorageRefresh: true, skipProxySetup: true })
+      await megaLoginFull(prisma, main.id, payload, buildCtx(main), {
+        skipStorageRefresh: true,
+        skipProxySetup: true,
+        maxProxyRetries: 0,
+      })
       for (let i=0;i<candidateAssets.length;i++){
         const asset = candidateAssets[i]
         const idx = i+1
@@ -138,7 +142,11 @@ export const syncBackupsToMain = async (req, res) => {
           const bCtx = buildCtx(b)
           const reloginB = async () => {
             await megaLogoutSafe(bCtx)
-            await megaLoginFull(prisma, b.id, payloadB, bCtx, { skipStorageRefresh: true, skipProxySetup: true })
+            await megaLoginFull(prisma, b.id, payloadB, bCtx, {
+              skipStorageRefresh: true,
+              skipProxySetup: true,
+              maxProxyRetries: 0,
+            })
           }
 
           await applyProxyByIndexOrThrow(b, getProxyIndex(), bCtx)
@@ -200,7 +208,11 @@ export const syncBackupsToMain = async (req, res) => {
         const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
         const reloginMain = async () => {
           await megaLogoutSafe(mainCtx)
-          await megaLoginFull(prisma, main.id, payload, mainCtx, { skipStorageRefresh: true, skipProxySetup: true })
+          await megaLoginFull(prisma, main.id, payload, mainCtx, {
+            skipStorageRefresh: true,
+            skipProxySetup: true,
+            maxProxyRetries: 0,
+          })
         }
 
         await applyProxyByIndexOrThrow(main, getProxyIndex(), mainCtx)
