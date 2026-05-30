@@ -704,7 +704,7 @@ async function classifySingleItem(ai, payload, item) {
     '- Si es un carro avion etc le daras vehiculo',
     '- Si la imagen muestra algun desnudo, topless o desnudo femenino, debes asignarle obligatoriamente la categoria "adultos" y añadirle el tag "adultos".',
     '- Si es un elemento para vestir como una mascara, casco o armadura, debes asignarle la categoria "cosplay".',
-    '- Si el nombre o titulo del modelo lleva en algun lado la palabra "flexi" (o derivados de articulado flexible), debes asignarle obligatoriamente la categoria "articulados" y añadir el tag "articulado".',
+    '- Si el nombre o titulo del modelo lleva en algun lado la palabra "flexi", "flexible", "articulado" o "articuled" (o derivados de articulado flexible), debes asignarle obligatoriamente la categoria "articulados" y añadir el tag "articulado".',
     '- Si el nombre o titulo del modelo lleva la palabra "keychain" o "llavero" (o derivados), debes asignarle obligatoriamente la categoria "llaveros" (o "llavero" segun figure en tu catalogo) y añadir el tag "llavero".',
     'Recuerda: Todas estas categorias especiales ya existen, NO debes crear categorias nuevas aparte de las que ya hay en tu catalogo.',
     'Debes devolver EXACTAMENTE 3 tags.',
