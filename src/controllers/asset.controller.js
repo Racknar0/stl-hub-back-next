@@ -14,6 +14,7 @@ import qdrantMultimodalService from '../services/qdrantMultimodal.service.js';
 import { parseSizeToMB, parseStorageFromDfText } from '../utils/megaDfParser.js';
 import { megaLoginFull, megaLogoutSafe, refreshStorageMetrics } from '../utils/megaSession.js';
 import { megaGetWithStallRetry, megaPutWithStallRetry, applyProxyByIndexOrThrow } from '../utils/megaTransfer.js';
+import { getCachedCanonicalKey } from '../utils/textUtils.js';
 import { megaMenuCache } from '../utils/memoryCache.js';
 import { buildNsfwWhere, buildNsfwCategoryWhere, isAssetNSFW as isAssetNSFWBackend } from '../middlewares/nsfwFilter.js';
 
@@ -708,7 +709,7 @@ function toJsonSafe(value) {
 /** Listar assets con paginación, filtros y ordenamiento. GET /api/assets */
 export const listAssets = async (req, res) => {
     try {
-    const { q = '', pageIndex, pageSize, plan, isPremium, accountId, accountAlias, is_ai_search, categorySlug, tagSlug, status, noDescription, noDescriptionEn, noTags, noCategories, noImages } = req.query;
+    const { q = '', pageIndex, pageSize, plan, isPremium, accountId, accountAlias, is_ai_search, categorySlug, tagSlug, status, noDescription, noDescriptionEn, noTags, noCategories, noImages, sortBy } = req.query;
         const hasPagination = pageIndex !== undefined && pageSize !== undefined;
 
         // Construir filtro dinámico
@@ -811,65 +812,160 @@ export const listAssets = async (req, res) => {
             where.AND.push({ images: { equals: null } });
         }
 
+        const sortByStr = String(sortBy || req.query.sortBy || '').trim().toLowerCase();
+
         if (hasPagination) {
             const take = Math.max(1, Math.min(1000, Number(pageSize) || 50));
             const page = Math.max(0, Number(pageIndex) || 0);
             const skip = page * take;
 
-            const [items, total] = await Promise.all([
-                prisma.asset.findMany({
+            let items = [];
+            let total = 0;
+
+            if (sortByStr === 'lexical_similarity') {
+                // 1. Fetch only id, title, titleEn for ALL items matching filters
+                const allMinimal = await prisma.asset.findMany({
                     where,
-                    include: {
-                        account: { select: { alias: true } },
-                        categories: {
-                            select: {
-                                id: true,
-                                name: true,
-                                nameEn: true,
-                                slug: true,
-                                slugEn: true,
+                    select: { id: true, title: true, titleEn: true }
+                });
+
+                // 2. Map canonical title keys using the fast cached helper
+                const mapped = allMinimal.map(item => ({
+                    id: item.id,
+                    canonicalKey: getCachedCanonicalKey(item.id, item.title, item.titleEn)
+                }));
+
+                // 3. Sort by the canonical title key in Node.js (A-Z)
+                mapped.sort((a, b) => {
+                    if (a.canonicalKey < b.canonicalKey) return -1;
+                    if (a.canonicalKey > b.canonicalKey) return 1;
+                    return b.id - a.id; // secondary order: newest first
+                });
+
+                total = mapped.length;
+
+                // 4. Extract IDs for the current paginated page
+                const pageSlice = mapped.slice(skip, skip + take);
+                const pageIds = pageSlice.map(item => item.id);
+
+                // 5. Query detailed details only for the current page IDs
+                if (pageIds.length > 0) {
+                    const rawItems = await prisma.asset.findMany({
+                        where: { id: { in: pageIds } },
+                        include: {
+                            account: { select: { alias: true } },
+                            categories: {
+                                select: {
+                                    id: true,
+                                    name: true,
+                                    nameEn: true,
+                                    slug: true,
+                                    slugEn: true,
+                                },
+                            },
+                            tags: {
+                                select: {
+                                    id: true,
+                                    slug: true,
+                                    name: true,
+                                    nameEn: true,
+                                },
+                            },
+                        }
+                    });
+
+                    // Preserve the exact sort order of pageIds
+                    const itemsMap = new Map(rawItems.map(item => [item.id, item]));
+                    items = pageIds.map(id => itemsMap.get(id)).filter(Boolean);
+                }
+            } else {
+                const [dbItems, dbTotal] = await Promise.all([
+                    prisma.asset.findMany({
+                        where,
+                        include: {
+                            account: { select: { alias: true } },
+                            categories: {
+                                select: {
+                                    id: true,
+                                    name: true,
+                                    nameEn: true,
+                                    slug: true,
+                                    slugEn: true,
+                                },
+                            },
+                            tags: {
+                                select: {
+                                    id: true,
+                                    slug: true,
+                                    name: true,
+                                    nameEn: true,
+                                },
                             },
                         },
-                        tags: {
-                            select: {
-                                id: true,
-                                slug: true,
-                                name: true,
-                                nameEn: true,
-                            },
-                        },
-                    },
-                    orderBy: { id: 'desc' },
-                    skip,
-                    take,
-                }),
-                prisma.asset.count({ where }),
-            ]);
+                        orderBy: { id: 'desc' },
+                        skip,
+                        take,
+                    }),
+                    prisma.asset.count({ where }),
+                ]);
+                items = dbItems;
+                total = dbTotal;
+            }
 
             const itemsSafe = toJsonSafe(items);
             return res.json({ items: itemsSafe, total, page, pageSize: take });
         }
 
-        const items = await prisma.asset.findMany({
-            where,
-            include: {
-                account: { select: { alias: true } },
-                categories: {
-                    select: {
-                        id: true,
-                        name: true,
-                        nameEn: true,
-                        slug: true,
-                        slugEn: true,
+        let items = [];
+        if (sortByStr === 'lexical_similarity') {
+            const allItems = await prisma.asset.findMany({
+                where,
+                include: {
+                    account: { select: { alias: true } },
+                    categories: {
+                        select: {
+                            id: true,
+                            name: true,
+                            nameEn: true,
+                            slug: true,
+                            slugEn: true,
+                        },
+                    },
+                    tags: {
+                        select: { id: true, slug: true, name: true, nameEn: true },
+                    },
+                }
+            });
+            allItems.sort((a, b) => {
+                const keyA = getCachedCanonicalKey(a.id, a.title, a.titleEn);
+                const keyB = getCachedCanonicalKey(b.id, b.title, b.titleEn);
+                if (keyA < keyB) return -1;
+                if (keyA > keyB) return 1;
+                return b.id - a.id;
+            });
+            items = allItems;
+        } else {
+            items = await prisma.asset.findMany({
+                where,
+                include: {
+                    account: { select: { alias: true } },
+                    categories: {
+                        select: {
+                            id: true,
+                            name: true,
+                            nameEn: true,
+                            slug: true,
+                            slugEn: true,
+                        },
+                    },
+                    tags: {
+                        select: { id: true, slug: true, name: true, nameEn: true },
                     },
                 },
-                tags: {
-                    select: { id: true, slug: true, name: true, nameEn: true },
-                },
-            },
-            orderBy: { id: 'desc' },
-            take: 50,
-        });
+                orderBy: { id: 'desc' },
+                take: 50,
+            });
+        }
         const itemsSafe = toJsonSafe(items);
         return res.json(itemsSafe);
     } catch (e) {
