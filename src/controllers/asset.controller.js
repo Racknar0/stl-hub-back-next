@@ -468,6 +468,7 @@ async function generateSeoAllForAsset(assetInput, availableCategories, assetRaw 
         categoriesListStr,
         '6. tags: Una lista de exactamente 3 a 5 tags bilingües relevantes para búsqueda interna y SEO. Cada tag debe tener la forma {"es": "...", "en": "..."}. Evita tags genéricos.',
         'Regla especial de categorización: si el título o el nombre del asset contiene la palabra "flexi" (o derivados de articulado flexible), debes incluir la categoría "articulados" obligatoriamente en tu selección de categorías sugeridas.',
+        'Regla especial de categorización: si el título o el nombre del asset contiene la palabra "keychain" o "llavero" (o derivados), debes incluir la categoría "llaveros" (o "llavero" según corresponda en tu catálogo) obligatoriamente en tu selección de categorías sugeridas.',
         '',
         'Responde ÚNICAMENTE con un objeto JSON válido con el siguiente esquema exacto:',
         JSON.stringify({
