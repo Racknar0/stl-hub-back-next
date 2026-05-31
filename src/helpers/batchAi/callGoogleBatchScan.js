@@ -820,78 +820,8 @@ async function classifySingleItem(ai, payload, item) {
           `STL model of ${namePair.en}.`,
         )
 
-        // HARD OVERRIDE FOR BUSTO
         const sourceNameFallback = String(item?.sourceTitle || item?.assetName || item?.sourcePathHint || '').toLowerCase()
-        if (/\b(busto|bust|bustos|busts)\b/i.test(sourceNameFallback)) {
-          const bustoCategory = matchers.findCategory('busto') || matchers.findCategory('bust')
-          if (bustoCategory) {
-            category = {
-              id: bustoCategory.id,
-              slug: bustoCategory.slug,
-              slugEn: bustoCategory.slugEn || null,
-              name: bustoCategory.name,
-              nameEn: bustoCategory.nameEn || bustoCategory.name,
-              es: bustoCategory.name,
-              en: bustoCategory.nameEn || bustoCategory.name,
-              fromCatalog: true,
-            }
-          }
-          
-          const hasBustoTag = tags.some(t => t.slug === 'busto' || t.slug === 'bust' || t.name.toLowerCase() === 'busto' || t.nameEn.toLowerCase() === 'bust')
-          if (!hasBustoTag) {
-            const bustoTagMatcher = matchers.findTag('busto') || matchers.findTag('bust')
-            if (bustoTagMatcher) {
-              tags.unshift({
-                id: bustoTagMatcher.id,
-                slug: bustoTagMatcher.slug,
-                slugEn: bustoTagMatcher.slugEn || null,
-                name: bustoTagMatcher.name,
-                nameEn: bustoTagMatcher.nameEn || bustoTagMatcher.name,
-                es: bustoTagMatcher.name,
-                en: bustoTagMatcher.nameEn || bustoTagMatcher.name,
-                fromCatalog: true,
-                iaSuggested: true,
-              })
-              if (tags.length > 3) tags.pop()
-            }
-          }
-        }
-
-        // HARD OVERRIDE FOR ARTICULADO/FLEXI
-        if (/(flexi|flexible|articulado|articuled)/i.test(sourceNameFallback)) {
-          const articuladosCategory = matchers.findCategory('articulados') || matchers.findCategory('articulado')
-          if (articuladosCategory) {
-            category = {
-              id: articuladosCategory.id,
-              slug: articuladosCategory.slug,
-              slugEn: articuladosCategory.slugEn || null,
-              name: articuladosCategory.name,
-              nameEn: articuladosCategory.nameEn || articuladosCategory.name,
-              es: articuladosCategory.name,
-              en: articuladosCategory.nameEn || articuladosCategory.name,
-              fromCatalog: true,
-            }
-          }
-          
-          const hasArticuladoTag = tags.some(t => t.slug === 'articulado' || t.name.toLowerCase() === 'articulado' || t.nameEn.toLowerCase() === 'articulated')
-          if (!hasArticuladoTag) {
-            const articuladoTagMatcher = matchers.findTag('articulado') || matchers.findTag('articulated')
-            if (articuladoTagMatcher) {
-              tags.unshift({
-                id: articuladoTagMatcher.id,
-                slug: articuladoTagMatcher.slug,
-                slugEn: articuladoTagMatcher.slugEn || null,
-                name: articuladoTagMatcher.name,
-                nameEn: articuladoTagMatcher.nameEn || articuladoTagMatcher.name,
-                es: articuladoTagMatcher.name,
-                en: articuladoTagMatcher.nameEn || articuladoTagMatcher.name,
-                fromCatalog: true,
-                iaSuggested: true,
-              })
-              if (tags.length > 3) tags.pop()
-            }
-          }
-        }
+        const overriden = applyCategoryAndTagHardOverrides(sourceNameFallback, category, tags, matchers)
 
         return {
           itemId: Number(item?.itemId || 0) || null,
@@ -900,8 +830,8 @@ async function classifySingleItem(ai, payload, item) {
             es: namePair.es,
             en: namePair.en,
           },
-          categoria: category,
-          tags,
+          categoria: overriden.category,
+          tags: overriden.tags,
           descripcion: {
             es: descriptionPair.es,
             en: descriptionPair.en,
@@ -1018,4 +948,98 @@ export async function callGoogleBatchScan(payload) {
       },
     }
   }
+}
+
+/**
+ * Aplica reglas de anulación estricta (hard overrides) por código basadas en el nombre del archivo/asset.
+ * Esto garantiza que ciertas categorías y tags se apliquen con 100% de efectividad independientemente de la respuesta de la IA.
+ */
+function applyCategoryAndTagHardOverrides(sourceName, currentCategory, currentTags, matchers) {
+  let category = { ...currentCategory }
+  let tags = [...currentTags]
+  const nameLower = String(sourceName || '').toLowerCase()
+
+  // Definición de reglas configurables (añade más fácilmente aquí)
+  const rules = [
+    {
+      regex: /\b(busto|bust|bustos|busts)\b/i,
+      categoryTerms: ['busto', 'bust', 'bustos', 'busts'],
+      tagTerms: ['busto', 'bust', 'bustos', 'busts']
+    },
+    {
+      regex: /(flexi|flexible|articulado|articuled|articulated)/i,
+      categoryTerms: ['articulados', 'articulado', 'articulated'],
+      tagTerms: ['articulado', 'articulated', 'flexible', 'flexi']
+    },
+    {
+      regex: /(keychain|llavero)/i,
+      categoryTerms: ['llaveros', 'llavero', 'keychains', 'keychain'],
+      tagTerms: ['llavero', 'keychain', 'llaveros', 'keychains']
+    },
+    {
+      regex: /(helmet|mask|armor|casco|mascara|armadura)/i,
+      categoryTerms: ['cosplay'],
+      tagTerms: ['cosplay', 'casco', 'mascara', 'armadura', 'helmet', 'mask', 'armor']
+    },
+    {
+      regex: /(mug|cup|taza|vaso)/i,
+      categoryTerms: ['mugs', 'mug', 'mugs-y-tazas', 'tazas', 'taza', 'vasos', 'vaso'],
+      tagTerms: ['mug', 'mugs', 'taza', 'tazas', 'vaso', 'vasos', 'cup', 'cups']
+    }
+  ]
+
+  for (const rule of rules) {
+    if (rule.regex.test(nameLower)) {
+      // 1. Aplicar categoría por orden de preferencia
+      let matchedCategory = null
+      for (const term of rule.categoryTerms) {
+        matchedCategory = matchers.findCategory(term)
+        if (matchedCategory) break
+      }
+
+      if (matchedCategory) {
+        category = {
+          id: matchedCategory.id,
+          slug: matchedCategory.slug,
+          slugEn: matchedCategory.slugEn || null,
+          name: matchedCategory.name,
+          nameEn: matchedCategory.nameEn || matchedCategory.name,
+          es: matchedCategory.name,
+          en: matchedCategory.nameEn || matchedCategory.name,
+          fromCatalog: true,
+        }
+      }
+
+      // 2. Aplicar tag por orden de preferencia
+      let matchedTag = null
+      for (const term of rule.tagTerms) {
+        matchedTag = matchers.findTag(term)
+        if (matchedTag) break
+      }
+
+      if (matchedTag) {
+        const hasTag = tags.some(t => 
+          t.id === matchedTag.id || 
+          t.slug === matchedTag.slug || 
+          t.name.toLowerCase() === matchedTag.name.toLowerCase()
+        )
+        if (!hasTag) {
+          tags.unshift({
+            id: matchedTag.id,
+            slug: matchedTag.slug,
+            slugEn: matchedTag.slugEn || null,
+            name: matchedTag.name,
+            nameEn: matchedTag.nameEn || matchedTag.name,
+            es: matchedTag.name,
+            en: matchedTag.nameEn || matchedTag.name,
+            fromCatalog: true,
+            iaSuggested: true,
+          })
+          if (tags.length > 3) tags.pop()
+        }
+      }
+    }
+  }
+
+  return { category, tags }
 }
