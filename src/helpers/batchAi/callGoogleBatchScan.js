@@ -857,6 +857,42 @@ async function classifySingleItem(ai, payload, item) {
           }
         }
 
+        // HARD OVERRIDE FOR ARTICULADO/FLEXI
+        if (/(flexi|flexible|articulado|articuled)/i.test(sourceNameFallback)) {
+          const articuladosCategory = matchers.findCategory('articulados') || matchers.findCategory('articulado')
+          if (articuladosCategory) {
+            category = {
+              id: articuladosCategory.id,
+              slug: articuladosCategory.slug,
+              slugEn: articuladosCategory.slugEn || null,
+              name: articuladosCategory.name,
+              nameEn: articuladosCategory.nameEn || articuladosCategory.name,
+              es: articuladosCategory.name,
+              en: articuladosCategory.nameEn || articuladosCategory.name,
+              fromCatalog: true,
+            }
+          }
+          
+          const hasArticuladoTag = tags.some(t => t.slug === 'articulado' || t.name.toLowerCase() === 'articulado' || t.nameEn.toLowerCase() === 'articulated')
+          if (!hasArticuladoTag) {
+            const articuladoTagMatcher = matchers.findTag('articulado') || matchers.findTag('articulated')
+            if (articuladoTagMatcher) {
+              tags.unshift({
+                id: articuladoTagMatcher.id,
+                slug: articuladoTagMatcher.slug,
+                slugEn: articuladoTagMatcher.slugEn || null,
+                name: articuladoTagMatcher.name,
+                nameEn: articuladoTagMatcher.nameEn || articuladoTagMatcher.name,
+                es: articuladoTagMatcher.name,
+                en: articuladoTagMatcher.nameEn || articuladoTagMatcher.name,
+                fromCatalog: true,
+                iaSuggested: true,
+              })
+              if (tags.length > 3) tags.pop()
+            }
+          }
+        }
+
         return {
           itemId: Number(item?.itemId || 0) || null,
           sourcePathHint: String(item?.sourcePathHint || ''),
