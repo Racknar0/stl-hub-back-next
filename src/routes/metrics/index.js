@@ -13,6 +13,16 @@ import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
 
 const router = express.Router()
 
+// Tracking de buscador (público)
+router.post('/search', recordSearchEvent)
+router.post('/search/:id/click', recordSearchClick)
+router.get('/top-search-queries', getTopSearchQueries)
+router.post('/campaign-visit', recordCampaignVisit)
+router.post('/plan-click', recordPlanClick)
+
+// El resto de endpoints de métricas son administrativos
+router.use(requireAuth, requireAdmin)
+
 router.get('/uploads', getUploadsMetrics)
 router.get('/vps-memory', getVpsMemoryMetrics)
 router.get('/connections-today', getConnectionsToday)
@@ -24,18 +34,12 @@ router.get('/registrations/timeseries', getRegistrationTimeseries)
 router.get('/top-downloads', getTopDownloads)
 router.get('/recent-downloads', getRecentDownloads)
 router.get('/taxonomy-counts', getTaxonomyCounts)
-router.get('/sales', requireAuth, requireAdmin, getSalesMetrics)
+router.get('/sales', getSalesMetrics)
 router.get('/site-visits', getSiteVisitsMetrics)
 router.get('/site-visits/timeseries', getSiteVisitsTimeseries)
 router.get('/site-visits/top-pages', getTopPages)
-// Tracking de buscador (público)
-router.post('/search', recordSearchEvent)
-router.post('/search/:id/click', recordSearchClick)
 router.get('/search-insights', getSearchInsights)
 router.get('/recent-searches', getRecentSearches)
-router.get('/top-search-queries', getTopSearchQueries)
-router.post('/campaign-visit', recordCampaignVisit)
-router.post('/plan-click', recordPlanClick)
 router.get('/plan-clicks/timeseries', getPlanClickTimeseries)
 
 export default router

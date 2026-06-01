@@ -711,7 +711,7 @@ function toJsonSafe(value) {
 /** Listar assets con paginación, filtros y ordenamiento. GET /api/assets */
 export const listAssets = async (req, res) => {
     try {
-    const { q = '', pageIndex, pageSize, plan, isPremium, accountId, accountAlias, is_ai_search, categorySlug, tagSlug, status, noDescription, noDescriptionEn, noTags, noCategories, noImages, sortBy } = req.query;
+    const { q = '', pageIndex, pageSize, plan, isPremium, accountId, accountAlias, is_ai_search, categorySlug, tagSlug, categoryExcludeSlug, tagExcludeSlug, status, noDescription, noDescriptionEn, noTags, noCategories, noImages, sortBy } = req.query;
         const hasPagination = pageIndex !== undefined && pageSize !== undefined;
 
         // Construir filtro dinámico
@@ -761,14 +761,24 @@ export const listAssets = async (req, res) => {
         }
         if (accIdFilter) where.accountId = accIdFilter;
 
-        // Filtro por categoría (slug)
+        // Filtro por categoría (slug) - Inclusión y Exclusión
         if (categorySlug && String(categorySlug).trim()) {
-            where.categories = { some: { slug: String(categorySlug).trim() } };
+            if (!where.AND) where.AND = [];
+            where.AND.push({ categories: { some: { slug: String(categorySlug).trim() } } });
+        }
+        if (categoryExcludeSlug && String(categoryExcludeSlug).trim()) {
+            if (!where.AND) where.AND = [];
+            where.AND.push({ categories: { none: { slug: String(categoryExcludeSlug).trim() } } });
         }
 
-        // Filtro por tag (slug)
+        // Filtro por tag (slug) - Inclusión y Exclusión
         if (tagSlug && String(tagSlug).trim()) {
-            where.tags = { some: { slug: String(tagSlug).trim() } };
+            if (!where.AND) where.AND = [];
+            where.AND.push({ tags: { some: { slug: String(tagSlug).trim() } } });
+        }
+        if (tagExcludeSlug && String(tagExcludeSlug).trim()) {
+            if (!where.AND) where.AND = [];
+            where.AND.push({ tags: { none: { slug: String(tagExcludeSlug).trim() } } });
         }
 
         // Filtro por estado

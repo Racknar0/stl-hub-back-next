@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import jwt from 'jsonwebtoken';
 import { execFileSync } from 'child_process';
 import path from 'path';
+import crypto from 'crypto';
 import { extractTrackingFromBody, extractVisitIdentityFromRequest, pickTrackingForDb, resolveMarketingCampaignId, toSlug } from '../utils/attribution.js';
 import { toCopAmountFromPayment } from '../utils/paymentCurrency.js';
 
@@ -12,6 +13,156 @@ const SEARCH_EVENTS_RETENTION_DAYS = Math.max(7, Number(process.env.SEARCH_EVENT
 
 const searchCleanupState = globalThis.__searchCleanupState || { lastRunMs: 0, calls: 0 }
 globalThis.__searchCleanupState = searchCleanupState
+
+const UTC5_OFFSET_HOURS = 5
+const UTC5_OFFSET_MS = UTC5_OFFSET_HOURS * 60 * 60 * 1000
+
+const SITE_VISIT_MIN_INTERVAL_MS = Math.max(5000, Number(process.env.SITE_VISIT_MIN_INTERVAL_MS || 15000) || 15000)
+const SITE_VISIT_MAX_PER_IP_PER_MIN = Math.max(30, Number(process.env.SITE_VISIT_MAX_PER_IP_PER_MIN || 240) || 240)
+const SITE_VISIT_IP_HASH_SALT = process.env.SITE_VISIT_IP_HASH_SALT || process.env.JWT_SECRET || 'stl-hub-site-visit'
+const SITE_VISIT_ALLOWED_HOSTS = new Set([
+  'stl-hub.com',
+  'www.stl-hub.com',
+  'api.stl-hub.com',
+  'localhost',
+  '127.0.0.1',
+  ...String(process.env.SITE_VISIT_ALLOWED_HOSTS || '')
+    .split(',')
+    .map((h) => String(h || '').trim().toLowerCase())
+    .filter(Boolean),
+])
+
+const siteVisitGuardState = globalThis.__siteVisitGuardState || {
+  dedupe: new Map(),
+  ipMinute: new Map(),
+  lastCleanupMs: 0,
+}
+globalThis.__siteVisitGuardState = siteVisitGuardState
+
+function parseUtc5DateBoundary(rawDate, { endOfDay = false } = {}) {
+  const value = String(rawDate || '').trim()
+  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!m) return new Date(NaN)
+
+  const year = Number(m[1])
+  const month = Number(m[2])
+  const day = Number(m[3])
+  const hour = endOfDay ? 23 : 0
+  const minute = endOfDay ? 59 : 0
+  const second = endOfDay ? 59 : 0
+  const ms = endOfDay ? 999 : 0
+
+  return new Date(Date.UTC(year, month - 1, day, hour + UTC5_OFFSET_HOURS, minute, second, ms))
+}
+
+function formatDateInUtc5(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return ''
+  return new Date(date.getTime() - UTC5_OFFSET_MS).toISOString().slice(0, 10)
+}
+
+function buildDateRangeUtc5(fromRaw, toRaw, defaultDays = 30) {
+  const now = new Date()
+  const fromDate = fromRaw
+    ? parseUtc5DateBoundary(fromRaw, { endOfDay: false })
+    : new Date(now.getTime() - defaultDays * 24 * 60 * 60 * 1000)
+  const toDate = toRaw
+    ? parseUtc5DateBoundary(toRaw, { endOfDay: true })
+    : now
+  return { fromDate, toDate }
+}
+
+function parseHostname(rawUrl) {
+  try {
+    return new URL(String(rawUrl || '')).hostname.toLowerCase()
+  } catch {
+    return null
+  }
+}
+
+function isAllowedTrackingHost(hostname) {
+  const host = String(hostname || '').trim().toLowerCase()
+  if (!host) return false
+  if (SITE_VISIT_ALLOWED_HOSTS.has(host)) return true
+  if (host.endsWith('.stl-hub.com')) return true
+  return false
+}
+
+function isTrackingOriginAllowed(req) {
+  const originHost = parseHostname(req.headers.origin)
+  const refererHost = parseHostname(req.headers.referer)
+
+  // Si no hay headers de navegación, no bloqueamos para evitar falsos negativos.
+  if (!originHost && !refererHost) return true
+
+  return [originHost, refererHost].filter(Boolean).some(isAllowedTrackingHost)
+}
+
+function normalizeIpAddress(rawIp) {
+  let ip = String(rawIp || '').trim()
+  if (!ip) return ''
+
+  // X-Forwarded-For puede traer múltiples IPs
+  if (ip.includes(',')) ip = ip.split(',')[0].trim()
+
+  // IPv4 mapeada en IPv6
+  if (ip.startsWith('::ffff:')) ip = ip.slice(7)
+
+  return ip.trim()
+}
+
+function extractClientIp(req) {
+  return normalizeIpAddress(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '')
+}
+
+function hashIpAddress(rawIp) {
+  const ip = normalizeIpAddress(rawIp)
+  if (!ip) return null
+  return crypto.createHash('sha256').update(`${SITE_VISIT_IP_HASH_SALT}|${ip}`).digest('hex').slice(0, 64)
+}
+
+function cleanupSiteVisitGuard(nowMs) {
+  if (nowMs - siteVisitGuardState.lastCleanupMs < 60 * 1000) return
+  siteVisitGuardState.lastCleanupMs = nowMs
+
+  const dedupeTtlMs = Math.max(60 * 1000, SITE_VISIT_MIN_INTERVAL_MS * 6)
+  for (const [key, ts] of siteVisitGuardState.dedupe.entries()) {
+    if (nowMs - ts > dedupeTtlMs) siteVisitGuardState.dedupe.delete(key)
+  }
+
+  const minuteBucket = Math.floor(nowMs / 60000)
+  for (const [key, state] of siteVisitGuardState.ipMinute.entries()) {
+    if (!state || state.minuteBucket < minuteBucket - 1) {
+      siteVisitGuardState.ipMinute.delete(key)
+    }
+  }
+
+  if (siteVisitGuardState.dedupe.size > 100000) siteVisitGuardState.dedupe.clear()
+  if (siteVisitGuardState.ipMinute.size > 20000) siteVisitGuardState.ipMinute.clear()
+}
+
+function isIpRateLimited(ipHash, nowMs) {
+  const key = String(ipHash || 'unknown')
+  const minuteBucket = Math.floor(nowMs / 60000)
+  const prev = siteVisitGuardState.ipMinute.get(key)
+
+  if (!prev || prev.minuteBucket !== minuteBucket) {
+    siteVisitGuardState.ipMinute.set(key, { minuteBucket, count: 1 })
+    return false
+  }
+
+  if (prev.count >= SITE_VISIT_MAX_PER_IP_PER_MIN) return true
+
+  prev.count += 1
+  siteVisitGuardState.ipMinute.set(key, prev)
+  return false
+}
+
+function isDuplicateSiteVisit(dedupeKey, nowMs) {
+  const prevTs = siteVisitGuardState.dedupe.get(dedupeKey)
+  if (prevTs && nowMs - prevTs < SITE_VISIT_MIN_INTERVAL_MS) return true
+  siteVisitGuardState.dedupe.set(dedupeKey, nowMs)
+  return false
+}
 
 function normalizeSearchQuery(input) {
   const original = String(input || '')
@@ -823,18 +974,50 @@ export async function getTaxonomyCounts(req, res) {
 
 export async function recordSiteVisit(req, res) {
   try {
-    const userAgent = req.headers['user-agent'] || '';
-    const botPattern = /bot|googlebot|crawler|spider|robot|crawling|curl|wget|slurp|facebookexternalhit|whatsapp|bingbot|yandex|baiduspider/i;
-    
+    const userAgent = req.headers['user-agent'] || ''
+    const botPattern = /bot|googlebot|crawler|spider|robot|crawling|curl|wget|slurp|facebookexternalhit|whatsapp|bingbot|yandex|baiduspider/i
+
     if (botPattern.test(userAgent)) {
-      return res.status(200).json({ ok: true, ignored: true, reason: 'bot_detected' });
+      return res.status(200).json({ ok: true, ignored: true, reason: 'bot_detected' })
     }
 
-    const ipHashRaw = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
-    const ipHash = ipHashRaw ? Buffer.from(ipHashRaw).toString('base64').substring(0, 64) : null;
-    const path = String(req.body?.path || '').substring(0, 255);
-    const sessionId = String(req.body?.sessionId || '').substring(0, 128) || null;
-    const visitorId = String(req.body?.visitorId || '').substring(0, 128) || null;
+    if (!isTrackingOriginAllowed(req)) {
+      return res.status(200).json({ ok: true, ignored: true, reason: 'invalid_origin' })
+    }
+
+    const pathRaw = String(req.body?.path || '').trim()
+    const path = pathRaw.split('?')[0].split('#')[0].substring(0, 255)
+    if (!path || !path.startsWith('/')) {
+      return res.status(200).json({ ok: true, ignored: true, reason: 'invalid_path' })
+    }
+
+    const pathNoLocale = path.replace(/^\/(en|es)(?=\/|$)/i, '') || '/'
+    if (pathNoLocale.startsWith('/dashboard') || pathNoLocale.startsWith('/api') || pathNoLocale.startsWith('/_next')) {
+      return res.status(200).json({ ok: true, ignored: true, reason: 'excluded_path' })
+    }
+
+    const sessionId = String(req.body?.sessionId || '').trim().substring(0, 128) || null
+    const visitorId = String(req.body?.visitorId || '').trim().substring(0, 128) || null
+    if (!sessionId && !visitorId) {
+      return res.status(200).json({ ok: true, ignored: true, reason: 'missing_identity' })
+    }
+
+    const ip = extractClientIp(req)
+    const ipHash = hashIpAddress(ip)
+
+    const nowMs = Date.now()
+    cleanupSiteVisitGuard(nowMs)
+
+    const rateLimitKey = ipHash || sessionId || visitorId || null
+    if (isIpRateLimited(rateLimitKey, nowMs)) {
+      return res.status(200).json({ ok: true, ignored: true, reason: 'rate_limited' })
+    }
+
+    const identityKey = sessionId || visitorId || ipHash || 'anonymous'
+    const dedupeKey = `${identityKey}|${path}`
+    if (isDuplicateSiteVisit(dedupeKey, nowMs)) {
+      return res.status(200).json({ ok: true, ignored: true, reason: 'duplicate_window' })
+    }
 
     await prisma.siteVisit.create({
       data: {
@@ -844,12 +1027,12 @@ export async function recordSiteVisit(req, res) {
         sessionId,
         visitorId
       }
-    });
+    })
 
-    return res.status(201).json({ ok: true });
+    return res.status(201).json({ ok: true })
   } catch (e) {
-    console.error('recordSiteVisit error', e);
-    return res.status(200).json({ ok: false });
+    console.error('recordSiteVisit error', e)
+    return res.status(200).json({ ok: false })
   }
 }
 
@@ -964,15 +1147,18 @@ export async function getSiteVisitsMetrics(req, res) {
 
 export async function getSiteVisitsTimeseries(req, res) {
   try {
-    const now = new Date()
     const fromRaw = String(req.query.from || '').trim()
     const toRaw = String(req.query.to || '').trim()
 
-    const toDate = toRaw ? new Date(`${toRaw}T23:59:59`) : now
-    const fromDate = fromRaw ? new Date(`${fromRaw}T00:00:00`) : new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+    const { fromDate: fromDateRaw, toDate } = buildDateRangeUtc5(fromRaw, toRaw, 30)
+    let fromDate = new Date(fromDateRaw)
 
     if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
       return res.status(400).json({ error: 'invalid-dates' })
+    }
+
+    if (toDate.getTime() < fromDate.getTime()) {
+      return res.status(400).json({ error: 'invalid-range' })
     }
 
     const diffMs = toDate.getTime() - fromDate.getTime()
@@ -1028,8 +1214,8 @@ export async function getSiteVisitsTimeseries(req, res) {
     }))
 
     return res.json({
-      from: fromDate.toISOString().slice(0, 10),
-      to: toDate.toISOString().slice(0, 10),
+      from: formatDateInUtc5(fromDate),
+      to: formatDateInUtc5(toDate),
       granularity,
       series,
     })
@@ -1041,15 +1227,17 @@ export async function getSiteVisitsTimeseries(req, res) {
 
 export async function getTopPages(req, res) {
   try {
-    const now = new Date()
     const fromRaw = String(req.query.from || '').trim()
     const toRaw = String(req.query.to || '').trim()
 
-    const toDate = toRaw ? new Date(`${toRaw}T23:59:59`) : now
-    const fromDate = fromRaw ? new Date(`${fromRaw}T00:00:00`) : new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+    const { fromDate, toDate } = buildDateRangeUtc5(fromRaw, toRaw, 30)
 
     if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
       return res.status(400).json({ error: 'invalid-dates' })
+    }
+
+    if (toDate.getTime() < fromDate.getTime()) {
+      return res.status(400).json({ error: 'invalid-range' })
     }
 
     const rows = await prisma.$queryRawUnsafe(
@@ -1076,8 +1264,8 @@ export async function getTopPages(req, res) {
     }).slice(0, 50)
 
     return res.json({
-      from: fromDate.toISOString().slice(0, 10),
-      to: toDate.toISOString().slice(0, 10),
+      from: formatDateInUtc5(fromDate),
+      to: formatDateInUtc5(toDate),
       pages,
     })
   } catch (e) {
