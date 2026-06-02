@@ -251,6 +251,9 @@ model asset {
   imageHashes AssetImageHash[]
 
   @@index([accountId])
+  @@index([status, createdAt(sort: Desc)])
+  @@index([status, downloads(sort: Desc)])
+  @@index([isPremium])
   @@map("asset")
 }
 
