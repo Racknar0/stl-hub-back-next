@@ -661,6 +661,19 @@ export async function recordSearchEvent(req, res) {
 
 export async function recordCampaignVisit(req, res) {
   try {
+    const userAgent = req.headers['user-agent'] || ''
+    const botPattern = /bot|googlebot|crawler|spider|robot|crawling|curl|wget|slurp|facebookexternalhit|whatsapp|bingbot|yandex|baiduspider/i
+
+    // 1. Filtrar bots
+    if (botPattern.test(userAgent)) {
+      return res.status(200).json({ ok: true, ignored: true, reason: 'bot_detected' })
+    }
+
+    // 2. Validar origen
+    if (!isTrackingOriginAllowed(req)) {
+      return res.status(200).json({ ok: true, ignored: true, reason: 'invalid_origin' })
+    }
+
     const tracking = extractTrackingFromBody(req.body || {});
     if (!tracking) return res.status(200).json({ ok: true, ignored: true });
 
@@ -675,6 +688,24 @@ export async function recordCampaignVisit(req, res) {
     const anonId = anonIdRaw ? anonIdRaw.slice(0, 120) : null;
     const sessionId = sessionIdRaw ? sessionIdRaw.slice(0, 120) : null;
     const pagePath = pagePathRaw ? pagePathRaw.slice(0, 255) : null;
+
+    const ip = extractClientIp(req)
+    const ipHash = hashIpAddress(ip)
+    const nowMs = Date.now()
+    cleanupSiteVisitGuard(nowMs)
+
+    // 3. Rate limiting
+    const rateLimitKey = ipHash || sessionId || anonId || null
+    if (isIpRateLimited(rateLimitKey, nowMs)) {
+      return res.status(200).json({ ok: true, ignored: true, reason: 'rate_limited' })
+    }
+
+    // 4. Deduplicar por ventana de tiempo (15s)
+    const identityKey = sessionId || anonId || ipHash || 'anonymous'
+    const dedupeKey = `campaign|${identityKey}|${marketingCampaignId || 'none'}`
+    if (isDuplicateSiteVisit(dedupeKey, nowMs)) {
+      return res.status(200).json({ ok: true, ignored: true, reason: 'duplicate_window' })
+    }
 
     await prisma.marketingVisit.create({
       data: {
@@ -704,6 +735,7 @@ export async function recordCampaignVisit(req, res) {
     return res.status(200).json({ ok: false });
   }
 }
+
 
 export async function recordSearchClick(req, res) {
   try {

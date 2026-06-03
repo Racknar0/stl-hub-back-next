@@ -47,6 +47,12 @@ const buildCampaignWhere = (campaign) => {
 
 export const listMarketingCampaigns = async (_req, res) => {
   try {
+    const now = new Date();
+    // Colombia is UTC-5. Get start of today in UTC-5
+    const utc5Date = new Date(now.getTime() - 5 * 60 * 60 * 1000);
+    utc5Date.setUTCHours(0, 0, 0, 0);
+    const todayStartUtc5 = new Date(utc5Date.getTime() + 5 * 60 * 60 * 1000);
+
     const campaigns = await prisma.marketingCampaign.findMany({
       orderBy: { createdAt: 'desc' },
     });
@@ -55,6 +61,7 @@ export const listMarketingCampaigns = async (_req, res) => {
       campaigns.map(async (campaign) => {
         const where = buildCampaignWhere(campaign);
 
+        // Consultas Totales (Históricas)
         const [registrations, completedPayments, latestPayment, visits, uniqueVisitorsRows] = await Promise.all([
           prisma.user.count({ where }),
           prisma.payment.findMany({
@@ -86,6 +93,42 @@ export const listMarketingCampaigns = async (_req, res) => {
           }),
         ]);
 
+        // Consultas de "Hoy" (Desde hoy a las 00:00 UTC-5)
+        const [registrationsToday, completedPaymentsToday, visitsToday, uniqueVisitorsRowsToday] = await Promise.all([
+          prisma.user.count({
+            where: {
+              ...where,
+              createdAt: { gte: todayStartUtc5 },
+            },
+          }),
+          prisma.payment.findMany({
+            where: {
+              ...where,
+              status: 'COMPLETED',
+              createdAt: { gte: todayStartUtc5 },
+            },
+            select: {
+              amount: true,
+              currency: true,
+              rawResponse: true,
+            },
+          }),
+          prisma.marketingVisit.count({
+            where: {
+              ...where,
+              createdAt: { gte: todayStartUtc5 },
+            },
+          }),
+          prisma.marketingVisit.groupBy({
+            by: ['anonId'],
+            where: {
+              ...where,
+              anonId: { not: null },
+              createdAt: { gte: todayStartUtc5 },
+            },
+          }),
+        ]);
+
         return {
           ...campaign,
           trackingUrl: buildTrackingUrl(campaign),
@@ -97,6 +140,14 @@ export const listMarketingCampaigns = async (_req, res) => {
             revenue: sumPaymentsInCop(completedPayments),
             revenueCurrency: 'COP',
             lastPurchaseAt: latestPayment?.createdAt || null,
+          },
+          statsToday: {
+            visits: visitsToday,
+            uniqueVisitors: Array.isArray(uniqueVisitorsRowsToday) ? uniqueVisitorsRowsToday.length : 0,
+            registrations: registrationsToday,
+            purchases: Array.isArray(completedPaymentsToday) ? completedPaymentsToday.length : 0,
+            revenue: sumPaymentsInCop(completedPaymentsToday),
+            revenueCurrency: 'COP',
           },
         };
       })
