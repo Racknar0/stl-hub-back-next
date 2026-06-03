@@ -469,6 +469,7 @@ async function generateSeoAllForAsset(assetInput, availableCategories, assetRaw 
         '6. tags: Una lista de exactamente 3 a 5 tags bilingües relevantes para búsqueda interna y SEO. Cada tag debe tener la forma {"es": "...", "en": "..."}. Evita tags genéricos.',
         'Regla especial de categorización: si el título o el nombre del asset contiene la palabra "flexi", "flexible", "articulado" o "articuled" (o derivados de articulado flexible), debes incluir la categoría "articulados" obligatoriamente en tu selección de categorías sugeridas.',
         'Regla especial de categorización: si el título o el nombre del asset contiene la palabra "keychain" o "llavero" (o derivados), debes incluir la categoría "llaveros" (o "llavero" según corresponda en tu catálogo) obligatoriamente en tu selección de categorías sugeridas.',
+        'Regla especial de categorización: si el título o el nombre del asset contiene la palabra "maceta", "macetas", "planta", "plantas" (o derivados), o en inglés "planter", "planters", "pot", "pots", "plant", "plants", debes incluir la categoría "macetas" obligatoriamente en tu selección de categorías sugeridas.',
         '',
         'Responde ÚNICAMENTE con un objeto JSON válido con el siguiente esquema exacto:',
         JSON.stringify({
@@ -1575,6 +1576,25 @@ export const generateAssetMetaAll = async (req, res) => {
 
         // Mapear categorías sugeridas a IDs reales que existen en la base de datos
         const categorySlugs = generated.categories || [];
+
+        // Sobrescritura por código (programática) para macetas, flexi/articulados, llaveros
+        const titleLower = String(asset.title || asset.archiveName || '').toLowerCase();
+        if (/(maceta|macetas|planta|plantas|planter|planters|pot|pots|plant|plants)/i.test(titleLower)) {
+            if (!categorySlugs.includes('macetas')) {
+                categorySlugs.push('macetas');
+            }
+        }
+        if (/(flexi|flexible|articulado|articuled|articulated)/i.test(titleLower)) {
+            if (!categorySlugs.includes('articulated')) {
+                categorySlugs.push('articulated');
+            }
+        }
+        if (/(keychain|llavero)/i.test(titleLower)) {
+            if (!categorySlugs.includes('llavero')) {
+                categorySlugs.push('llavero');
+            }
+        }
+
         const matchingCategories = availableCategories.filter(c => categorySlugs.includes(c.slug.toLowerCase()));
         const categoryIds = matchingCategories.map(c => c.id);
 

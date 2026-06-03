@@ -706,6 +706,7 @@ async function classifySingleItem(ai, payload, item) {
     '- Si es un elemento para vestir como una mascara, casco o armadura, debes asignarle la categoria "cosplay".',
     '- Si el nombre o titulo del modelo lleva en algun lado la palabra "flexi", "flexible", "articulado" o "articuled" (o derivados de articulado flexible), debes asignarle obligatoriamente la categoria "articulados" y añadir el tag "articulado".',
     '- Si el nombre o titulo del modelo lleva la palabra "keychain" o "llavero" (o derivados), debes asignarle obligatoriamente la categoria "llaveros" (o "llavero" segun figure en tu catalogo) y añadir el tag "llavero".',
+    '- Si el nombre, titulo o ruta del modelo contiene la palabra "maceta", "macetas", "planta", "plantas" (o en ingles "planter", "planters", "pot", "pots", "plant", "plants"), debes asignarle obligatoriamente la categoria "macetas" y añadir el tag "macetas".',
     'Recuerda: Todas estas categorias especiales ya existen, NO debes crear categorias nuevas aparte de las que ya hay en tu catalogo.',
     'Debes devolver EXACTAMENTE 3 tags.',
     'IMPORTANTE: cada tag debe venir como par bilingue { es, en }.',
@@ -985,6 +986,11 @@ function applyCategoryAndTagHardOverrides(sourceName, currentCategory, currentTa
       regex: /(mug|cup|taza|vaso)/i,
       categoryTerms: ['mugs', 'mug', 'mugs-y-tazas', 'tazas', 'taza', 'vasos', 'vaso'],
       tagTerms: ['mug', 'mugs', 'taza', 'tazas', 'vaso', 'vasos', 'cup', 'cups']
+    },
+    {
+      regex: /(maceta|macetas|planta|plantas|planter|planters|pot|pots|plant|plants)/i,
+      categoryTerms: ['macetas', 'pots', 'planters', 'planter'],
+      tagTerms: ['macetas', 'pots', 'maceta', 'pot', 'planta', 'plant', 'plantas', 'plants']
     }
   ]
 
