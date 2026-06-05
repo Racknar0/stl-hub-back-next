@@ -43,6 +43,7 @@ export const getUsers = async (req, res) => {
     const q = (req.query.q || '').trim();
 
     const where = q ? { email: { contains: q } } : {};
+    const today = new Date().toISOString().split('T')[0];
 
     const [total, users, downloadCounts] = await prisma.$transaction([
       prisma.user.count({ where }),
@@ -61,6 +62,11 @@ export const getUsers = async (req, res) => {
             take: 1,
             select: { id: true, status: true, startedAt: true, currentPeriodEnd: true },
           },
+          dailyRolls: {
+            where: { date: today },
+            take: 1,
+            select: { rollsUsed: true },
+          },
         },
         orderBy: { createdAt: 'desc' },
         skip: (page - 1) * pageSize,
@@ -70,12 +76,7 @@ export const getUsers = async (req, res) => {
       prisma.downloadHistory.groupBy({
         by: ['userId'],
         _count: { _all: true },
-        where: { userId: { in: await (async ()=>{
-          // Extraer ids de la página actual
-          // (Se hace en línea porque no podemos referenciar users todavía fuera del txn)
-          // Este truco se ignora, replaceremos luego manualmente si no funciona.
-          return []
-        })() } }
+        where: { userId: { in: [] } }
       }),
     ]);
 
@@ -91,9 +92,19 @@ export const getUsers = async (req, res) => {
       downloadMap = new Map(downloadCounts.map(r => [r.userId, r._count._all]));
     }
 
-    const enriched = users.map(u => ({ ...u, downloadCount: downloadMap.get(u.id) || 0 }));
+    // Obtener configuración del límite de tiradas global
+    const config = await prisma.systemSetting.findUnique({
+      where: { key: 'FREEBIES_ROLLS_COUNT' }
+    });
+    const maxRolls = config && config.value ? (parseInt(config.value, 10) || 3) : 3;
 
-    res.status(200).json({ data: enriched, total, page, pageSize });
+    const enriched = users.map(u => ({
+      ...u,
+      downloadCount: downloadMap.get(u.id) || 0,
+      rollsUsed: u.dailyRolls?.[0]?.rollsUsed ?? 0,
+    }));
+
+    res.status(200).json({ data: enriched, total, page, pageSize, maxRolls });
   } catch (error) {
     console.log('Error getting users: ', error);
     res.status(500).json({ message: 'Error getting users' });
