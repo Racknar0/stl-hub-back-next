@@ -29,7 +29,16 @@ const NSFW_KEYWORDS = [
   'adult', '18', 'nsfw', 'hentai', 'sexy', 'erotic', 'erotica', 'desnud', 'gore', 'xxx', 'porn', 'r18', 'fetish', 'fetis', 'bdsm', 'bondage',
   'bikini', 'bunny-girl', 'bunnygirl', 'pin-up', 'pinup', 'sensual', 'waifu', 'lenceria', 'lingerie', 'nude', 'naked', 'panties', 'topless', 'conejita', 'playboy', 'stripper', 'swimsuit', 'swimwear', 'tanga', 'hilo-dental', 'hilo dental', 'sin-ropa', 'sin ropa',
   'seductor', 'seductora', 'provocativ', 'boudoir', 'boobs', 'buttocks', 'trasero', 'nalgas', 'gluteos', 'underboob', 'cleavage', 'escote', 'pezon', 'pezones', 'nipple', 'nipples', 'caliente',
-  '3dxm', 'jigglystix', 'digital-dark-pinups'
+  '3dxm', 'jigglystix', 'digital-dark-pinups',
+  // Armas, réplicas y cosplay militar/táctico
+  'arma', 'weapon', 'gun', 'bullet', 'firearm', 'ammo', 'ammunition', 'granada', 'grenade', 'shotgun', 'escopeta', 
+  'rifle', 'fusil', 'revolver', 'pistola', 'pistol', 'ak47', 'glock', 'carbine', 'm870', 'remington', 'colt', 
+  'mauser', 'submachine', 'silenciador', 'silencer', 'balas', 'municion', 'katana', 'sword', 'espada', 'cuchillo', 
+  'knife', 'knives', 'blade', 'hacha', 'axe', 'shield', 'escudo', 'bayoneta', 'bayonet', 'tactico', 'tactical',
+  // Tabaco y accesorios para fumar
+  'cenicero', 'ashtray', 'smoke', 'fumar', 'weed', 'marihuana', 'cigarro', 'cigarrillo', 'tabaco', 'tobacco',
+  // Violencia, sangre y muerte
+  'gore', 'sangre', 'blood', 'kill', 'muerte', 'death', 'esqueleto', 'skeleton', 'craneo', 'skull'
 ]
 
 /**

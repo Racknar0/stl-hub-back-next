@@ -26,3 +26,6 @@ src/utils/proxies.txt
 data/telegram.session
 data/telegram_channels.json
 data/last_downloads.json
+
+# Test prod credentials and scripts
+test_prod/
