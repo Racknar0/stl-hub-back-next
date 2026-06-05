@@ -1196,22 +1196,26 @@ export async function getSiteVisitsTimeseries(req, res) {
     const diffMs = toDate.getTime() - fromDate.getTime()
     const diffDays = diffMs / (24 * 60 * 60 * 1000)
 
-    let granularity, dateExpr, dateFormat
+    let granularity, dateExpr, dateFormat, userDateExpr
     if (diffDays <= 1) {
       granularity = 'hour'
       dateExpr = "DATE_FORMAT(DATE_SUB(createdAt, INTERVAL 5 HOUR), '%Y-%m-%d %H:00:00')"
+      userDateExpr = "DATE_FORMAT(DATE_SUB(createdAt, INTERVAL 5 HOUR), '%Y-%m-%d %H:00:00')"
       dateFormat = '%Y-%m-%d %H:00'
     } else if (diffDays <= 20) {
       granularity = 'day'
       dateExpr = 'DATE(DATE_SUB(createdAt, INTERVAL 5 HOUR))'
+      userDateExpr = 'DATE(DATE_SUB(createdAt, INTERVAL 5 HOUR))'
       dateFormat = '%Y-%m-%d'
     } else if (diffDays <= 100) {
       granularity = 'week'
       dateExpr = "DATE(DATE_SUB(DATE_SUB(createdAt, INTERVAL 5 HOUR), INTERVAL WEEKDAY(DATE_SUB(createdAt, INTERVAL 5 HOUR)) DAY))"
+      userDateExpr = "DATE(DATE_SUB(DATE_SUB(createdAt, INTERVAL 5 HOUR), INTERVAL WEEKDAY(DATE_SUB(createdAt, INTERVAL 5 HOUR)) DAY))"
       dateFormat = '%Y-%m-%d'
     } else {
       granularity = 'month'
       dateExpr = "DATE_FORMAT(DATE_SUB(createdAt, INTERVAL 5 HOUR), '%Y-%m-01')"
+      userDateExpr = "DATE_FORMAT(DATE_SUB(createdAt, INTERVAL 5 HOUR), '%Y-%m-01')"
       dateFormat = '%Y-%m-01'
     }
 
@@ -1236,14 +1240,54 @@ export async function getSiteVisitsTimeseries(req, res) {
       ORDER BY bucket ASC
     `
 
-    const rows = await prisma.$queryRawUnsafe(query, fromDate, toDate)
+    const userQuery = `
+      SELECT ${userDateExpr} as bucket,
+             COUNT(*) as cnt
+      FROM user
+      WHERE createdAt >= ? AND createdAt <= ?
+      GROUP BY bucket
+      ORDER BY bucket ASC
+    `
 
-    const series = (rows || []).map((r) => ({
-      date: r.bucket instanceof Date ? r.bucket.toISOString().slice(0, granularity === 'hour' ? 16 : 10) : String(r.bucket || '').slice(0, granularity === 'hour' ? 16 : 10),
-      pv: Number(r.pv || 0),
-      sessions: Number(r.sessions || 0),
-      visitors: Number(r.visitors || 0),
-    }))
+    const [visitsRows, usersRows] = await Promise.all([
+      prisma.$queryRawUnsafe(query, fromDate, toDate),
+      prisma.$queryRawUnsafe(userQuery, fromDate, toDate)
+    ])
+
+    const seriesMap = {}
+    const formatBucketDate = (bucket) => {
+      return bucket instanceof Date
+        ? bucket.toISOString().slice(0, granularity === 'hour' ? 16 : 10)
+        : String(bucket || '').slice(0, granularity === 'hour' ? 16 : 10)
+    }
+
+    ;(visitsRows || []).forEach(r => {
+      const d = formatBucketDate(r.bucket)
+      seriesMap[d] = {
+        date: d,
+        pv: Number(r.pv || 0),
+        sessions: Number(r.sessions || 0),
+        visitors: Number(r.visitors || 0),
+        registrations: 0
+      }
+    })
+
+    ;(usersRows || []).forEach(r => {
+      const d = formatBucketDate(r.bucket)
+      if (!seriesMap[d]) {
+        seriesMap[d] = {
+          date: d,
+          pv: 0,
+          sessions: 0,
+          visitors: 0,
+          registrations: Number(r.cnt || 0)
+        }
+      } else {
+        seriesMap[d].registrations = Number(r.cnt || 0)
+      }
+    })
+
+    const series = Object.values(seriesMap).sort((a, b) => a.date.localeCompare(b.date))
 
     return res.json({
       from: formatDateInUtc5(fromDate),
@@ -1543,19 +1587,23 @@ export async function getDownloadsTimeseries(req, res) {
     const diffMs = toDate.getTime() - fromDate.getTime()
     const diffDays = diffMs / (24 * 60 * 60 * 1000)
 
-    let granularity, dateExpr
+    let granularity, dateExpr, searchDateExpr
     if (diffDays <= 1) {
       granularity = 'hour'
       dateExpr = "DATE_FORMAT(DATE_SUB(downloadedAt, INTERVAL 5 HOUR), '%Y-%m-%d %H:00:00')"
+      searchDateExpr = "DATE_FORMAT(DATE_SUB(createdAt, INTERVAL 5 HOUR), '%Y-%m-%d %H:00:00')"
     } else if (diffDays <= 20) {
       granularity = 'day'
       dateExpr = 'DATE(DATE_SUB(downloadedAt, INTERVAL 5 HOUR))'
+      searchDateExpr = 'DATE(DATE_SUB(createdAt, INTERVAL 5 HOUR))'
     } else if (diffDays <= 100) {
       granularity = 'week'
       dateExpr = "DATE(DATE_SUB(DATE_SUB(downloadedAt, INTERVAL 5 HOUR), INTERVAL WEEKDAY(DATE_SUB(downloadedAt, INTERVAL 5 HOUR)) DAY))"
+      searchDateExpr = "DATE(DATE_SUB(DATE_SUB(createdAt, INTERVAL 5 HOUR), INTERVAL WEEKDAY(DATE_SUB(createdAt, INTERVAL 5 HOUR)) DAY))"
     } else {
       granularity = 'month'
       dateExpr = "DATE_FORMAT(DATE_SUB(downloadedAt, INTERVAL 5 HOUR), '%Y-%m-01')"
+      searchDateExpr = "DATE_FORMAT(DATE_SUB(createdAt, INTERVAL 5 HOUR), '%Y-%m-01')"
     }
 
     if (granularity === 'week') {
@@ -1577,12 +1625,42 @@ export async function getDownloadsTimeseries(req, res) {
       ORDER BY bucket ASC
     `
 
-    const rows = await prisma.$queryRawUnsafe(query, fromDate, toDate)
+    const searchesQuery = `
+      SELECT ${searchDateExpr} as bucket,
+             COUNT(*) as cnt
+      FROM searchevent
+      WHERE createdAt >= ? AND createdAt <= ?
+      GROUP BY bucket
+      ORDER BY bucket ASC
+    `
 
-    const series = (rows || []).map((r) => ({
-      date: r.bucket instanceof Date ? r.bucket.toISOString().slice(0, granularity === 'hour' ? 16 : 10) : String(r.bucket || '').slice(0, granularity === 'hour' ? 16 : 10),
-      count: Number(r.cnt || 0),
-    }))
+    const [downloadsRows, searchesRows] = await Promise.all([
+      prisma.$queryRawUnsafe(query, fromDate, toDate),
+      prisma.$queryRawUnsafe(searchesQuery, fromDate, toDate)
+    ])
+
+    const seriesMap = {}
+    const formatBucketDate = (bucket) => {
+      return bucket instanceof Date
+        ? bucket.toISOString().slice(0, granularity === 'hour' ? 16 : 10)
+        : String(bucket || '').slice(0, granularity === 'hour' ? 16 : 10)
+    }
+
+    ;(downloadsRows || []).forEach(r => {
+      const d = formatBucketDate(r.bucket)
+      seriesMap[d] = { date: d, count: Number(r.cnt || 0), searchCount: 0 }
+    })
+
+    ;(searchesRows || []).forEach(r => {
+      const d = formatBucketDate(r.bucket)
+      if (!seriesMap[d]) {
+        seriesMap[d] = { date: d, count: 0, searchCount: Number(r.cnt || 0) }
+      } else {
+        seriesMap[d].searchCount = Number(r.cnt || 0)
+      }
+    })
+
+    const series = Object.values(seriesMap).sort((a, b) => a.date.localeCompare(b.date))
 
     return res.json({
       from: fromDate.toISOString().slice(0, 10),
