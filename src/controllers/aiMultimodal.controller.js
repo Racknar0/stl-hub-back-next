@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { QdrantClient } from '@qdrant/js-client-rest';
 import qdrantMultimodalService from '../services/qdrantMultimodal.service.js';
+import { buildNsfwWhere } from '../middlewares/nsfwFilter.js';
 
 const prisma = new PrismaClient();
 const qdrantHost = process.env.QDRANT_HOST || '127.0.0.1';
@@ -127,8 +128,9 @@ export const searchByImageHandler = async (req, res) => {
 
     // Enrich with full DB data
     const ids = results.map(r => Number(r.id)).filter(n => Number.isFinite(n) && n > 0);
+    const nsfwWhere = buildNsfwWhere(req);
     const dbAssets = await prisma.asset.findMany({
-      where: { id: { in: ids } },
+      where: { id: { in: ids }, ...nsfwWhere },
       include: {
         categories: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
         tags: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
@@ -213,8 +215,9 @@ export const searchByLocalImageHandler = async (req, res) => {
 
     // Enrich with full DB data (same as normal search)
     const ids = results.map(r => Number(r.id)).filter(n => Number.isFinite(n) && n > 0);
+    const nsfwWhere = buildNsfwWhere(req);
     const dbAssets = await prisma.asset.findMany({
-      where: { id: { in: ids } },
+      where: { id: { in: ids }, ...nsfwWhere },
       include: {
         categories: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
         tags: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },

@@ -2,6 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import { getVectorSyncStatus, syncMissingVectors } from '../../controllers/ai.controller.js';
 import { getMultimodalVectorSyncStatus, syncMissingMultimodalVectors, searchByImageHandler, searchByLocalImageHandler, getVisualSimilarGroupsBatch } from '../../controllers/aiMultimodal.controller.js';
+import { optionalAuth } from '../../middlewares/nsfwFilter.js';
 
 const router = express.Router();
 const uploadMemory = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -12,8 +13,8 @@ router.post('/sync-missing', syncMissingVectors);
 router.get('/sync-multimodal-status', getMultimodalVectorSyncStatus);
 router.post('/sync-multimodal-missing', syncMissingMultimodalVectors);
 
-router.post('/search-by-image', uploadMemory.single('image'), searchByImageHandler);
-router.post('/search-by-local-image', searchByLocalImageHandler);
+router.post('/search-by-image', optionalAuth, uploadMemory.single('image'), searchByImageHandler);
+router.post('/search-by-local-image', optionalAuth, searchByLocalImageHandler);
 router.get('/similar-visual-batch', getVisualSimilarGroupsBatch);
 
 export default router;
