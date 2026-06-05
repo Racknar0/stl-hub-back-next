@@ -25,12 +25,17 @@ export const optionalAuth = (req, _res, next) => {
  * Palabras clave que indican contenido NSFW.
  * El filtro hace `contains` parcial contra slug de categorías y tags.
  */
-const NSFW_KEYWORDS = ['adult', '18', 'nsfw', 'hentai', 'sexy', 'erotic', 'desnud', 'gore']
+const NSFW_KEYWORDS = [
+  'adult', '18', 'nsfw', 'hentai', 'sexy', 'erotic', 'erotica', 'desnud', 'gore', 'xxx', 'porn', 'r18', 'fetish', 'fetis', 'bdsm', 'bondage',
+  'bikini', 'bunny-girl', 'bunnygirl', 'pin-up', 'pinup', 'sensual', 'waifu', 'lenceria', 'lingerie', 'nude', 'naked', 'panties', 'topless', 'conejita', 'playboy', 'stripper', 'swimsuit', 'swimwear', 'tanga', 'hilo-dental', 'hilo dental', 'sin-ropa', 'sin ropa',
+  'seductor', 'seductora', 'provocativ', 'boudoir', 'boobs', 'buttocks', 'trasero', 'nalgas', 'gluteos', 'underboob', 'cleavage', 'escote', 'pezon', 'pezones', 'nipple', 'nipples', 'caliente',
+  '3dxm', 'jigglystix', 'digital-dark-pinups'
+]
 
 /**
  * Construye condiciones Prisma `where` para excluir assets NSFW.
  * - Usuario logueado  → devuelve {} (sin filtro)
- * - Anónimo           → excluye assets cuya categoría o tag contenga alguna keyword
+ * - Anónimo           → excluye assets cuya categoría, tag, título o slug contenga alguna keyword
  *
  * Uso: const nsfwWhere = buildNsfwWhere(req);
  *      prisma.asset.findMany({ where: { status: 'PUBLISHED', ...nsfwWhere } })
@@ -44,6 +49,14 @@ export function buildNsfwWhere(req) {
     AND: [
       { categories: { none: { OR: kwFilters } } },
       { tags:       { none: { OR: kwFilters } } },
+      {
+        NOT: {
+          OR: [
+            ...NSFW_KEYWORDS.map(kw => ({ title: { contains: kw } })),
+            ...NSFW_KEYWORDS.map(kw => ({ slug: { contains: kw } }))
+          ]
+        }
+      }
     ],
   }
 }
@@ -83,6 +96,12 @@ export function buildNsfwTagWhere(req) {
  */
 export function isAssetNSFW(asset) {
   if (!asset) return false
+  const title = String(asset.title || '').toLowerCase()
+  const slug = String(asset.slug || '').toLowerCase()
+  const matchesKeyword = (str) => NSFW_KEYWORDS.some(kw => str.includes(kw))
+
+  if (matchesKeyword(title) || matchesKeyword(slug)) return true
+
   const check = (arr) => {
     if (!Array.isArray(arr)) return false
     return arr.some(item => {
