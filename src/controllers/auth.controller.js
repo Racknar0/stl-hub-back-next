@@ -485,7 +485,7 @@ export const resetPassword = async (req, res) => {
 // Revisión y corrección: registro por venta con suscripción
 export const registerUserSale = async (req, res) => {
     try {
-        const { email, password, type_subscription, daysToAdd } = req.body;
+        const { email, password, type_subscription, daysToAdd, roleId } = req.body;
         const trackingResolved = await resolveTrackingForRequest(prisma, req, 'first');
         const tracking = trackingResolved?.tracking || null;
 
@@ -571,7 +571,7 @@ export const registerUserSale = async (req, res) => {
                 data: {
                     email,
                     password: hashedPassword,
-                    roleId: 1, // rol por defecto: user
+                    roleId: roleId ? Number(roleId) : 1, // usar rol especificado o por defecto: user
                     isActive: true, // activar cuenta al comprar
                     marketingCampaignId,
                     ...trackingDb,
