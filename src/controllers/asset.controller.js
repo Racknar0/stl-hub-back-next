@@ -3464,7 +3464,7 @@ export const listPublishedSlugs = async (req, res) => {
     try {
         const { updatedAfter } = req.query || {};
         const nsfwWhere = buildNsfwWhere(req);
-        const where = { status: 'PUBLISHED', ...nsfwWhere };
+        const where = { status: 'PUBLISHED', isPremium: true, ...nsfwWhere };
         if (updatedAfter) {
             const d = new Date(updatedAfter);
             if (!isNaN(d.getTime())) where.updatedAt = { gt: d };
