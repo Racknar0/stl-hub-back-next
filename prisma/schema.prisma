@@ -62,6 +62,9 @@ model user {
   // Gift code redemptions
   giftRedemptions GiftRedemption[]
 
+  // Freebie/Daily rolls tracking
+  dailyRolls userDailyRolls[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -754,5 +757,20 @@ model TelegramChannel {
   updatedAt       DateTime  @updatedAt
 
   @@map("telegramchannel")
+}
+
+model userDailyRolls {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  date      String   // Formato "YYYY-MM-DD"
+  rollsUsed Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user user @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@index([userId])
+  @@map("userdailyrolls")
 }
 

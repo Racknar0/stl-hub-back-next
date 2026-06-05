@@ -248,3 +248,89 @@ export const updateMyLanguage = async (req, res) => {
     return res.status(500).json({ message: 'Error updating language' });
   }
 };
+
+export const getMyFreebieRolls = async (req, res) => {
+  try {
+    const userId = Number(req.user?.id);
+    if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+    // Obtener configuración del límite de tiradas
+    const config = await prisma.systemSetting.findUnique({
+      where: { key: 'FREEBIES_ROLLS_COUNT' }
+    });
+    const maxRolls = config && config.value ? (parseInt(config.value, 10) || 3) : 3;
+
+    const today = new Date().toISOString().split('T')[0];
+    const row = await prisma.userDailyRolls.findUnique({
+      where: {
+        userId_date: {
+          userId,
+          date: today,
+        },
+      },
+      select: { rollsUsed: true },
+    });
+
+    return res.json({
+      rollsUsed: row?.rollsUsed ?? 0,
+      maxRolls
+    });
+  } catch (e) {
+    console.error('[ME] getMyFreebieRolls error:', e);
+    return res.status(500).json({ message: 'Error getting freebie rolls' });
+  }
+};
+
+export const registerFreebieRoll = async (req, res) => {
+  try {
+    const userId = Number(req.user?.id);
+    if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+    // Obtener configuración del límite de tiradas
+    const config = await prisma.systemSetting.findUnique({
+      where: { key: 'FREEBIES_ROLLS_COUNT' }
+    });
+    const maxRolls = config && config.value ? (parseInt(config.value, 10) || 3) : 3;
+
+    const today = new Date().toISOString().split('T')[0];
+
+    const record = await prisma.userDailyRolls.findUnique({
+      where: {
+        userId_date: {
+          userId,
+          date: today,
+        },
+      },
+    });
+
+    const currentRolls = record?.rollsUsed ?? 0;
+    if (currentRolls >= maxRolls) {
+      return res.status(400).json({ message: 'Ya has agotado tus tiradas de hoy.' });
+    }
+
+    const updated = await prisma.userDailyRolls.upsert({
+      where: {
+        userId_date: {
+          userId,
+          date: today,
+        },
+      },
+      update: {
+        rollsUsed: { increment: 1 },
+      },
+      create: {
+        userId,
+        date: today,
+        rollsUsed: 1,
+      },
+    });
+
+    return res.json({
+      rollsUsed: updated.rollsUsed,
+      maxRolls
+    });
+  } catch (e) {
+    console.error('[ME] registerFreebieRoll error:', e);
+    return res.status(500).json({ message: 'Error registering freebie roll' });
+  }
+};
