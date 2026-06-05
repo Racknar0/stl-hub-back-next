@@ -1184,6 +1184,12 @@ export const getAsset = async (req, res) => {
             },
         });
         if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        // --- NSFW gate: si el asset es adulto y el usuario no está logueado, bloqueamos ---
+        if (!req.user && isAssetNSFWBackend(asset)) {
+            return res.json({ __nsfw_restricted: true, slug: asset.slug });
+        }
+
         const assetSafe = toJsonSafe(asset);
         return res.json(assetSafe);
     } catch (e) {

@@ -68,7 +68,7 @@ router.get('/menu/mega', optionalAuth, getMegaMenuData);
 router.get('/search', optionalAuth, searchAssets);
 router.get('/slugs', optionalAuth, listPublishedSlugs);
 router.get('/slug/:slug', optionalAuth, getAssetBySlug);
-router.get('/:id(\\d+)', getAsset);
+router.get('/:id(\\d+)', optionalAuth, getAsset);
 router.post('/:id/request-download', requestDownload);
 router.post('/:id/report-broken-link', createBrokenReport);
 
