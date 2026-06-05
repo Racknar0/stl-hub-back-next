@@ -44,7 +44,7 @@ const NSFW_KEYWORDS = [
 /**
  * Construye condiciones Prisma `where` para excluir assets NSFW.
  * - Usuario logueado  → devuelve {} (sin filtro)
- * - Anónimo           → excluye assets cuya categoría, tag, título o slug contenga alguna keyword
+ * - Anónimo           → excluye assets cuya categoría, tag (slug O name), título o slug contenga alguna keyword
  *
  * Uso: const nsfwWhere = buildNsfwWhere(req);
  *      prisma.asset.findMany({ where: { status: 'PUBLISHED', ...nsfwWhere } })
@@ -52,23 +52,32 @@ const NSFW_KEYWORDS = [
 export function buildNsfwWhere(req) {
   if (req?.user) return {}
 
-  const kwFilters = NSFW_KEYWORDS.map(kw => ({ slug: { contains: kw } }))
+  // Filtros por slug (para categorías y tags)
+  const kwSlugFilters = NSFW_KEYWORDS.map(kw => ({ slug: { contains: kw } }))
+
+  // Filtros extendidos para tags: slug, name Y nameEn (cierra brecha slug="calavera" vs name="Cráneo")
+  const kwTagFilters = NSFW_KEYWORDS.flatMap(kw => [
+    { slug:   { contains: kw } },
+    { name:   { contains: kw } },
+    { nameEn: { contains: kw } },
+  ])
 
   return {
     AND: [
-      { categories: { none: { OR: kwFilters } } },
-      { tags:       { none: { OR: kwFilters } } },
+      { categories: { none: { OR: kwSlugFilters } } },
+      { tags:       { none: { OR: kwTagFilters  } } },
       {
         NOT: {
           OR: [
             ...NSFW_KEYWORDS.map(kw => ({ title: { contains: kw } })),
-            ...NSFW_KEYWORDS.map(kw => ({ slug: { contains: kw } }))
+            ...NSFW_KEYWORDS.map(kw => ({ slug:  { contains: kw } }))
           ]
         }
       }
     ],
   }
 }
+
 
 /**
  * Construye condiciones Prisma para excluir categorías NSFW del listado público.
