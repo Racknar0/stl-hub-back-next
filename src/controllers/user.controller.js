@@ -346,3 +346,29 @@ export const extendSubscription = async (req, res) => {
     return res.status(500).json({ message: 'Error extending subscription' });
   }
 };
+
+// Reiniciar tiradas de freebies del día de hoy para un usuario específico (admin ops)
+export const resetUserFreebieRolls = async (req, res) => {
+  try {
+    const userId = parseInt(req.params.id);
+    if (isNaN(userId)) return res.status(400).json({ message: 'Invalid User ID' });
+
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true } });
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    const today = new Date().toISOString().split('T')[0];
+
+    // Eliminar el registro del día de hoy para este usuario
+    await prisma.userDailyRolls.deleteMany({
+      where: {
+        userId,
+        date: today,
+      },
+    });
+
+    return res.status(200).json({ message: 'Daily rolls reset successfully' });
+  } catch (error) {
+    console.error('Error resetting user freebie rolls:', error);
+    return res.status(500).json({ message: 'Error resetting freebie rolls' });
+  }
+};
