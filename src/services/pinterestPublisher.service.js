@@ -152,25 +152,28 @@ class PinterestPublisherService {
         headers: { 'Authorization': `Bearer ${accessToken}` }
       });
       
-      if (response.ok) {
-        const data = await response.json();
-        const boards = data.items || [];
-        console.log(`[Pinterest] Found ${boards.length} boards:`, boards.map(b => b.name));
-        
-        // 1. Buscar tablero con nombre exacto (ej. "STL Hub")
-        const exactBoard = boards.find(b => 
-          b.name.toLowerCase() === defaultName.toLowerCase()
-        );
-        if (exactBoard) {
-          console.log(`[Pinterest] Using exact default board: ${exactBoard.id} (${exactBoard.name})`);
-          return exactBoard.id;
-        }
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Error de Pinterest al listar tableros (HTTP ${response.status}): ${errText}`);
+      }
+      
+      const data = await response.json();
+      const boards = data.items || [];
+      console.log(`[Pinterest] Found ${boards.length} boards:`, boards.map(b => b.name));
+      
+      // 1. Buscar tablero con nombre exacto (ej. "STL Hub")
+      const exactBoard = boards.find(b => 
+        b.name.toLowerCase() === defaultName.toLowerCase()
+      );
+      if (exactBoard) {
+        console.log(`[Pinterest] Using exact default board: ${exactBoard.id} (${exactBoard.name})`);
+        return exactBoard.id;
+      }
 
-        // 2. Fallback: Si no existe, pero hay otros tableros, usar el primero disponible
-        if (boards.length > 0) {
-          console.log(`[Pinterest] Default board "${defaultName}" not found. Using first available board: ${boards[0].id} (${boards[0].name})`);
-          return boards[0].id;
-        }
+      // 2. Fallback: Si no existe, pero hay otros tableros, usar el primero disponible
+      if (boards.length > 0) {
+        console.log(`[Pinterest] Default board "${defaultName}" not found. Using first available board: ${boards[0].id} (${boards[0].name})`);
+        return boards[0].id;
       }
 
       // 3. Si no hay ningún tablero, intentar crear "STL Hub"
@@ -181,18 +184,17 @@ class PinterestPublisherService {
         body: JSON.stringify({ name: defaultName, description: `3D Printable STL Files` })
       });
 
-      if (createResponse.ok) {
-        const newBoard = await createResponse.json();
-        console.log(`[Pinterest] Created default board: ${newBoard.id}`);
-        return newBoard.id;
+      if (!createResponse.ok) {
+        const createErrText = await createResponse.text();
+        throw new Error(`Error de Pinterest al crear tablero (HTTP ${createResponse.status}): ${createErrText}`);
       }
 
-      const createText = await createResponse.text();
-      console.error(`[Pinterest] Failed to create default board:`, createText);
-      return null;
+      const newBoard = await createResponse.json();
+      console.log(`[Pinterest] Created default board: ${newBoard.id}`);
+      return newBoard.id;
     } catch (e) {
       console.error('[Pinterest] Error resolving default board:', e.message);
-      return null;
+      throw e;
     }
   }
 
