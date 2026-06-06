@@ -27,23 +27,12 @@ class PinterestPublisherService {
       // 2. Resolver boardId si es null/auto/Automático
       let resolvedBoardId = boardId;
       if (!resolvedBoardId || resolvedBoardId === 'auto' || resolvedBoardId === 'Automático') {
-        let boardName = 'STL Hub';
-        if (assetId) {
-          try {
-            const assetObj = await prisma.asset.findUnique({
-              where: { id: Number(assetId) },
-              include: { categories: true }
-            });
-            if (assetObj?.categories?.length > 0) {
-              boardName = assetObj.categories[0].name;
-            }
-          } catch (err) {
-            console.error('[Pinterest] Error fetching asset category:', err.message);
-          }
+        const boardName = 'STL Hub';
+        resolvedBoardId = await this.findOrCreateDefaultBoard(boardName, accessToken);
+        if (!resolvedBoardId) {
+          throw new Error('No se pudo obtener ningún tablero predeterminado de Pinterest. Crea al menos un tablero en tu cuenta de Pinterest manualmente.');
         }
-        resolvedBoardId = await this.findOrCreateBoard(boardName, accessToken);
-        if (!resolvedBoardId) throw new Error(`No se pudo obtener el tablero "${boardName}" de Pinterest. Crea uno manualmente.`);
-        console.log(`[Pinterest] Using board: ${boardName} (${resolvedBoardId})`);
+        console.log(`[Pinterest] Using default board ID: ${resolvedBoardId}`);
       }
 
       // 3. Descargar la imagen a memoria RAM
@@ -155,7 +144,59 @@ class PinterestPublisherService {
     return finalBuffer.toString('base64');
   }
 
-  // Helper para buscar el tablero basado en la categoría
+  // Helper para buscar o resolver el tablero por defecto (evita crear tableros por categoría)
+  async findOrCreateDefaultBoard(defaultName, accessToken) {
+    try {
+      console.log(`[Pinterest] Looking for default board: "${defaultName}"...`);
+      const response = await fetch(`${this.baseUrl}/boards`, {
+        headers: { 'Authorization': `Bearer ${accessToken}` }
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        const boards = data.items || [];
+        console.log(`[Pinterest] Found ${boards.length} boards:`, boards.map(b => b.name));
+        
+        // 1. Buscar tablero con nombre exacto (ej. "STL Hub")
+        const exactBoard = boards.find(b => 
+          b.name.toLowerCase() === defaultName.toLowerCase()
+        );
+        if (exactBoard) {
+          console.log(`[Pinterest] Using exact default board: ${exactBoard.id} (${exactBoard.name})`);
+          return exactBoard.id;
+        }
+
+        // 2. Fallback: Si no existe, pero hay otros tableros, usar el primero disponible
+        if (boards.length > 0) {
+          console.log(`[Pinterest] Default board "${defaultName}" not found. Using first available board: ${boards[0].id} (${boards[0].name})`);
+          return boards[0].id;
+        }
+      }
+
+      // 3. Si no hay ningún tablero, intentar crear "STL Hub"
+      console.log(`[Pinterest] No boards found. Creating default board: "${defaultName}"...`);
+      const createResponse = await fetch(`${this.baseUrl}/boards`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: defaultName, description: `3D Printable STL Files` })
+      });
+
+      if (createResponse.ok) {
+        const newBoard = await createResponse.json();
+        console.log(`[Pinterest] Created default board: ${newBoard.id}`);
+        return newBoard.id;
+      }
+
+      const createText = await createResponse.text();
+      console.error(`[Pinterest] Failed to create default board:`, createText);
+      return null;
+    } catch (e) {
+      console.error('[Pinterest] Error resolving default board:', e.message);
+      return null;
+    }
+  }
+
+  // Helper para buscar el tablero basado en la categoría (se mantiene para compatibilidad)
   async findOrCreateBoard(categoryName, accessToken) {
     try {
       console.log(`[Pinterest] Looking for board: "${categoryName}"...`);

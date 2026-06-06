@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js';
 import pinterestService from '../../services/pinterest.service.js';
+import { dispatchPinterestFailureNotification } from '../../utils/pinterestNotifications.js';
 
 const router = express.Router();
 
@@ -579,20 +580,15 @@ router.post('/publish-now', requireAuth, requireAdmin, async (req, res) => {
         data: { status: 'FAILED', errorMessage: pubError.message }
       });
 
-      // Crear notificación de error interna en la BD
-      try {
-        await prisma.notification.create({
-          data: {
-            title: `Error al publicar Pin ahora (Asset #${assetId || 'now'})`,
-            body: `Ocurrió un error al intentar publicar manualmente el Pin en Pinterest.\n\nError: ${pubError.message}\n\nTítulo del Pin: ${title || 'Sin título'}`,
-            status: 'UNREAD',
-            type: 'AUTOMATION',
-            typeStatus: 'ERROR'
-          }
-        });
-      } catch (notifErr) {
-        console.error('[Pinterest Route] No se pudo crear la notificación en la BD:', notifErr.message);
-      }
+      // Crear notificación de error interna en la BD y enviar email al administrador
+      await dispatchPinterestFailureNotification({
+        pinId: pin.id,
+        assetId: assetId ? Number(assetId) : 0,
+        title: title,
+        errorMsg: pubError.message,
+        link: link,
+        isImmediate: true
+      });
 
       res.status(500).json({ error: pubError.message, dbId: pin.id });
     }
