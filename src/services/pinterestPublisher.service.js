@@ -1,6 +1,8 @@
 import sharp from 'sharp';
 import pinterestService from './pinterest.service.js';
 import { PrismaClient } from '@prisma/client';
+import fs from 'fs';
+import path from 'path';
 
 const prisma = new PrismaClient();
 
@@ -88,18 +90,47 @@ class PinterestPublisherService {
    * Descarga la imagen desde una URL y la devuelve como Buffer
    */
   async downloadImage(url) {
-    // Si la URL es una ruta local (ej: /uploads/...), asumimos que el backend 
-    // la sirve localmente. Para simplificar, la consumimos vía HTTP si tenemos la URL base,
-    // o podríamos leerla con `fs` si es estrictamente local.
-    // Ajustaremos esto si las imágenes vienen por URL relativa.
-    const fullUrl = url.startsWith('http') ? url : `http://localhost:${process.env.PORT || 3001}${url}`;
-    
-    const response = await fetch(fullUrl);
-    if (!response.ok) {
-      throw new Error(`No se pudo descargar la imagen original desde: ${fullUrl}`);
+    try {
+      // 1. Intentar resolver la imagen de manera local en el disco para evitar peticiones HTTP a localhost
+      let relativePath = null;
+
+      // Caso A: Si es una URL completa que tiene "/uploads/"
+      if (url.includes('/uploads/')) {
+        const parts = url.split('/uploads/');
+        if (parts.length > 1) {
+          relativePath = path.join('uploads', parts[1].replace(/\\/g, '/'));
+        }
+      }
+      // Caso B: Si es una ruta relativa directa
+      else if (!url.startsWith('http')) {
+        relativePath = url.replace(/^\\+|^\/+/, '');
+        if (!relativePath.startsWith('uploads')) {
+          relativePath = path.join('uploads', relativePath);
+        }
+      }
+
+      if (relativePath) {
+        const absolutePath = path.resolve(relativePath);
+        console.log(`[Pinterest Publisher] Intentando leer imagen localmente en disco: ${absolutePath}`);
+        if (fs.existsSync(absolutePath)) {
+          return fs.readFileSync(absolutePath);
+        }
+        console.warn(`[Pinterest Publisher] Archivo local no encontrado en disco en: ${absolutePath}. Intentando descarga vía HTTP...`);
+      }
+
+      // 2. Si no es local o no se encontró en disco, descargar vía HTTP
+      const fullUrl = url.startsWith('http') ? url : `http://localhost:${process.env.PORT || 3001}${url}`;
+      console.log(`[Pinterest Publisher] Descargando imagen por HTTP: ${fullUrl}`);
+      const response = await fetch(fullUrl);
+      if (!response.ok) {
+        throw new Error(`No se pudo descargar la imagen original desde: ${fullUrl}`);
+      }
+      const arrayBuffer = await response.arrayBuffer();
+      return Buffer.from(arrayBuffer);
+    } catch (err) {
+      console.error(`[Pinterest Publisher] Error en downloadImage para ${url}:`, err.message);
+      throw new Error(`No se pudo descargar la imagen original desde: ${url}. Detalle: ${err.message}`);
     }
-    const arrayBuffer = await response.arrayBuffer();
-    return Buffer.from(arrayBuffer);
   }
 
   /**
