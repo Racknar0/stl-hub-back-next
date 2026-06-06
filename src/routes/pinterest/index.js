@@ -7,6 +7,18 @@ import { dispatchPinterestFailureNotification } from '../../utils/pinterestNotif
 
 const router = express.Router();
 
+function resolveRelativePath(urlOrPath) {
+  if (!urlOrPath) return '';
+  let clean = String(urlOrPath);
+  if (clean.includes('/uploads/')) {
+    const parts = clean.split('/uploads/');
+    if (parts.length > 1) {
+      clean = parts[1];
+    }
+  }
+  return clean.replace(/^\\+|^\/+/, '').replace(/\\/g, '/');
+}
+
 // 1. Obtener URL de autorización (Protegido para uso oficial)
 router.get('/auth', requireAuth, requireAdmin, (req, res) => {
   try {
@@ -354,22 +366,28 @@ router.post('/schedule', requireAuth, requireAdmin, async (req, res) => {
       const PINS_DIR = path.join(UPLOADS_DIR, 'pinterest-pins');
       if (!fs.existsSync(PINS_DIR)) fs.mkdirSync(PINS_DIR, { recursive: true });
 
-      const cleanPath = String(imgUrl || '').replace(/^\\+|^\/+/, '');
-      const srcPath = path.join(UPLOADS_DIR, cleanPath);
-      const ext = path.extname(cleanPath) || '.webp';
+      const relativeSrc = resolveRelativePath(imgUrl);
+      const srcPath = path.join(UPLOADS_DIR, relativeSrc);
+      const ext = path.extname(relativeSrc) || '.webp';
       let permanentRelPath;
-      // If already a cropped/edited pin image, skip the copy
-      if (cleanPath.startsWith('pinterest-pins/')) {
-        permanentRelPath = cleanPath;
+      
+      // Si ya está guardada en pinterest-pins/ (por ejemplo si ya se recortó y subió), no hace falta copiarla de nuevo
+      if (relativeSrc.startsWith('pinterest-pins/')) {
+        permanentRelPath = relativeSrc;
       } else {
         const pinFileName = `pin_${assetId}_${Date.now()}_${i}${ext}`;
         const destPath = path.join(PINS_DIR, pinFileName);
         permanentRelPath = `pinterest-pins/${pinFileName}`;
         try {
-          if (fs.existsSync(srcPath)) fs.copyFileSync(srcPath, destPath);
+          if (fs.existsSync(srcPath)) {
+            fs.copyFileSync(srcPath, destPath);
+          } else {
+            console.warn(`[PINTEREST] Archivo de origen no encontrado en disco: ${srcPath}. Se usará la ruta relativa.`);
+            permanentRelPath = relativeSrc;
+          }
         } catch (e) {
           console.warn('[PINTEREST] Could not copy image:', e.message);
-          permanentRelPath = cleanPath;
+          permanentRelPath = relativeSrc;
         }
       }
 
@@ -534,15 +552,27 @@ router.post('/publish-now', requireAuth, requireAdmin, async (req, res) => {
     const PINS_DIR = path.join(UPLOADS_DIR, 'pinterest-pins');
     if (!fs.existsSync(PINS_DIR)) fs.mkdirSync(PINS_DIR, { recursive: true });
 
-    const cleanPath = String(imageUrl).replace(/^\\+|^\/+/, '');
-    const srcPath = path.join(UPLOADS_DIR, cleanPath);
-    const ext = path.extname(cleanPath) || '.webp';
-    const pinFileName = `pin_${assetId || 'now'}_${Date.now()}${ext}`;
-    const destPath = path.join(PINS_DIR, pinFileName);
-
-    let permanentRelPath = `pinterest-pins/${pinFileName}`;
-    try { if (fs.existsSync(srcPath)) fs.copyFileSync(srcPath, destPath); }
-    catch (e) { permanentRelPath = cleanPath; }
+    const relativeSrc = resolveRelativePath(imageUrl);
+    const srcPath = path.join(UPLOADS_DIR, relativeSrc);
+    const ext = path.extname(relativeSrc) || '.webp';
+    
+    let permanentRelPath;
+    if (relativeSrc.startsWith('pinterest-pins/')) {
+      permanentRelPath = relativeSrc;
+    } else {
+      const pinFileName = `pin_${assetId || 'now'}_${Date.now()}${ext}`;
+      const destPath = path.join(PINS_DIR, pinFileName);
+      permanentRelPath = `pinterest-pins/${pinFileName}`;
+      try {
+        if (fs.existsSync(srcPath)) {
+          fs.copyFileSync(srcPath, destPath);
+        } else {
+          permanentRelPath = relativeSrc;
+        }
+      } catch (e) {
+        permanentRelPath = relativeSrc;
+      }
+    }
 
     const UPLOADS_BASE = process.env.UPLOADS_BASE_URL || `http://localhost:${process.env.PORT || 3001}/uploads`;
     const fullImageUrl = `${UPLOADS_BASE}/${permanentRelPath}`;
