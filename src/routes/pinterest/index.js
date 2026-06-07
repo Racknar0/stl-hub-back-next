@@ -695,4 +695,57 @@ router.post('/publish-now', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
+// 14. Reintentar un pin fallido de inmediato
+router.post('/queue/retry/:id', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'ID inválido' });
+
+    const pin = await prisma.pinterestPinQueue.findUnique({ where: { id } });
+    if (!pin) return res.status(404).json({ error: 'Pin no encontrado' });
+
+    let imageUrl = '';
+    let filtersObj = {};
+    try {
+      filtersObj = typeof pin.filters === 'string'
+        ? JSON.parse(pin.filters)
+        : pin.filters || {};
+      imageUrl = filtersObj.imagePath || filtersObj.imageUrl || '';
+    } catch (err) {
+      // ignore
+    }
+
+    const UPLOADS_BASE = process.env.UPLOADS_BASE_URL || `http://localhost:${process.env.PORT || 3001}/uploads`;
+    const fullImageUrl = imageUrl.startsWith('http') ? imageUrl : `${UPLOADS_BASE}/${imageUrl}`;
+
+    try {
+      const result = await pinterestPublisherService.publishPin(
+        fullImageUrl,
+        pin.boardId && pin.boardId !== 'auto' && pin.boardId !== 'Automático' ? pin.boardId : null,
+        pin.title,
+        pin.description,
+        pin.link,
+        filtersObj,
+        pin.assetId ? Number(pin.assetId) : null
+      );
+
+      const updated = await prisma.pinterestPinQueue.update({
+        where: { id: pin.id },
+        data: { status: 'PUBLISHED', publishedPinId: result.id, errorMessage: null }
+      });
+
+      res.json({ success: true, pin: updated });
+    } catch (pubError) {
+      await prisma.pinterestPinQueue.update({
+        where: { id: pin.id },
+        data: { status: 'FAILED', errorMessage: pubError.message }
+      });
+
+      res.status(500).json({ error: pubError.message });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
