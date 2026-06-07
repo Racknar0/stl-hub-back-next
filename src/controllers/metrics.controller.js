@@ -1674,5 +1674,80 @@ export async function getDownloadsTimeseries(req, res) {
   }
 }
 
+export async function getTrafficSources(req, res) {
+  try {
+    const { from, to } = req.query
+    const { fromDate, toDate } = buildDateRangeUtc5(from, to)
+
+    // Agrupar visitas (sesiones y visitantes únicos)
+    const visitsQuery = `
+      SELECT COALESCE(utmSource, 'direct') as source,
+             COUNT(*) as count,
+             COUNT(DISTINCT sessionId) as sessions,
+             COUNT(DISTINCT anonId) as uniqueVisitors
+      FROM marketingvisit
+      WHERE createdAt >= ? AND createdAt <= ?
+      GROUP BY source
+      ORDER BY count DESC
+    `
+
+    // Agrupar registros (usuarios)
+    const registrationsQuery = `
+      SELECT COALESCE(utmSource, 'direct') as source,
+             COUNT(*) as count
+      FROM user
+      WHERE createdAt >= ? AND createdAt <= ?
+      GROUP BY source
+      ORDER BY count DESC
+    `
+
+    // Agrupar compras (pagos completados)
+    const paymentsQuery = `
+      SELECT COALESCE(utmSource, 'direct') as source,
+             COUNT(*) as count,
+             SUM(amount) as revenue
+      FROM payment
+      WHERE status = 'COMPLETED' AND createdAt >= ? AND createdAt <= ?
+      GROUP BY source
+      ORDER BY count DESC
+    `
+
+    const [visitsRows, registrationsRows, paymentsRows] = await Promise.all([
+      prisma.$queryRawUnsafe(visitsQuery, fromDate, toDate),
+      prisma.$queryRawUnsafe(registrationsQuery, fromDate, toDate),
+      prisma.$queryRawUnsafe(paymentsQuery, fromDate, toDate),
+    ])
+
+    const visits = (visitsRows || []).map(r => ({
+      source: String(r.source),
+      count: Number(r.count || 0),
+      sessions: Number(r.sessions || 0),
+      uniqueVisitors: Number(r.uniqueVisitors || 0)
+    }))
+
+    const registrations = (registrationsRows || []).map(r => ({
+      source: String(r.source),
+      count: Number(r.count || 0)
+    }))
+
+    const payments = (paymentsRows || []).map(r => ({
+      source: String(r.source),
+      count: Number(r.count || 0),
+      revenue: Number(r.revenue || 0)
+    }))
+
+    return res.json({
+      from: fromDate.toISOString().slice(0, 10),
+      to: toDate.toISOString().slice(0, 10),
+      visits,
+      registrations,
+      payments
+    })
+  } catch (e) {
+    console.error('getTrafficSources error', e)
+    return res.status(500).json({ error: 'internal' })
+  }
+}
+
 
 

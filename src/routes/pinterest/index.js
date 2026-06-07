@@ -254,6 +254,54 @@ router.post('/ai-optimize', requireAuth, requireAdmin, async (req, res) => {
 import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 
+function isAdultAsset(asset) {
+  // 1. Check categories
+  if (asset.categories && asset.categories.length > 0) {
+    const hasAdultCategory = asset.categories.some(cat => {
+      const name = (cat.name || '').toLowerCase();
+      const slug = (cat.slug || '').toLowerCase();
+      return name.includes('adulto') || name.includes('adult') || slug.includes('adulto') || slug.includes('adult');
+    });
+    if (hasAdultCategory) return true;
+  }
+
+  // 2. Check tags
+  if (asset.tags && asset.tags.length > 0) {
+    const adultTagKeywords = ['nsfw', 'sexy', 'hentai', 'nude', 'adulto', 'adult', 'erotic', 'porn', 'sensual', 'nudeza', '18+', '+18', 'r18', 'r-18'];
+    const hasAdultTag = asset.tags.some(t => {
+      const name = (t.name || '').toLowerCase();
+      const nameEn = (t.nameEn || '').toLowerCase();
+      return adultTagKeywords.some(kw => name.includes(kw) || nameEn.includes(kw));
+    });
+    if (hasAdultTag) return true;
+  }
+
+  // 3. Check title, titleEn, description, descriptionEn, slug
+  const textToCheck = [
+    asset.title,
+    asset.titleEn,
+    asset.description,
+    asset.descriptionEn,
+    asset.slug
+  ].map(t => (t || '').toLowerCase());
+
+  const adultTextKeywords = ['nsfw', 'hentai', 'nude', 'nudeza', 'adulto', 'erotic', 'porn', 'sensual', '18+', '+18', 'r18', 'r-18', 'sexy', 'adult'];
+  const hasAdultText = textToCheck.some(text => {
+    return adultTextKeywords.some(kw => text.includes(kw));
+  });
+  if (hasAdultText) return true;
+
+  return false;
+}
+
+function hasAdultKeywords(title, description) {
+  const textToCheck = [title, description].map(t => (t || '').toLowerCase());
+  const adultKeywords = ['nsfw', 'sexy', 'hentai', 'nude', 'nudeza', 'adulto', 'adult', 'erotic', 'porn', 'sensual', '18+', '+18', 'r18', 'r-18'];
+  return textToCheck.some(text => {
+    return adultKeywords.some(kw => text.includes(kw));
+  });
+}
+
 // Stats: counts by status
 router.get('/stats', requireAuth, requireAdmin, async (req, res) => {
   try {
@@ -308,6 +356,74 @@ router.get('/search-assets', requireAuth, requireAdmin, async (req, res) => {
     
     if (!q) return res.status(400).json({ error: 'Query is required' });
 
+    let assets = [];
+
+    if (mode === 'id') {
+      // Support comma-separated IDs: "12878, 15432, 9876"
+      const ids = String(q).split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
+      if (ids.length === 0) return res.status(400).json({ error: 'Invalid ID format' });
+
+      assets = await prisma.asset.findMany({
+        where: { id: { in: ids } },
+        include: { categories: true, tags: true }
+      });
+    } else if (mode === 'semantic' || mode === 'ai') {
+      try {
+        console.log(`[PINTEREST][SEARCH] Buscando semánticamente en Qdrant: "${q}"`);
+        const qdrantResults = await qdrantMultimodalService.searchByImage(
+          null,
+          null,
+          q,
+          30,
+          0.1
+        );
+
+        if (qdrantResults && qdrantResults.length > 0) {
+          const ids = qdrantResults.map(r => Number(r.id)).filter(Boolean);
+          const dbAssets = await prisma.asset.findMany({
+            where: { id: { in: ids }, status: 'PUBLISHED' },
+            include: { categories: true, tags: true }
+          });
+
+          // Ordenar según relevancia en Qdrant
+          assets = ids
+            .map(id => dbAssets.find(a => a.id === id))
+            .filter(Boolean);
+        }
+      } catch (err) {
+        console.error('[PINTEREST][SEARCH] Error en búsqueda semántica de Qdrant:', err.message);
+        return res.status(500).json({ error: 'Error en búsqueda semántica de Qdrant' });
+      }
+    } else {
+      const dbAsset = await prisma.asset.findFirst({
+        where: { title: { contains: q } },
+        include: { categories: true, tags: true }
+      });
+      if (dbAsset) {
+        assets = [dbAsset];
+      }
+    }
+
+    // Filter out adult/NSFW assets
+    assets = assets.filter(asset => !isAdultAsset(asset));
+
+    if (!assets || assets.length === 0) {
+      return res.json({ found: false, assets: [] });
+    }
+
+    // Buscar las colas programadas para estos assets
+    const foundAssetIds = assets.map(a => a.id);
+    const queueEntries = await prisma.pinterestPinQueue.findMany({
+      where: { assetId: { in: foundAssetIds } },
+      select: { id: true, assetId: true, status: true, scheduledAt: true }
+    });
+
+    const queueByAsset = {};
+    for (const entry of queueEntries) {
+      if (!queueByAsset[entry.assetId]) queueByAsset[entry.assetId] = [];
+      queueByAsset[entry.assetId].push(entry);
+    }
+
     const formatAsset = (asset) => {
       let images = [];
       if (asset.images) {
@@ -320,64 +436,12 @@ router.get('/search-assets', requireAuth, requireAdmin, async (req, res) => {
         id: asset.id, title: asset.title,
         titleEn: asset.titleEn || '', description: asset.description || '',
         descriptionEn: asset.descriptionEn || '', slug: asset.slug,
-        category: categoryName, tags, images
+        category: categoryName, tags, images,
+        queueEntries: queueByAsset[asset.id] || []
       };
     };
 
-    if (mode === 'id') {
-      // Support comma-separated IDs: "12878, 15432, 9876"
-      const ids = String(q).split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
-      if (ids.length === 0) return res.status(400).json({ error: 'Invalid ID format' });
-
-      const assets = await prisma.asset.findMany({
-        where: { id: { in: ids } },
-        include: { categories: true, tags: true }
-      });
-
-      if (assets.length === 0) return res.json({ found: false });
-
-      res.json({ found: true, assets: assets.map(formatAsset) });
-    } else if (mode === 'semantic' || mode === 'ai') {
-      try {
-        console.log(`[PINTEREST][SEARCH] Buscando semánticamente en Qdrant: "${q}"`);
-        const qdrantResults = await qdrantMultimodalService.searchByImage(
-          null,
-          null,
-          q,
-          30,
-          0.1
-        );
-
-        if (!qdrantResults || qdrantResults.length === 0) {
-          return res.json({ found: false, assets: [] });
-        }
-
-        const ids = qdrantResults.map(r => Number(r.id)).filter(Boolean);
-        const assets = await prisma.asset.findMany({
-          where: { id: { in: ids }, status: 'PUBLISHED' },
-          include: { categories: true, tags: true }
-        });
-
-        // Ordenar según relevancia en Qdrant
-        const sortedAssets = ids
-          .map(id => assets.find(a => a.id === id))
-          .filter(Boolean);
-
-        if (sortedAssets.length === 0) return res.json({ found: false, assets: [] });
-
-        res.json({ found: true, assets: sortedAssets.map(formatAsset) });
-      } catch (err) {
-        console.error('[PINTEREST][SEARCH] Error en búsqueda semántica de Qdrant:', err.message);
-        res.status(500).json({ error: 'Error en búsqueda semántica de Qdrant' });
-      }
-    } else {
-      const asset = await prisma.asset.findFirst({
-        where: { title: { contains: q } },
-        include: { categories: true, tags: true }
-      });
-      if (!asset) return res.json({ found: false });
-      res.json({ found: true, assets: [formatAsset(asset)] });
-    }
+    res.json({ found: true, assets: assets.map(formatAsset) });
   } catch (error) {
     console.error('Error searching asset:', error);
     res.status(500).json({ error: 'Error searching asset' });
@@ -399,6 +463,18 @@ router.post('/schedule', requireAuth, requireAdmin, async (req, res) => {
 
     if (!assetId || !images || images.length === 0 || !scheduledAt) {
       return res.status(400).json({ error: 'Faltan datos obligatorios para programar (assetId, images, scheduledAt).' });
+    }
+
+    // Adult content checks
+    const dbAsset = await prisma.asset.findUnique({
+      where: { id: Number(assetId) },
+      include: { categories: true, tags: true }
+    });
+    if (dbAsset && isAdultAsset(dbAsset)) {
+      return res.status(400).json({ error: 'No está permitido programar assets de contenido adulto/NSFW en Pinterest.' });
+    }
+    if (hasAdultKeywords(title, description)) {
+      return res.status(400).json({ error: 'El título o descripción contiene palabras clave no permitidas (contenido adulto/NSFW).' });
     }
 
     // Convertir a Date
@@ -615,6 +691,20 @@ router.post('/publish-now', requireAuth, requireAdmin, async (req, res) => {
     const { assetId, imageUrl, title, description, link, boardId, filters = {} } = req.body;
     if (!imageUrl || !title) return res.status(400).json({ error: 'imageUrl y title son obligatorios' });
 
+    // Adult content checks
+    if (assetId) {
+      const dbAsset = await prisma.asset.findUnique({
+        where: { id: Number(assetId) },
+        include: { categories: true, tags: true }
+      });
+      if (dbAsset && isAdultAsset(dbAsset)) {
+        return res.status(400).json({ error: 'No está permitido publicar assets de contenido adulto/NSFW en Pinterest.' });
+      }
+    }
+    if (hasAdultKeywords(title, description)) {
+      return res.status(400).json({ error: 'El título o descripción contiene palabras clave no permitidas (contenido adulto/NSFW).' });
+    }
+
     // Copy image to pinterest-pins/
     const UPLOADS_DIR = path.resolve('uploads');
     const PINS_DIR = path.join(UPLOADS_DIR, 'pinterest-pins');
@@ -703,6 +793,20 @@ router.post('/queue/retry/:id', requireAuth, requireAdmin, async (req, res) => {
 
     const pin = await prisma.pinterestPinQueue.findUnique({ where: { id } });
     if (!pin) return res.status(404).json({ error: 'Pin no encontrado' });
+
+    // Adult content checks
+    if (pin.assetId) {
+      const dbAsset = await prisma.asset.findUnique({
+        where: { id: pin.assetId },
+        include: { categories: true, tags: true }
+      });
+      if (dbAsset && isAdultAsset(dbAsset)) {
+        return res.status(400).json({ error: 'No está permitido publicar assets de contenido adulto/NSFW en Pinterest.' });
+      }
+    }
+    if (hasAdultKeywords(pin.title, pin.description)) {
+      return res.status(400).json({ error: 'El título o descripción de este pin contiene palabras clave no permitidas (contenido adulto/NSFW).' });
+    }
 
     let imageUrl = '';
     let filtersObj = {};

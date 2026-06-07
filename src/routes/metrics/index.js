@@ -8,7 +8,7 @@ import { getTaxonomyCounts } from '../../controllers/metrics.controller.js'
 import { getRecentDownloads } from '../../controllers/metrics.controller.js'
 import { recordSearchEvent, recordSearchClick, getSearchInsights, getRecentSearches, getTopSearchQueries, getSiteVisitsMetrics, getSiteVisitsTimeseries, getTopPages, recordPlanClick, getPlanClickTimeseries } from '../../controllers/metrics.controller.js'
 import { recordCampaignVisit } from '../../controllers/metrics.controller.js'
-import { getSalesMetrics } from '../../controllers/metrics.controller.js'
+import { getSalesMetrics, getTrafficSources } from '../../controllers/metrics.controller.js'
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
 
 const router = express.Router()
@@ -38,6 +38,7 @@ router.get('/sales', getSalesMetrics)
 router.get('/site-visits', getSiteVisitsMetrics)
 router.get('/site-visits/timeseries', getSiteVisitsTimeseries)
 router.get('/site-visits/top-pages', getTopPages)
+router.get('/site-visits/sources', getTrafficSources)
 router.get('/search-insights', getSearchInsights)
 router.get('/recent-searches', getRecentSearches)
 router.get('/plan-clicks/timeseries', getPlanClickTimeseries)
