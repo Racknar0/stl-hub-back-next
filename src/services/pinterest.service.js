@@ -7,7 +7,7 @@ class PinterestService {
     this.clientId = process.env.PINTEREST_CLIENT_ID;
     this.clientSecret = process.env.PINTEREST_CLIENT_SECRET;
     this.redirectUri = process.env.PINTEREST_REDIRECT_URI || 'http://localhost:3001/api/pinterest/callback';
-    this.baseUrl = process.env.PINTEREST_API_BASE || 'https://api-sandbox.pinterest.com/v5';
+    this.baseUrl = process.env.PINTEREST_API_BASE || 'https://api.pinterest.com/v5';
   }
 
   // 1. Generar la URL de autorización para iniciar el flujo OAuth

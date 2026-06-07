@@ -275,7 +275,7 @@ router.get('/connection-status', requireAuth, requireAdmin, async (req, res) => 
     if (!token?.value) return res.json({ connected: false });
 
     // Quick validation: call user_account
-    const baseUrl = process.env.PINTEREST_API_BASE || 'https://api-sandbox.pinterest.com/v5';
+    const baseUrl = process.env.PINTEREST_API_BASE || 'https://api.pinterest.com/v5';
     const resp = await fetch(`${baseUrl}/user_account`, {
       headers: { 'Authorization': `Bearer ${token.value}` }
     });

@@ -8,7 +8,7 @@ const prisma = new PrismaClient();
 
 class PinterestPublisherService {
   constructor() {
-    this.baseUrl = process.env.PINTEREST_API_BASE || 'https://api-sandbox.pinterest.com/v5';
+    this.baseUrl = process.env.PINTEREST_API_BASE || 'https://api.pinterest.com/v5';
   }
 
   /**
