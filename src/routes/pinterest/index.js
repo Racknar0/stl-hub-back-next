@@ -4,6 +4,7 @@ import path from 'path';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js';
 import pinterestService from '../../services/pinterest.service.js';
 import { dispatchPinterestFailureNotification } from '../../utils/pinterestNotifications.js';
+import qdrantMultimodalService from '../../services/qdrantMultimodal.service.js';
 
 const router = express.Router();
 
@@ -117,7 +118,7 @@ import { GoogleGenAI } from '@google/genai';
 
 router.post('/ai-optimize', requireAuth, requireAdmin, async (req, res) => {
   try {
-    const { title, description, tags, category, imageUrl, variationCount = 1 } = req.body;
+    const { title, description, tags, category, imageUrl, variationCount = 1, trendKeyword } = req.body;
     if (!title) return res.status(400).json({ error: 'Title is required' });
 
     const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
@@ -141,9 +142,24 @@ router.post('/ai-optimize', requireAuth, requireAdmin, async (req, res) => {
       }
     }
 
+    let trendInstruction = '';
+    if (trendKeyword && String(trendKeyword).trim()) {
+      const cleanTrend = String(trendKeyword).trim();
+      trendInstruction = [
+        '',
+        '## CRITICAL PIN REGULATION - PINTEREST TREND MATCHING:',
+        `- Pinterest is currently experiencing high search volume for: "${cleanTrend}".`,
+        '- You MUST intelligently and creatively adapt the title and description to align this 3D model with this trend keyword, making a logical connection.',
+        `- The phrase "${cleanTrend}" MUST appear naturally within the pinTitle and within the pinDescription (without forcing it or looking like spam).`,
+        `- Add the hashtag "${cleanTrend.replace(/\s+/g, '')}" as one of the first elements in pinHashtags.`,
+        '',
+      ].join('\n');
+    }
+
     const prompt = [
       'You are a Pinterest SEO expert for "STL HUB", a store selling 3D printable STL files.',
       `Generate EXACTLY ${count} UNIQUE variation(s). Each MUST have different wording and keyword order.`,
+      trendInstruction,
       '',
       '## RULES FOR pinTitle (max 100 chars):',
       '- ALWAYS identify the CHARACTER/SUBJECT name from the title — this is the STAR of the pin',
@@ -321,6 +337,39 @@ router.get('/search-assets', requireAuth, requireAdmin, async (req, res) => {
       if (assets.length === 0) return res.json({ found: false });
 
       res.json({ found: true, assets: assets.map(formatAsset) });
+    } else if (mode === 'semantic' || mode === 'ai') {
+      try {
+        console.log(`[PINTEREST][SEARCH] Buscando semánticamente en Qdrant: "${q}"`);
+        const qdrantResults = await qdrantMultimodalService.searchByImage(
+          null,
+          null,
+          q,
+          30,
+          0.1
+        );
+
+        if (!qdrantResults || qdrantResults.length === 0) {
+          return res.json({ found: false, assets: [] });
+        }
+
+        const ids = qdrantResults.map(r => Number(r.id)).filter(Boolean);
+        const assets = await prisma.asset.findMany({
+          where: { id: { in: ids }, status: 'PUBLISHED' },
+          include: { categories: true, tags: true }
+        });
+
+        // Ordenar según relevancia en Qdrant
+        const sortedAssets = ids
+          .map(id => assets.find(a => a.id === id))
+          .filter(Boolean);
+
+        if (sortedAssets.length === 0) return res.json({ found: false, assets: [] });
+
+        res.json({ found: true, assets: sortedAssets.map(formatAsset) });
+      } catch (err) {
+        console.error('[PINTEREST][SEARCH] Error en búsqueda semántica de Qdrant:', err.message);
+        res.status(500).json({ error: 'Error en búsqueda semántica de Qdrant' });
+      }
     } else {
       const asset = await prisma.asset.findFirst({
         where: { title: { contains: q } },
