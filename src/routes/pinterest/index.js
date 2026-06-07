@@ -480,18 +480,37 @@ router.get('/queue-stats', requireAuth, requireAdmin, async (req, res) => {
       where: {
         scheduledAt: { gte: startDate, lt: endDate }
       },
-      select: { scheduledAt: true, status: true }
+      select: { id: true, scheduledAt: true, status: true, filters: true }
     });
 
     // Agrupar por día
     const pinsByDay = {};
     for (const pin of pins) {
       const day = new Date(pin.scheduledAt).getDate();
-      if (!pinsByDay[day]) pinsByDay[day] = { total: 0, pending: 0, published: 0, failed: 0 };
+      if (!pinsByDay[day]) {
+        pinsByDay[day] = { total: 0, pending: 0, published: 0, failed: 0, pins: [] };
+      }
       pinsByDay[day].total++;
       if (pin.status === 'PENDING') pinsByDay[day].pending++;
       else if (pin.status === 'PUBLISHED') pinsByDay[day].published++;
       else if (pin.status === 'FAILED') pinsByDay[day].failed++;
+
+      let imageUrl = '';
+      try {
+        const filtersObj = typeof pin.filters === 'string'
+          ? JSON.parse(pin.filters)
+          : pin.filters;
+        imageUrl = filtersObj?.imagePath || filtersObj?.imageUrl || '';
+      } catch (err) {
+        // ignore
+      }
+
+      pinsByDay[day].pins.push({
+        id: pin.id,
+        status: pin.status,
+        imageUrl,
+        scheduledAt: pin.scheduledAt
+      });
     }
 
     res.json({ pinsByDay });
