@@ -48,7 +48,7 @@ const STAGING_DIR  = path.join(UPLOADS_DIR, 'batch_staging')
 
 const POLL_INTERVAL_MS = 5_000
 const STALL_TIMEOUT_MS = Number(process.env.MEGA_STALL_TIMEOUT_MS) || 5 * 60 * 1000  // 5 min
-const MAX_STALL_RETRIES = 3
+const MAX_STALL_RETRIES = 4
 const MEGA_CMD_TIMEOUT_MS = Number(process.env.MEGA_CMD_TIMEOUT_MS) || 90_000
 const UPLOAD_PROGRESS_HEARTBEAT_MS = Number(process.env.BATCH_PROGRESS_HEARTBEAT_MS) || 10_000
 const ARCHIVE_EXTS = ['.rar', '.zip', '.7z', '.tar', '.gz', '.tgz']
@@ -324,12 +324,14 @@ function megaPutWithStall({
   stallTimeoutMs = STALL_TIMEOUT_MS,
   shouldAbort,
   onRegisterCancel,
+  slowTimeoutMs = 10 * 60 * 1000, // 10 minutos
+  isLastAttempt = false,
 }) {
   return new Promise((resolve, reject) => {
     const child = spawn('mega-put', [srcPath, remotePath], { shell: true })
     attachAutoAcceptTerms(child, logPrefix || 'BATCH PUT')
 
-    let settled = false, lastPct = -1, lastProgressAt = Date.now(), stallTimer = null
+    let settled = false, lastPct = -1, lastProgressAt = Date.now(), stallTimer = null, slowTimer = null
     let nextNoProgressLogSec = 10
 
     const noteProgress = (pct) => {
@@ -354,7 +356,10 @@ function megaPutWithStall({
       if (/upload finished/i.test(txt)) noteProgress(100)
     }
 
-    const cleanup = () => { if (stallTimer) clearInterval(stallTimer); stallTimer = null }
+    const cleanup = () => {
+      if (stallTimer) clearInterval(stallTimer); stallTimer = null
+      if (slowTimer) clearTimeout(slowTimer); slowTimer = null
+    }
     const fail = (err) => { if (settled) return; settled = true; cleanup(); reject(err) }
     const ok   = ()    => { if (settled) return; settled = true; cleanup(); resolve() }
 
@@ -364,6 +369,15 @@ function megaPutWithStall({
         killProcessTreeBestEffort(child, logPrefix)
         fail(new Error('FORCE_PROXY_SWITCH_REQUESTED'))
       })
+    }
+
+    // Temporizador de subida lenta (10 minutos)
+    if (slowTimeoutMs > 0 && !isLastAttempt) {
+      slowTimer = setTimeout(() => {
+        console.warn(`[BATCH][SLOW_TIMEOUT] ${logPrefix} superó el límite de ${Math.round(slowTimeoutMs / 60000)} minutos. Abortando para rotar proxy...`)
+        killProcessTreeBestEffort(child, logPrefix)
+        fail(new Error('SLOW_UPLOAD_TIMEOUT_ROTATE_PROXY'))
+      }, slowTimeoutMs)
     }
 
     // Stall watchdog
@@ -860,6 +874,7 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
           onProgress,
           shouldAbort: () => hasBatchProxySwitchRequest(account.__batchItemId) || hasBatchStopRequest(account.__batchItemId),
           onRegisterCancel: (cancelFn) => { cancelUploadNow = cancelFn },
+          isLastAttempt: attempt === MAX_STALL_RETRIES,
         })
 
         // Link público solo en role=main
@@ -900,12 +915,12 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
         continue
       }
 
-      const looksLikeStall = /MEGA_PUT_STALL_TIMEOUT|timeout after|mega-put exited/i.test(msg)
+      const looksLikeStall = /MEGA_PUT_STALL_TIMEOUT|timeout after|mega-put exited|SLOW_UPLOAD_TIMEOUT_ROTATE_PROXY/i.test(msg)
       if (looksLikeStall && lastProxyUrl) {
         triedProxyUrls.add(lastProxyUrl)
         forceSkipLastProxy = true
         forceReloginNextAttempt = true
-        console.warn(`[BATCH][${role.toUpperCase()}][RECOVERY] stall/timeout detectado, forzando logout+relogin+proxy-rotate accId=${account.id}`)
+        console.warn(`[BATCH][${role.toUpperCase()}][RECOVERY] stall/timeout/slow detectado, forzando logout+relogin+proxy-rotate accId=${account.id}`)
       }
 
       // "Already logged in" → stale session, force logout+relogin on next attempt
