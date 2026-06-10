@@ -294,12 +294,69 @@ function isAdultAsset(asset) {
   return false;
 }
 
-function hasAdultKeywords(title, description) {
-  const textToCheck = [title, description].map(t => (t || '').toLowerCase());
+function getAdultReason(asset) {
+  // 1. Check categories
+  if (asset.categories && asset.categories.length > 0) {
+    for (const cat of asset.categories) {
+      const name = (cat.name || '').toLowerCase();
+      const slug = (cat.slug || '').toLowerCase();
+      if (name.includes('adulto') || name.includes('adult') || slug.includes('adulto') || slug.includes('adult')) {
+        return `Categoría restringida: "${cat.name}"`;
+      }
+    }
+  }
+
+  // 2. Check tags
+  if (asset.tags && asset.tags.length > 0) {
+    const adultTagKeywords = ['nsfw', 'sexy', 'hentai', 'nude', 'adulto', 'adult', 'erotic', 'porn', 'sensual', 'nudeza', '18+', '+18', 'r18', 'r-18'];
+    for (const t of asset.tags) {
+      const name = (t.name || '').toLowerCase();
+      const nameEn = (t.nameEn || '').toLowerCase();
+      for (const kw of adultTagKeywords) {
+        if (name.includes(kw) || nameEn.includes(kw)) {
+          return `Tag restringido: "${t.name}" (coincide con "${kw}")`;
+        }
+      }
+    }
+  }
+
+  // 3. Check title, titleEn, description, descriptionEn, slug
+  const textToCheck = [
+    { field: 'título', val: asset.title },
+    { field: 'título en inglés', val: asset.titleEn },
+    { field: 'descripción', val: asset.description },
+    { field: 'descripción en inglés', val: asset.descriptionEn },
+    { field: 'slug', val: asset.slug }
+  ];
+
+  const adultTextKeywords = ['nsfw', 'hentai', 'nude', 'nudeza', 'adulto', 'erotic', 'porn', 'sensual', '18+', '+18', 'r18', 'r-18', 'sexy', 'adult'];
+  for (const textItem of textToCheck) {
+    const cleanVal = (textItem.val || '').toLowerCase();
+    for (const kw of adultTextKeywords) {
+      if (cleanVal.includes(kw)) {
+        return `Palabra prohibida "${kw}" encontrada en el campo ${textItem.field}`;
+      }
+    }
+  }
+
+  return null;
+}
+
+function getOffendingKeyword(title, description) {
+  const textToCheck = [
+    { field: 'título', val: title },
+    { field: 'descripción', val: description }
+  ];
   const adultKeywords = ['nsfw', 'sexy', 'hentai', 'nude', 'nudeza', 'adulto', 'adult', 'erotic', 'porn', 'sensual', '18+', '+18', 'r18', 'r-18'];
-  return textToCheck.some(text => {
-    return adultKeywords.some(kw => text.includes(kw));
-  });
+  for (const textItem of textToCheck) {
+    const cleanVal = (textItem.val || '').toLowerCase();
+    for (const kw of adultKeywords) {
+      if (cleanVal.includes(kw)) {
+        return { keyword: kw, field: textItem.field };
+      }
+    }
+  }
+  return null;
 }
 
 // Stats: counts by status
@@ -470,11 +527,15 @@ router.post('/schedule', requireAuth, requireAdmin, async (req, res) => {
       where: { id: Number(assetId) },
       include: { categories: true, tags: true }
     });
-    if (dbAsset && isAdultAsset(dbAsset)) {
-      return res.status(400).json({ error: 'No está permitido programar assets de contenido adulto/NSFW en Pinterest.' });
+    if (dbAsset) {
+      const reason = getAdultReason(dbAsset);
+      if (reason) {
+        return res.status(400).json({ error: `No está permitido programar el asset #${assetId} por contenido adulto/NSFW. Motivo: ${reason}` });
+      }
     }
-    if (hasAdultKeywords(title, description)) {
-      return res.status(400).json({ error: 'El título o descripción contiene palabras clave no permitidas (contenido adulto/NSFW).' });
+    const offending = getOffendingKeyword(title, description);
+    if (offending) {
+      return res.status(400).json({ error: `El pin del asset #${assetId} contiene la palabra clave no permitida "${offending.keyword}" en el ${offending.field}.` });
     }
 
     // Convertir a Date
@@ -697,12 +758,16 @@ router.post('/publish-now', requireAuth, requireAdmin, async (req, res) => {
         where: { id: Number(assetId) },
         include: { categories: true, tags: true }
       });
-      if (dbAsset && isAdultAsset(dbAsset)) {
-        return res.status(400).json({ error: 'No está permitido publicar assets de contenido adulto/NSFW en Pinterest.' });
+      if (dbAsset) {
+        const reason = getAdultReason(dbAsset);
+        if (reason) {
+          return res.status(400).json({ error: `No está permitido publicar el asset #${assetId} por contenido adulto/NSFW. Motivo: ${reason}` });
+        }
       }
     }
-    if (hasAdultKeywords(title, description)) {
-      return res.status(400).json({ error: 'El título o descripción contiene palabras clave no permitidas (contenido adulto/NSFW).' });
+    const offending = getOffendingKeyword(title, description);
+    if (offending) {
+      return res.status(400).json({ error: `El pin del asset #${assetId || 'now'} contiene la palabra clave no permitida "${offending.keyword}" en el ${offending.field}.` });
     }
 
     // Copy image to pinterest-pins/
@@ -800,12 +865,16 @@ router.post('/queue/retry/:id', requireAuth, requireAdmin, async (req, res) => {
         where: { id: pin.assetId },
         include: { categories: true, tags: true }
       });
-      if (dbAsset && isAdultAsset(dbAsset)) {
-        return res.status(400).json({ error: 'No está permitido publicar assets de contenido adulto/NSFW en Pinterest.' });
+      if (dbAsset) {
+        const reason = getAdultReason(dbAsset);
+        if (reason) {
+          return res.status(400).json({ error: `No está permitido publicar el asset #${pin.assetId} por contenido adulto/NSFW. Motivo: ${reason}` });
+        }
       }
     }
-    if (hasAdultKeywords(pin.title, pin.description)) {
-      return res.status(400).json({ error: 'El título o descripción de este pin contiene palabras clave no permitidas (contenido adulto/NSFW).' });
+    const offending = getOffendingKeyword(pin.title, pin.description);
+    if (offending) {
+      return res.status(400).json({ error: `El pin del asset #${pin.assetId || 'now'} contiene la palabra clave no permitida "${offending.keyword}" en el ${offending.field}.` });
     }
 
     let imageUrl = '';
