@@ -969,3 +969,148 @@ export const activateAccount = async (req, res) => {
             });
     }
 };
+
+// Reenviar correo de activación
+export const resendActivationEmail = async (req, res) => {
+    const { email, language = 'es' } = req.body;
+
+    if (!email) {
+        return res.status(400).json({
+            message: language === 'en' ? 'Email is required' : 'El correo electrónico es obligatorio',
+        });
+    }
+
+    try {
+        const user = await prisma.user.findUnique({ where: { email } });
+
+        if (!user) {
+            // Mensaje genérico por seguridad (evita enumeración de correos)
+            return res.status(200).json({
+                message: language === 'en'
+                    ? 'If the account exists and is unverified, a new activation email has been sent.'
+                    : 'Si la cuenta existe y no está verificada, se ha enviado un nuevo correo de activación.',
+            });
+        }
+
+        if (!user.activationToken) {
+            return res.status(400).json({
+                message: language === 'en'
+                    ? 'This account is already verified. You can log in.'
+                    : 'Esta cuenta ya está verificada. Puedes iniciar sesión.',
+            });
+        }
+
+        // Generar un nuevo token de activación
+        const newActivationToken = generateRandomToken();
+
+        // Actualizar usuario con el nuevo token
+        await prisma.user.update({
+            where: { id: user.id },
+            data: { activationToken: newActivationToken }
+        });
+
+        // Enviar el email
+        const activationLink = `${process.env.FRONT_URL}/register?activate=${newActivationToken}`;
+        try {
+            await transporter.sendMail({
+                to: email,
+                from: process.env.SMTP_EMAIL,
+                subject: language === 'en' ? 'Activate your account' : 'Activa tu cuenta',
+                text: (language === 'en'
+                    ? [
+                        'Confirm your email',
+                        '',
+                        'Here is your new activation link:',
+                        activationLink,
+                        '',
+                        'If you did not request this, you can ignore this message.'
+                      ]
+                    : [
+                        'Confirma tu correo',
+                        '',
+                        'Aquí tienes tu nuevo enlace de activación:',
+                        activationLink,
+                        '',
+                        'Si no solicitaste esto, puedes ignorar este mensaje.'
+                      ]).join('\n'),
+                html: `
+                <!doctype html>
+                <html>
+                <head>
+                    <meta charset="utf-8">
+                    <meta name="viewport" content="width=device-width">
+                    <style>
+                    .preheader{display:none!important;visibility:hidden;opacity:0;color:transparent;height:0;width:0;overflow:hidden;mso-hide:all}
+                    .btn{display:inline-block;padding:12px 18px;border-radius:8px;text-decoration:none;font-weight:600}
+                    @media (prefers-color-scheme: dark){
+                        body{background:#0b0b0c!important}
+                        .card{background:#111214!important;border-color:#2a2b2e!important}
+                        .text{color:#e6e7e9!important}
+                        .muted{color:#b5b7ba!important}
+                        .btn{background:#4f46e5!important;color:#fff!important}
+                    }
+                    </style>
+                </head>
+                <body style="margin:0;padding:0;background:#f6f7f9;">
+                    <span class="preheader">${
+                    language === 'en'
+                        ? 'Confirm your email to finish setting up your account.'
+                        : 'Confirma tu correo para terminar de crear tu cuenta.'
+                    }</span>
+
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="padding:24px 12px;">
+                    <tr><td align="center">
+                        <table role="presentation" width="100%" style="max-width:600px;">
+                        <tr><td class="card" style="background:#ffffff;border:1px solid #e6e8eb;border-radius:12px;padding:28px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,'Helvetica Neue',sans-serif;line-height:1.55;">
+                            <h1 class="text" style="margin:0 0 6px;font-size:20px;font-weight:700;color:#0f172a;">
+                            ${language === 'en' ? 'Confirm your email' : 'Confirma tu correo'}
+                            </h1>
+                            <p class="text" style="margin:0 0 20px;font-size:16px;color:#0f172a;">
+                            ${language === 'en'
+                                ? 'Click the button to activate your account:'
+                                : 'Haz clic en el botón para activar tu cuenta:'}
+                            </p>
+
+                            <p style="margin:0 0 20px;">
+                            <a href="${activationLink}" class="btn" style="background:#4f46e5;color:#ffffff;">
+                                ${language === 'en' ? 'Activate my account' : 'Activar mi cuenta'}
+                            </a>
+                            </p>
+
+                            <hr style="border:none;border-top:1px solid #e6e8eb;margin:22px 0;">
+
+                            <p class="text" style="margin:0 0 8px;font-size:14px;color:#0f172a;">
+                            ${language === 'en'
+                                ? 'If the button does not work, copy and paste this link:'
+                                : 'Si el botón no funciona, copia y pega este enlace:'}
+                            </p>
+                            <p style="word-break:break-all;margin:0;">
+                            <a href="${activationLink}" style="color:#4f46e5;text-decoration:underline;">${activationLink}</a>
+                            </p>
+                        </td></tr>
+                        </table>
+                    </td></tr>
+                    </table>
+                </body>
+                </html>
+                `.trim(),
+            });
+        } catch (mailError) {
+            console.error('Error sending resendActivationEmail:', mailError.message);
+            return res.status(500).json({
+                message: language === 'en' ? 'Error sending email' : 'Error al enviar el correo',
+            });
+        }
+
+        return res.status(200).json({
+            message: language === 'en'
+                ? 'Activation email sent successfully.'
+                : 'Correo de activación enviado con éxito.',
+        });
+    } catch (error) {
+        console.error('Error in resendActivationEmail:', error);
+        return res.status(500).json({
+            message: language === 'en' ? 'Internal server error' : 'Error interno del servidor',
+        });
+    }
+};
