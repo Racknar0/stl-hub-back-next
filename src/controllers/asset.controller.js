@@ -3196,12 +3196,37 @@ export const requestDownload = async (req, res) => {
       return res.status(401).json({ code: 'ANONYMOUS_BLOCKED', message: 'Authentication required to download assets' });
     }
 
-    // 3.2) Verificar usuario activo + jwtVersion
+    // 3.2) Verificar usuario activo + jwtVersion + campos de período de gracia
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { isActive: true, jwtVersion: true },
+      select: { isActive: true, jwtVersion: true, createdAt: true, activationToken: true },
     });
-    if (!user || !user.isActive) {
+    if (!user) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+
+    // Período de gracia de 24 horas para usuarios no verificados
+    if (user.activationToken) {
+      const gracePeriodHours = 24;
+      const now = new Date();
+      const diffHours = (now.getTime() - user.createdAt.getTime()) / (1000 * 60 * 60);
+      if (diffHours > gracePeriodHours) {
+        if (user.isActive) {
+          await prisma.user.update({
+            where: { id: userId },
+            data: { isActive: false }
+          });
+        }
+        return res.status(403).json({
+          code: 'VERIFICATION_REQUIRED',
+          message: req.headers['accept-language']?.includes('en')
+            ? 'Your 24-hour grace period has expired. Please verify your email to download files.'
+            : 'Tu período de gracia de 24 horas ha expirado. Por favor, verifica tu correo para descargar archivos.',
+        });
+      }
+    }
+
+    if (!user.isActive) {
       return res.status(401).json({ message: 'Unauthorized' });
     }
     if (jwtVerFromToken != null && user.jwtVersion != null && jwtVerFromToken !== user.jwtVersion) {

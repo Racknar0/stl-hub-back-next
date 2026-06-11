@@ -45,6 +45,26 @@ export const login = async (req, res) => {
       });
     }
 
+    // Período de gracia de 24 horas para usuarios no verificados
+    if (user.activationToken) {
+      const gracePeriodHours = 24;
+      const now = new Date();
+      const diffHours = (now.getTime() - user.createdAt.getTime()) / (1000 * 60 * 60);
+      if (diffHours > gracePeriodHours) {
+        if (user.isActive) {
+          await prisma.user.update({
+            where: { id: user.id },
+            data: { isActive: false }
+          });
+        }
+        return res.status(400).json({
+          message: language === 'en'
+            ? 'Your 24-hour grace period has expired. Please verify your email to log in.'
+            : 'Tu período de gracia de 24 horas ha expirado. Por favor, verifica tu correo para iniciar sesión.',
+        });
+      }
+    }
+
     if (!user.isActive) {
       return res.status(400).json({
         message: language === 'en' ? 'Account is inactive' : 'La cuenta está inactiva',
@@ -604,7 +624,7 @@ export const registerUserSale = async (req, res) => {
 };
 
 export const register = async (req, res) => {
-    const { email, password, language = 'es', eventId } = req.body;
+    const { email, password, language = 'es', eventId, giftCode } = req.body;
     const trackingResolved = await resolveTrackingForRequest(prisma, req, 'first');
     const tracking = trackingResolved?.tracking || null;
 
@@ -640,7 +660,7 @@ export const register = async (req, res) => {
                 email,
                 password: hashedPassword,
                 language,
-                isActive: false,
+                isActive: true, // Activo inicialmente para inicio inmediato con período de gracia
                 activationToken,
                 roleId: 1, // rol por defecto: user
                 marketingCampaignId,
@@ -658,6 +678,51 @@ export const register = async (req, res) => {
             userIp: req.ip,
             userAgent: req.headers['user-agent']
         });
+
+        // Canjear código de regalo de inmediato si se proporciona uno válido
+        let giftRedeemed = false;
+        let giftDays = 0;
+        if (giftCode && typeof giftCode === 'string' && giftCode.trim()) {
+            try {
+                const gc = await prisma.giftCode.findUnique({
+                    where: { code: giftCode.trim().toUpperCase() },
+                });
+                if (gc && gc.isActive && gc.usedCount < gc.maxUses
+                    && (!gc.expiresAt || new Date() <= gc.expiresAt)) {
+                    // Check not already redeemed
+                    const existing = await prisma.giftRedemption.findUnique({
+                        where: { codeId_userId: { codeId: gc.id, userId: user.id } },
+                    });
+                    if (!existing) {
+                        const now = new Date();
+                        const endDate = new Date(now);
+                        endDate.setDate(endDate.getDate() + gc.days);
+                        await prisma.$transaction([
+                            prisma.subscription.create({
+                                data: {
+                                    userId: user.id,
+                                    status: 'ACTIVE',
+                                    startedAt: now,
+                                    currentPeriodEnd: endDate,
+                                },
+                            }),
+                            prisma.giftRedemption.create({
+                                data: { codeId: gc.id, userId: user.id, daysGiven: gc.days },
+                            }),
+                            prisma.giftCode.update({
+                                where: { id: gc.id },
+                                data: { usedCount: { increment: 1 } },
+                            }),
+                        ]);
+                        giftRedeemed = true;
+                        giftDays = gc.days;
+                        console.log(`[GIFT-CODE] Auto-redeemed "${gc.code}" for user ${user.id} during registration — ${gc.days} days`);
+                    }
+                }
+            } catch (gcErr) {
+                console.error('[GIFT-CODE] Auto-redeem error during registration:', gcErr);
+            }
+        }
 
         // crear logica de envio de email
         const activationLink = `${process.env.FRONT_URL}/register?activate=${activationToken}`;
@@ -769,6 +834,9 @@ export const register = async (req, res) => {
             console.error('Error sending registration email:', mailError.message);
         }
 
+        // Generar token de inicio inmediato
+        const jwtToken = generateJWT({ id: user.id, roleId: user.roleId });
+
         return res.status(201).json({
             message: `${
                 language === 'en'
@@ -776,6 +844,9 @@ export const register = async (req, res) => {
                     : 'Usuario registrado. Por favor, revisa tu correo electrónico para activar tu cuenta.'
             }`,
             user: { id: user.id, email: user.email, language: user.language },
+            token: jwtToken,
+            giftRedeemed,
+            giftDays
         });
     } catch (error) {
         console.error('Error in register:', error);
