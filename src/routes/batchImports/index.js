@@ -1,7 +1,7 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
-import { scanLocalDirectory, getScanStatus, getBatchQueue, retryBatchAiFailedItems, updateBatchItem, confirmBatchItems, stopAndResetBatchToDraft, deleteBatchItem, purgeAll, purgeCompleted, retryBatchItemWithAnotherProxy } from '../../controllers/batchImport.controller.js';
+import { scanLocalDirectory, getScanStatus, getBatchQueue, retryBatchAiFailedItems, updateBatchItem, updateBatchItemsBulk, confirmBatchItems, stopAndResetBatchToDraft, deleteBatchItem, purgeAll, purgeCompleted, retryBatchItemWithAnotherProxy } from '../../controllers/batchImport.controller.js';
 import { requireAuth } from '../../middlewares/auth.js';
 
 const router = express.Router();
@@ -11,6 +11,7 @@ router.get('/scan-status', requireAuth, getScanStatus);
 router.post('/retry-ai', requireAuth, retryBatchAiFailedItems);
 router.post('/ai-metadata', requireAuth, retryBatchAiFailedItems);
 router.get('/', requireAuth, getBatchQueue);
+router.post('/items-bulk', requireAuth, updateBatchItemsBulk);
 router.patch('/items/:id', requireAuth, updateBatchItem);
 router.post('/confirm', requireAuth, confirmBatchItems);
 router.post('/stop-and-draft', requireAuth, stopAndResetBatchToDraft);

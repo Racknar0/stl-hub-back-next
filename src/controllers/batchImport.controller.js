@@ -1831,3 +1831,54 @@ export const retryBatchItemWithAnotherProxy = async (req, res) => {
     return res.status(500).json({ success: false, error: error.message });
   }
 };
+
+// PATCH /api/batch-imports/items-bulk - Actualización masiva de items (ej. distribución de cuentas)
+export const updateBatchItemsBulk = async (req, res) => {
+  try {
+    const { items } = req.body; // Array de objetos con campos a actualizar
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ success: false, message: 'items es requerido y debe ser un array' });
+    }
+
+    // Mapear cada elemento a una promesa de actualización de Prisma
+    const updates = items.map(item => {
+      const itemId = Number(item.id);
+      
+      const data = {};
+      if (item.targetAccount !== undefined) {
+        data.targetAccount = Number(item.targetAccount) || null;
+      }
+      if (item.title !== undefined) {
+        data.title = item.title;
+      }
+      if (item.titleEn !== undefined) {
+        data.titleEn = item.titleEn;
+      }
+      if (item.description !== undefined) {
+        data.description = item.description !== null ? String(item.description || '').trim() || null : null;
+      }
+      if (item.descriptionEn !== undefined) {
+        data.descriptionEn = item.descriptionEn !== null ? String(item.descriptionEn || '').trim() || null : null;
+      }
+      if (item.tags !== undefined) {
+        data.tags = Array.isArray(item.tags) ? normalizeBatchTags(item.tags, 3) : item.tags;
+      }
+      if (item.categories !== undefined) {
+        data.categories = item.categories;
+      }
+      
+      return prisma.batchImportItem.update({
+        where: { id: itemId },
+        data
+      });
+    });
+
+    // Ejecutar todas las actualizaciones dentro de una sola transacción de BD
+    await prisma.$transaction(updates);
+
+    return res.json({ success: true, message: `${items.length} items actualizados de forma exitosa` });
+  } catch (error) {
+    console.error('[BATCH-IMPORT-BULK] Error updating items:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
