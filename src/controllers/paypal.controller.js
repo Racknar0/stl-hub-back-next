@@ -221,6 +221,19 @@ async function capturePayPalOrder(req, res) {
 
     } catch (e) {
         console.error('Error al capturar la orden de PayPal:', e);
+        try {
+            await prisma.notification.create({
+                data: {
+                    title: 'Fallo al capturar orden - PayPal',
+                    body: `No se pudo capturar o registrar la orden de PayPal.\nOrder ID: ${orderID || 'N/D'}\nUser ID: ${userId || 'N/D'}\nPlan ID: ${planId || 'N/D'}\nError: ${e.message || e}`,
+                    type: 'BILLING',
+                    typeStatus: 'ERROR',
+                    status: 'UNREAD',
+                }
+            });
+        } catch (nErr) {
+            console.error('Failed to create BILLING notification for PayPal error:', nErr.message);
+        }
         return res.status(500).json({ error: 'Error capturando la orden de PayPal' });
     }
 }

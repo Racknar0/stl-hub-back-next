@@ -133,6 +133,17 @@ export const dispatchSaleNotification = async ({
       });
     } catch (buyerMailError) {
       console.error(`[SALES][${providerText}] No se pudo enviar correo al comprador:`, buyerMailError);
+      try {
+        await prismaLike.notification.create({
+          data: {
+            title: `Fallo correo confirmación comprador - ${providerText}`,
+            body: `No se pudo enviar el correo de confirmación de compra a: ${buyerEmailText}.\nError: ${buyerMailError.message || buyerMailError}`,
+            type: 'BILLING',
+            typeStatus: 'ERROR',
+            status: 'UNREAD',
+          }
+        });
+      } catch (nErr) { console.error('Failed to create BILLING notification:', nErr.message); }
     }
   }
 
@@ -221,5 +232,16 @@ export const dispatchSaleNotification = async ({
     });
   } catch (mailError) {
     console.error(`[SALES][${providerText}] No se pudo enviar correo al vendedor:`, mailError);
+    try {
+      await prismaLike.notification.create({
+        data: {
+          title: `Fallo correo aviso vendedor - ${providerText}`,
+          body: `No se pudo enviar el correo de aviso de compra al vendedor (${sellerEmail}).\nError: ${mailError.message || mailError}`,
+          type: 'BILLING',
+          typeStatus: 'ERROR',
+          status: 'UNREAD',
+        }
+      });
+    } catch (nErr) { console.error('Failed to create BILLING notification:', nErr.message); }
   }
 };

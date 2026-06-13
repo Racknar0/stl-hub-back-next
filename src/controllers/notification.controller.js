@@ -124,3 +124,21 @@ export const clearBatchUploaderNotifications = async (req,res) => {
     res.status(500).json({ message: 'Error limpiando notificaciones del cargador de lotes' })
   }
 }
+
+// Eliminar todas las notificaciones de un tipo específico
+export const clearNotificationsByType = async (req, res) => {
+  try {
+    const { type } = req.body
+    const validTypes = ['AUTOMATION', 'SALES', 'REPORT', 'BATCH_UPLOADER', 'BILLING', 'MAIL', 'STORAGE', 'SOCIAL']
+    if (!type || !validTypes.includes(type)) {
+      return res.status(400).json({ message: 'Tipo de notificación inválido o no provisto' })
+    }
+    const result = await prisma.notification.deleteMany({ where: { type } })
+    log.info(`[NOTIF][CLEAR_TYPE] type=${type} deleted=${result.count}`)
+    res.json({ ok: true, deleted: result.count })
+  } catch (e) {
+    log.error('[NOTIF][CLEAR_TYPE] '+e.message)
+    res.status(500).json({ message: 'Error limpiando notificaciones por tipo' })
+  }
+}
+

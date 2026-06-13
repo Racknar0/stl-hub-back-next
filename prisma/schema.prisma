@@ -419,6 +419,10 @@ enum NotificationType {
   SALES
   REPORT
   BATCH_UPLOADER
+  BILLING
+  MAIL
+  STORAGE
+  SOCIAL
 }
 
 // Estado visual de la notificación

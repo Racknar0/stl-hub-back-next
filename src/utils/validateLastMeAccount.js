@@ -192,7 +192,7 @@ export async function runValidateLastMeAccount() {
             title: notifTitle,
             body: notifBody.slice(0, 1000),
             status: 'UNREAD',
-            type: 'AUTOMATION',
+            type: 'STORAGE',
             typeStatus: 'ERROR'
           }
         });

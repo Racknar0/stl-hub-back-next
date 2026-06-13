@@ -32,7 +32,7 @@ export const dispatchPinterestFailureNotification = async ({
           : `Error publicando Pin #${pinId} (Asset #${assetId})`,
         body: `Ocurrió un error al intentar publicar ${isImmediate ? 'manualmente' : 'automáticamente'} el Pin en Pinterest.\n\nError: ${errorMsg}\n\nTítulo del Pin: ${title || 'Sin título'}\n\nEnlace: ${link || 'Sin enlace'}`,
         status: 'UNREAD',
-        type: 'AUTOMATION',
+        type: 'SOCIAL',
         typeStatus: 'ERROR'
       }
     });

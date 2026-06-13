@@ -443,7 +443,7 @@ export const forgotPassword = async (req, res) => {
                 data: {
                     title: 'Error de sistema - Olvidó Contraseña',
                     body: `Fallo al procesar o enviar el correo de recuperación para: ${email || 'Desconocido'}.\nDetalle del error: ${error.message || error}`,
-                    type: 'AUTOMATION',
+                    type: 'MAIL',
                     typeStatus: 'ERROR',
                     status: 'UNREAD',
                 },
@@ -850,7 +850,7 @@ export const register = async (req, res) => {
                     data: {
                         title: 'Error de correo - Registro',
                         body: `No se pudo enviar el correo de activación de cuenta a: ${email}.\nDetalle del error: ${mailError.message}`,
-                        type: 'AUTOMATION',
+                        type: 'MAIL',
                         typeStatus: 'ERROR',
                         status: 'UNREAD',
                     },
@@ -881,7 +881,7 @@ export const register = async (req, res) => {
                 data: {
                     title: 'Error de sistema - Registro',
                     body: `Fallo crítico al registrar al usuario: ${email || 'Desconocido'}.\nDetalle del error: ${error.message || error}`,
-                    type: 'AUTOMATION',
+                    type: 'MAIL',
                     typeStatus: 'ERROR',
                     status: 'UNREAD',
                 },
@@ -1141,7 +1141,7 @@ export const resendActivationEmail = async (req, res) => {
                     data: {
                         title: 'Error de correo - Reenvío Activación',
                         body: `No se pudo enviar el correo de reenvío de activación a: ${email}.\nDetalle del error: ${mailError.message}`,
-                        type: 'AUTOMATION',
+                        type: 'MAIL',
                         typeStatus: 'ERROR',
                         status: 'UNREAD',
                     },
@@ -1166,7 +1166,7 @@ export const resendActivationEmail = async (req, res) => {
                 data: {
                     title: 'Error de sistema - Reenvío Activación',
                     body: `Fallo al procesar el reenvío de activación para: ${email || 'Desconocido'}.\nDetalle del error: ${error.message || error}`,
-                    type: 'AUTOMATION',
+                    type: 'MAIL',
                     typeStatus: 'ERROR',
                     status: 'UNREAD',
                 },

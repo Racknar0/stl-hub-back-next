@@ -452,6 +452,19 @@ async function captureMercadoPagoPayment(req, res) {
     });
   } catch (error) {
     console.error('Error confirmando pago de MercadoPago:', error?.details || error);
+    try {
+      await prisma.notification.create({
+        data: {
+          title: 'Fallo al confirmar pago - MercadoPago',
+          body: `No se pudo confirmar o registrar el pago de MercadoPago.\nPayment ID: ${paymentId || 'N/D'}\nError: ${error.message || error?.details || error}`,
+          type: 'BILLING',
+          typeStatus: 'ERROR',
+          status: 'UNREAD',
+        }
+      });
+    } catch (nErr) {
+      console.error('Failed to create BILLING notification for MercadoPago capture error:', nErr.message);
+    }
     return res.status(500).json({
       error: 'No se pudo confirmar el pago en MercadoPago',
       details: error?.details || null,
@@ -504,6 +517,19 @@ async function mercadoPagoWebhook(req, res) {
     });
   } catch (error) {
     console.error('Error procesando webhook de MercadoPago:', error?.details || error);
+    try {
+      await prisma.notification.create({
+        data: {
+          title: 'Fallo procesando Webhook - MercadoPago',
+          body: `No se pudo procesar la notificación de pago de MercadoPago.\nPayment ID: ${paymentId || 'N/D'}\nTopic: ${topic || 'N/D'}\nError: ${error.message || error?.details || error}`,
+          type: 'BILLING',
+          typeStatus: 'ERROR',
+          status: 'UNREAD',
+        }
+      });
+    } catch (nErr) {
+      console.error('Failed to create BILLING notification for MercadoPago webhook error:', nErr.message);
+    }
     return res.status(500).json({
       received: true,
       processed: false,

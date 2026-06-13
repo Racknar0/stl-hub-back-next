@@ -267,7 +267,7 @@ export const syncBackupsToMain = async (req, res) => {
           title: `Restauración de backups a assets completada`,
           body: `Se restauraron ${restored} assets desde backups hacia la cuenta principal (main=${id}, email=${main.email}). Existentes: ${skippedExisting}, links regenerados: ${regeneratedLinks}, no recuperados: ${notFoundSource}.`,
           status: 'UNREAD',
-          type: 'AUTOMATION',
+          type: 'STORAGE',
           typeStatus: 'SUCCESS'
         }
       })
@@ -282,7 +282,7 @@ export const syncBackupsToMain = async (req, res) => {
           title: 'Error en restauración de backups',
           body: `Ocurrió un error al restaurar backups hacia assets (main=${req.params.id}, email=${main?.email || '--'}): ${e.message}`,
           status: 'UNREAD',
-          type: 'AUTOMATION',
+          type: 'STORAGE',
           typeStatus: 'ERROR'
         }
       })
