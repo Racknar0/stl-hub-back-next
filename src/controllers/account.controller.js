@@ -884,7 +884,7 @@ export const syncMainToBackups = async (req, res) => {
             title: String(title || 'Error sincronización MAIN->BACKUPS').slice(0, 160),
             body: truncateNotificationBody(body),
             status: 'UNREAD',
-            type: 'AUTOMATION',
+            type: 'STORAGE',
             typeStatus: 'ERROR',
           },
         });
@@ -1335,7 +1335,7 @@ export const syncMainToBackups = async (req, res) => {
         title: 'Error general sync MAIN->BACKUPS',
         body: truncateNotificationBody(`main=${mainId}\nerr=${errorDetails}`),
         status: 'UNREAD',
-        type: 'AUTOMATION',
+        type: 'STORAGE',
         typeStatus: 'ERROR',
       },
     });

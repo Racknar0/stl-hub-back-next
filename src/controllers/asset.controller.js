@@ -3903,7 +3903,7 @@ export async function restoreAssetFromBackup(req, res) {
           title: 'Asset restaurado desde backup',
           body: `El asset "${asset.title}" (id: ${asset.id}) fue restaurado desde backup accId=${backupAcc.id} hacia la cuenta principal accId=${mainAcc.id}.`,
           status: 'UNREAD',
-          type: 'AUTOMATION',
+          type: 'STORAGE',
           typeStatus: 'SUCCESS',
         },
       });
@@ -3928,7 +3928,7 @@ export async function restoreAssetFromBackup(req, res) {
           title: 'Error al restaurar asset desde backup',
           body: `Asset id=${assetId}. Detalle: ${err?.message || err}`,
           status: 'UNREAD',
-          type: 'AUTOMATION',
+          type: 'STORAGE',
           typeStatus: 'ERROR',
         },
       });
