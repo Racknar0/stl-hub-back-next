@@ -5,9 +5,15 @@ const prisma = new PrismaClient()
 
 export const listNotifications = async (req,res) => {
   try {
-  const { status, q, take='50', skip='0' } = req.query
+  const { status, q, type, take='50', skip='0' } = req.query
   const where = {}
   if (status) where.status = status
+  if (type) {
+    where.type = type
+  } else {
+    // Por defecto, excluir las notificaciones del Batch Uploader en el listado general
+    where.NOT = { type: 'BATCH_UPLOADER' }
+  }
   if (q) where.OR = [ { title: { contains: q } }, { body: { contains: q } } ]
     const notifications = await prisma.notification.findMany({
       where,
@@ -104,5 +110,17 @@ export const clearAutomationNotifications = async (req,res) => {
   } catch (e) {
     log.error('[NOTIF][CLEAR_AUTOMATION] '+e.message)
     res.status(500).json({ message: 'Error limpiando notificaciones de automatizaciones' })
+  }
+}
+
+// Eliminar todas las notificaciones de tipo BATCH_UPLOADER
+export const clearBatchUploaderNotifications = async (req,res) => {
+  try {
+    const result = await prisma.notification.deleteMany({ where: { type: 'BATCH_UPLOADER' } })
+    log.info(`[NOTIF][CLEAR_BATCH_UPLOADER] deleted=${result.count}`)
+    res.json({ ok: true, deleted: result.count })
+  } catch (e) {
+    log.error('[NOTIF][CLEAR_BATCH_UPLOADER] '+e.message)
+    res.status(500).json({ message: 'Error limpiando notificaciones del cargador de lotes' })
   }
 }

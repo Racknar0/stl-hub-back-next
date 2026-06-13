@@ -165,7 +165,7 @@ async function notifyAutomation({ title, body, typeStatus = 'ERROR' }) {
         title: truncateText(title, 120),
         body: truncateText(body, NOTIFICATION_BODY_MAX),
         status: 'UNREAD',
-        type: 'AUTOMATION',
+        type: 'BATCH_UPLOADER',
         typeStatus,
       },
     })

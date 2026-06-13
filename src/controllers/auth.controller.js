@@ -438,6 +438,19 @@ export const forgotPassword = async (req, res) => {
             .json({ message: `${ language === 'en' ? 'Password reset email sent' : 'Correo de restablecimiento de contraseña enviado' }`, });
     } catch (error) {
         console.error('Error in forgotPassword:', error);
+        try {
+            await prisma.notification.create({
+                data: {
+                    title: 'Error de sistema - Olvidó Contraseña',
+                    body: `Fallo al procesar o enviar el correo de recuperación para: ${email || 'Desconocido'}.\nDetalle del error: ${error.message || error}`,
+                    type: 'AUTOMATION',
+                    typeStatus: 'ERROR',
+                    status: 'UNREAD',
+                },
+            });
+        } catch (notifErr) {
+            console.error('Failed to create forgotPassword notification:', notifErr.message);
+        }
         return res
             .status(500)
             .json({
@@ -832,6 +845,19 @@ export const register = async (req, res) => {
             });
         } catch (mailError) {
             console.error('Error sending registration email:', mailError.message);
+            try {
+                await prisma.notification.create({
+                    data: {
+                        title: 'Error de correo - Registro',
+                        body: `No se pudo enviar el correo de activación de cuenta a: ${email}.\nDetalle del error: ${mailError.message}`,
+                        type: 'AUTOMATION',
+                        typeStatus: 'ERROR',
+                        status: 'UNREAD',
+                    },
+                });
+            } catch (notifErr) {
+                console.error('Failed to create registration mail notification:', notifErr.message);
+            }
         }
 
         // Generar token de inicio inmediato
@@ -850,6 +876,19 @@ export const register = async (req, res) => {
         });
     } catch (error) {
         console.error('Error in register:', error);
+        try {
+            await prisma.notification.create({
+                data: {
+                    title: 'Error de sistema - Registro',
+                    body: `Fallo crítico al registrar al usuario: ${email || 'Desconocido'}.\nDetalle del error: ${error.message || error}`,
+                    type: 'AUTOMATION',
+                    typeStatus: 'ERROR',
+                    status: 'UNREAD',
+                },
+            });
+        } catch (notifErr) {
+            console.error('Failed to create registration error notification:', notifErr.message);
+        }
         return res
             .status(500)
             .json({
@@ -1097,6 +1136,19 @@ export const resendActivationEmail = async (req, res) => {
             });
         } catch (mailError) {
             console.error('Error sending resendActivationEmail:', mailError.message);
+            try {
+                await prisma.notification.create({
+                    data: {
+                        title: 'Error de correo - Reenvío Activación',
+                        body: `No se pudo enviar el correo de reenvío de activación a: ${email}.\nDetalle del error: ${mailError.message}`,
+                        type: 'AUTOMATION',
+                        typeStatus: 'ERROR',
+                        status: 'UNREAD',
+                    },
+                });
+            } catch (notifErr) {
+                console.error('Failed to create resendActivationEmail notification:', notifErr.message);
+            }
             return res.status(500).json({
                 message: language === 'en' ? 'Error sending email' : 'Error al enviar el correo',
             });
@@ -1109,6 +1161,19 @@ export const resendActivationEmail = async (req, res) => {
         });
     } catch (error) {
         console.error('Error in resendActivationEmail:', error);
+        try {
+            await prisma.notification.create({
+                data: {
+                    title: 'Error de sistema - Reenvío Activación',
+                    body: `Fallo al procesar el reenvío de activación para: ${email || 'Desconocido'}.\nDetalle del error: ${error.message || error}`,
+                    type: 'AUTOMATION',
+                    typeStatus: 'ERROR',
+                    status: 'UNREAD',
+                },
+            });
+        } catch (notifErr) {
+            console.error('Failed to create resendActivationEmail main notification:', notifErr.message);
+        }
         return res.status(500).json({
             message: language === 'en' ? 'Internal server error' : 'Error interno del servidor',
         });

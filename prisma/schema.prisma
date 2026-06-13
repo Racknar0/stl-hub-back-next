@@ -418,6 +418,7 @@ enum NotificationType {
   AUTOMATION
   SALES
   REPORT
+  BATCH_UPLOADER
 }
 
 // Estado visual de la notificación
