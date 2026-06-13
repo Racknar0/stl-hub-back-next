@@ -567,6 +567,7 @@ export const scanLocalDirectory = async (req, res) => {
     const errorAfterSec = Number.isFinite(errorAfterSecRaw) && errorAfterSecRaw > warnAfterSec ? Math.floor(errorAfterSecRaw) : 120;
     const watchdogEveryMs = Number.isFinite(watchdogEveryMsRaw) && watchdogEveryMsRaw >= 2000 ? Math.floor(watchdogEveryMsRaw) : 10000;
 
+    let stallNotified = false;
     const watchdogId = setInterval(() => {
       const snap = batchScanStatus;
       if (Number(snap?.runId || 0) !== activeRunId) return;
@@ -584,6 +585,18 @@ export const scanLocalDirectory = async (req, res) => {
 
       if (staleSec >= errorAfterSec) {
         console.error(line.replace('[HEARTBEAT]', '[STALL]'));
+        if (!stallNotified) {
+          stallNotified = true;
+          prisma.notification.create({
+            data: {
+              title: 'Escaneo de lote atascado (Stall)',
+              body: `El escaneo del lote (runId: ${snap.runId}) se ha detectado como atascado en la fase "${snap.phase}". Última actualización hace ${staleSec}s. Progreso: ${snap.percent}%.`,
+              status: 'UNREAD',
+              type: 'BATCH_UPLOADER',
+              typeStatus: 'ERROR'
+            }
+          }).catch(e => console.error('[WATCHDOG][NOTIF][WARN]', e.message));
+        }
       } else if (staleSec >= warnAfterSec) {
         console.warn(line.replace('[HEARTBEAT]', '[SLOW]'));
       } else {

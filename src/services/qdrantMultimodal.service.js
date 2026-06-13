@@ -224,11 +224,37 @@ export const upsertAssetMultimodalVector = async (assetId, options = {}) => {
         return true;
     } catch (error) {
         console.error(`[QDRANT MULTIMODAL] Error de API/Qdrant para Asset ${assetId}:`, error?.message || error);
+        try {
+            await prisma.notification.create({
+                data: {
+                    title: 'Fallo al sincronizar vector en Qdrant',
+                    body: `El asset con ID ${assetId} no pudo registrar su vector multimodal en Qdrant. Detalle: ${error.message}`,
+                    status: 'UNREAD',
+                    type: 'AUTOMATION',
+                    typeStatus: 'ERROR'
+                }
+            });
+        } catch (notifErr) {
+            console.error('[QDRANT][NOTIF][WARN] No se pudo crear notificación:', notifErr.message);
+        }
         return false;
     }
 
   } catch (error) {
     console.error(`[QDRANT MULTIMODAL] Error general para Asset ${assetId}:`, error?.message || error);
+    try {
+        await prisma.notification.create({
+            data: {
+                title: 'Error general en Qdrant Multimodal',
+                body: `Error general en upsert para Asset ${assetId}. Detalle: ${error.message}`,
+                status: 'UNREAD',
+                type: 'AUTOMATION',
+                typeStatus: 'ERROR'
+            }
+        });
+    } catch (notifErr) {
+        console.error('[QDRANT][NOTIF][WARN] No se pudo crear notificación:', notifErr.message);
+    }
     return false;
   }
 };
