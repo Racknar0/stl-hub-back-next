@@ -49,8 +49,8 @@ const isMultipart = (req) => {
 		return false;
 	}
 };
-app.use(unless(isMultipart, express.json()));
-app.use(unless(isMultipart, express.urlencoded({ extended: true })));
+app.use(unless(isMultipart, express.json({ limit: '10mb' })));
+app.use(unless(isMultipart, express.urlencoded({ limit: '10mb', extended: true })));
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
