@@ -424,6 +424,20 @@ router.get('/search-assets', requireAuth, requireAdmin, async (req, res) => {
         where: { id: { in: ids } },
         include: { categories: true, tags: true }
       });
+    } else if (mode === 'range' || mode === 'bulk') {
+      const startId = parseInt(q, 10);
+      const count = parseInt(req.query.count || 10, 10);
+      if (isNaN(startId)) return res.status(400).json({ error: 'ID inicial inválido' });
+
+      assets = await prisma.asset.findMany({
+        where: {
+          id: { gte: startId },
+          status: 'PUBLISHED'
+        },
+        orderBy: { id: 'asc' },
+        take: count,
+        include: { categories: true, tags: true }
+      });
     } else if (mode === 'semantic' || mode === 'ai') {
       try {
         console.log(`[PINTEREST][SEARCH] Buscando semánticamente en Qdrant: "${q}"`);
