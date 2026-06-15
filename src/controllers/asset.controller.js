@@ -20,6 +20,7 @@ import { buildNsfwWhere, buildNsfwCategoryWhere, isAssetNSFW as isAssetNSFWBacke
 
 const prisma = new PrismaClient();
 import { randomizeFreebies, getRandomizeFreebiesCountFromEnv } from '../utils/randomizeFreebies.js';
+import { applyCategorySlugsOverrides } from '../utils/categoryHardOverrides.js';
 
 
 const ASSET_META_AI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
@@ -470,6 +471,8 @@ async function generateSeoAllForAsset(assetInput, availableCategories, assetRaw 
         'Regla especial de categorización: si el título o el nombre del asset contiene la palabra "flexi", "flexible", "articulado" o "articuled" (o derivados de articulado flexible), debes incluir la categoría "articulados" obligatoriamente en tu selección de categorías sugeridas.',
         'Regla especial de categorización: si el título o el nombre del asset contiene la palabra "keychain" o "llavero" (o derivados), debes incluir la categoría "llaveros" (o "llavero" según corresponda en tu catálogo) obligatoriamente en tu selección de categorías sugeridas.',
         'Regla especial de categorización: si el título o el nombre del asset contiene la palabra "maceta", "macetas", "planta", "plantas" (o derivados), o en inglés "planter", "planters", "pot", "pots", "plant", "plants", debes incluir la categoría "macetas" obligatoriamente en tu selección de categorías sugeridas.',
+        'Regla especial de categorización: si el título o el nombre del asset contiene la palabra "lithophane", "litophane", "lithopane", "litofania" (o derivados/variantes), debes incluir la categoría "litofania" obligatoriamente en tu selección de categorías sugeridas.',
+        'Regla especial de categorización: si el título o el nombre del asset contiene la palabra "lampara", "lamparas", "lamp" (o derivados/variantes), debes incluir la categoría "lampara" obligatoriamente en tu selección de categorías sugeridas.',
         '',
         'Responde ÚNICAMENTE con un objeto JSON válido con el siguiente esquema exacto:',
         JSON.stringify({
@@ -1580,26 +1583,9 @@ export const generateAssetMetaAll = async (req, res) => {
         // Asegurar los IDs de los tags generados
         const tagIds = await ensureTagIdsFromPairs(generated.tags);
 
-        // Mapear categorías sugeridas a IDs reales que existen en la base de datos
-        const categorySlugs = generated.categories || [];
-
-        // Sobrescritura por código (programática) para macetas, flexi/articulados, llaveros
-        const titleLower = String(asset.title || asset.archiveName || '').toLowerCase();
-        if (/(maceta|macetas|planta|plantas|planter|planters|pot|pots|plant|plants)/i.test(titleLower)) {
-            if (!categorySlugs.includes('macetas')) {
-                categorySlugs.push('macetas');
-            }
-        }
-        if (/(flexi|flexible|articulado|articuled|articulated)/i.test(titleLower)) {
-            if (!categorySlugs.includes('articulated')) {
-                categorySlugs.push('articulated');
-            }
-        }
-        if (/(keychain|llavero)/i.test(titleLower)) {
-            if (!categorySlugs.includes('llavero')) {
-                categorySlugs.push('llavero');
-            }
-        }
+        // Sobrescritura por código (programática) centralizada para categorías
+        let categorySlugs = generated.categories || [];
+        categorySlugs = applyCategorySlugsOverrides(asset.title || asset.archiveName || '', categorySlugs);
 
         const matchingCategories = availableCategories.filter(c => categorySlugs.includes(c.slug.toLowerCase()));
         const categoryIds = matchingCategories.map(c => c.id);

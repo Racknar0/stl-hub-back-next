@@ -6,6 +6,7 @@ import {
   GoogleGenAI,
   PartMediaResolutionLevel,
 } from '@google/genai'
+import { categoryHardOverrideRules } from '../../utils/categoryHardOverrides.js'
 
 const MODEL_NAME = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite'
 const UPLOADS_DIR = path.resolve('uploads')
@@ -960,41 +961,7 @@ function applyCategoryAndTagHardOverrides(sourceName, currentCategory, currentTa
   let tags = [...currentTags]
   const nameLower = String(sourceName || '').toLowerCase()
 
-  // Definición de reglas configurables (añade más fácilmente aquí)
-  const rules = [
-    {
-      regex: /\b(busto|bust|bustos|busts)\b/i,
-      categoryTerms: ['busto', 'bust', 'bustos', 'busts'],
-      tagTerms: ['busto', 'bust', 'bustos', 'busts']
-    },
-    {
-      regex: /(flexi|flexible|articulado|articuled|articulated)/i,
-      categoryTerms: ['articulados', 'articulado', 'articulated'],
-      tagTerms: ['articulado', 'articulated', 'flexible', 'flexi']
-    },
-    {
-      regex: /(keychain|llavero)/i,
-      categoryTerms: ['llaveros', 'llavero', 'keychains', 'keychain'],
-      tagTerms: ['llavero', 'keychain', 'llaveros', 'keychains']
-    },
-    {
-      regex: /(helmet|mask|armor|casco|mascara|armadura)/i,
-      categoryTerms: ['cosplay'],
-      tagTerms: ['cosplay', 'casco', 'mascara', 'armadura', 'helmet', 'mask', 'armor']
-    },
-    {
-      regex: /(mug|cup|taza|vaso)/i,
-      categoryTerms: ['mugs', 'mug', 'mugs-y-tazas', 'tazas', 'taza', 'vasos', 'vaso'],
-      tagTerms: ['mug', 'mugs', 'taza', 'tazas', 'vaso', 'vasos', 'cup', 'cups']
-    },
-    {
-      regex: /(maceta|macetas|planta|plantas|planter|planters|pot|pots|plant|plants)/i,
-      categoryTerms: ['macetas', 'pots', 'planters', 'planter'],
-      tagTerms: ['macetas', 'pots', 'maceta', 'pot', 'planta', 'plant', 'plantas', 'plants']
-    }
-  ]
-
-  for (const rule of rules) {
+  for (const rule of categoryHardOverrideRules) {
     if (rule.regex.test(nameLower)) {
       // 1. Aplicar categoría por orden de preferencia
       let matchedCategory = null
@@ -1004,14 +971,17 @@ function applyCategoryAndTagHardOverrides(sourceName, currentCategory, currentTa
       }
 
       if (matchedCategory) {
+        const nameEs = rule.categoryOverrideEs || matchedCategory.name
+        const nameEn = matchedCategory.nameEn || matchedCategory.name
+
         category = {
           id: matchedCategory.id,
           slug: matchedCategory.slug,
           slugEn: matchedCategory.slugEn || null,
-          name: matchedCategory.name,
-          nameEn: matchedCategory.nameEn || matchedCategory.name,
-          es: matchedCategory.name,
-          en: matchedCategory.nameEn || matchedCategory.name,
+          name: nameEs,
+          nameEn: nameEn,
+          es: nameEs,
+          en: nameEn,
           fromCatalog: true,
         }
       }
