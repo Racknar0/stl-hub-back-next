@@ -3713,20 +3713,131 @@ export async function restoreAssetFromBackup(req, res) {
       return res.status(400).json({ message: 'Main account has no credentials' });
     }
 
+    const mainAcc = asset.account;
+
+    // ──────────────────────────────────────────────────────────────────
+    // FASE 0: Intentar regenerar el link directamente desde la cuenta MAIN.
+    // Si el archivo existe en main, solo re-exportamos el link público
+    // y evitamos bajar/subir desde backup innecesariamente.
+    // ──────────────────────────────────────────────────────────────────
+    const fileName = asset.archiveName ? path.basename(asset.archiveName) : null;
+    if (fileName) {
+      const mainBase = (mainAcc.baseFolder || '/').replaceAll('\\', '/');
+      const mainRemoteFolderPhase0 = path.posix.join(mainBase, asset.slug);
+      const mainRemoteFilePhase0 = path.posix.join(mainRemoteFolderPhase0, fileName);
+
+      const mainCred = decryptToJson(
+        mainAcc.credentials.encData,
+        mainAcc.credentials.encIv,
+        mainAcc.credentials.encTag
+      );
+
+      let phase0Link = null;
+      let phase0Found = false;
+
+      try {
+        await withMegaLock(async () => {
+          const ctx = `restore-phase0-main-${mainAcc.id}`;
+          const proxyIdx0 = 0;
+          const getPI = () => proxyIdx0;
+          const setPI = () => {};
+
+          await applyProxyByIndexOrThrow(mainAcc, getPI(), ctx);
+          await megaLogoutSafe(ctx);
+          await megaLoginFull(prisma, mainAcc.id, mainCred, ctx, {
+            skipStorageRefresh: true,
+            skipProxySetup: true,
+            maxProxyRetries: 0,
+          });
+
+          // Verificar si el archivo existe en MAIN
+          try {
+            await runCmd('mega-ls', [mainRemoteFilePhase0], { quiet: true });
+            phase0Found = true;
+          } catch {
+            // Archivo exacto no encontrado, intentar buscar cualquier archivo en la carpeta
+            try {
+              const ls = await runCmd('mega-ls', [mainRemoteFolderPhase0], { quiet: true });
+              const lines = String(ls.out || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+              if (lines.length > 0) {
+                phase0Found = true;
+                // Si el nombre exacto no coincide, usar el primer archivo encontrado
+                const actualFile = lines.find(l => l.toLowerCase() === fileName.toLowerCase()) || lines[0];
+                if (actualFile && actualFile !== fileName) {
+                  // Ajustar el remoteFile al nombre real
+                  const adjustedFile = path.posix.join(mainRemoteFolderPhase0, actualFile);
+                  console.log(`[RESTORE][PHASE0] Archivo encontrado con nombre diferente: ${actualFile} (esperado: ${fileName})`);
+                  // Re-exportar con el nombre correcto
+                  try { await runCmd('mega-export', ['-d', adjustedFile], { quiet: true }); } catch {}
+                  const exp = await runCmd('mega-export', ['-a', adjustedFile], { quiet: true });
+                  const m = String(exp.out || '').match(/https?:\/\/mega\.nz\/\S+/i);
+                  if (m) phase0Link = m[0];
+                }
+              }
+            } catch {
+              // Carpeta no existe
+            }
+          }
+
+          // Si el archivo exacto fue encontrado, regenerar el link
+          if (phase0Found && !phase0Link) {
+            try { await runCmd('mega-export', ['-d', mainRemoteFilePhase0], { quiet: true }); } catch {}
+            const exp = await runCmd('mega-export', ['-a', mainRemoteFilePhase0], { quiet: true });
+            const m = String(exp.out || '').match(/https?:\/\/mega\.nz\/\S+/i);
+            if (m) phase0Link = m[0];
+          }
+
+          await megaLogoutSafe(ctx);
+        }, `RESTORE-PHASE0-${mainAcc.id}`);
+      } catch (e) {
+        console.warn(`[RESTORE][PHASE0] Error al intentar regenerar desde main: ${e.message}`);
+      }
+
+      // Si logramos regenerar el link desde main, actualizar DB y responder
+      if (phase0Link) {
+        await prisma.asset.update({
+          where: { id: asset.id },
+          data: {
+            megaLink: phase0Link,
+            status: 'PUBLISHED',
+            megaLinkAlive: true,
+            megaLinkCheckedAt: new Date(),
+          },
+        });
+
+        console.log(`[RESTORE][PHASE0] Link regenerado desde main para asset=${asset.id}: ${phase0Link}`);
+
+        try {
+          await prisma.notification.create({
+            data: {
+              title: 'Link regenerado desde cuenta principal',
+              body: `El asset "${asset.title}" (id: ${asset.id}) tenía el link caído pero el archivo seguía en la cuenta principal (${mainAcc.alias}). Se regeneró el link público sin necesidad de usar backup.`,
+              status: 'UNREAD',
+              type: 'STORAGE',
+              typeStatus: 'SUCCESS',
+            },
+          });
+        } catch {}
+
+        return res.json({ ok: true, link: phase0Link, source: 'main-reexport' });
+      }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // FASE 1: El archivo NO existe en main → intentar restaurar desde backup
+    // ──────────────────────────────────────────────────────────────────
     const candidates = (asset.replicas || []).filter(r => r.account?.credentials);
     if (!candidates.length) {
-      return res.status(409).json({ message: 'No completed backup replicas found' });
+      return res.status(409).json({ message: 'No completed backup replicas found. The file was also not found in the main MEGA account.' });
     }
 
     const chosen = preferBackupAccountId
       ? (candidates.find(r => r.accountId === preferBackupAccountId) || candidates[0])
       : candidates[0];
 
-    const mainAcc = asset.account;
     const backupAcc = chosen.account;
 
-    // 2) Nombre de archivo
-    const fileName = asset.archiveName ? path.basename(asset.archiveName) : null;
+    // 2) Nombre de archivo (ya calculado en FASE 0)
     if (!fileName) {
       return res.status(409).json({ message: 'Asset has no archiveName to restore' });
     }
