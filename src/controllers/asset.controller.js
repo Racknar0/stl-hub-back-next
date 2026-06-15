@@ -3758,7 +3758,7 @@ export async function restoreAssetFromBackup(req, res) {
             // Archivo exacto no encontrado, intentar buscar cualquier archivo en la carpeta
             try {
               const ls = await runCmd('mega-ls', [mainRemoteFolderPhase0], { quiet: true });
-              const lines = String(ls.out || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+              const lines = String(ls.out || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean).filter(l => !l.endsWith(':'));
               if (lines.length > 0) {
                 phase0Found = true;
                 // Si el nombre exacto no coincide, usar el primer archivo encontrado
