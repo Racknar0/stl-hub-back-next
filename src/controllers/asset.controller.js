@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import { transporter } from './nodeMailerController.js';
 import path from 'path';
 import fs from 'fs';
 import sharp from 'sharp';
@@ -3819,6 +3820,9 @@ export async function restoreAssetFromBackup(req, res) {
           });
         } catch {}
 
+        // Resolver reportes y notificar a los usuarios
+        resolveReportsAndNotify(asset.id, asset.title, phase0Link);
+
         return res.json({ ok: true, link: phase0Link, source: 'main-reexport' });
       }
     }
@@ -4006,6 +4010,9 @@ export async function restoreAssetFromBackup(req, res) {
       });
     } catch {}
 
+    // Resolver reportes y notificar a los usuarios
+    resolveReportsAndNotify(asset.id, asset.title, publicLink);
+
     return res.json({ ok: true, link: publicLink });
   } catch (err) {
     console.error('[RESTORE] error:', err?.message || err);
@@ -4032,5 +4039,111 @@ export async function restoreAssetFromBackup(req, res) {
     } catch {}
 
     return res.status(500).json({ message: 'Restore failed', error: String(err.message || err) });
+  }
+}
+
+async function resolveReportsAndNotify(assetId, assetTitle, newLink) {
+  try {
+    const reports = await prisma.brokenReport.findMany({
+      where: { assetId, status: { in: ['NEW', 'IN_PROGRESS'] } },
+      select: { userId: true }
+    });
+
+    await prisma.brokenReport.updateMany({
+      where: { assetId, status: { in: ['NEW', 'IN_PROGRESS'] } },
+      data: { status: 'RESOLVED' }
+    });
+
+    // Actualizar notificaciones de administración de tipo REPORT asociadas a este asset
+    try {
+      await prisma.notification.updateMany({
+        where: {
+          type: 'REPORT',
+          typeStatus: 'PENDING',
+          body: { contains: `assetId=${assetId}` }
+        },
+        data: {
+          status: 'READ',
+          typeStatus: 'SUCCESS'
+        }
+      });
+    } catch (adminNotifErr) {
+      console.warn('[NOTIF][ADMIN] Failed to update corresponding admin notifications:', adminNotifErr.message);
+    }
+
+    const userIds = Array.from(new Set(reports.map(r => r.userId).filter(Boolean)));
+    if (userIds.length === 0) return;
+
+    const users = await prisma.user.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, email: true, language: true }
+    });
+
+    const isProduction = process.env.NODE_ENV === 'production';
+    const siteUrl = isProduction ? 'https://stl-hub.com' : 'http://localhost:3000';
+
+    for (const u of users) {
+      const isEn = u.language === 'en';
+      const title = isEn ? 'Link restored!' : '¡Enlace restaurado!';
+      const body = isEn 
+        ? `The download link for "${assetTitle}" has been successfully restored. You can now download it.` 
+        : `El enlace de descarga para "${assetTitle}" ha sido restaurado con éxito. Ya puedes descargarlo.`;
+      
+      await prisma.userNotification.create({
+        data: {
+          userId: u.id,
+          title,
+          body,
+          assetId
+        }
+      });
+
+      const assetUrl = `${siteUrl}${isEn ? '/en' : ''}/asset/${assetId}`;
+      const mailHtml = `
+<div style="background-color:#121214; color:#ffffff; padding:30px; font-family:sans-serif; border-radius:10px; max-width:600px; margin:0 auto;">
+  <div style="text-align:center; margin-bottom:20px;">
+    <h2 style="color:#b59cff; margin:0;">STL HUB</h2>
+    <p style="color:#818199; font-size:14px; margin:5px 0 0 0;">${isEn ? 'Link Restored!' : '¡Enlace Restaurado!'}</p>
+  </div>
+  
+  <div style="background-color:#1d1d22; padding:20px; border-radius:8px; border:1px solid #2d2d35; color:#ffffff;">
+    <p style="font-size:16px; line-height:1.5; margin-top:0;">
+      ${isEn ? 'Hello,' : 'Hola,'}
+    </p>
+    <p style="font-size:15px; line-height:1.5;">
+      ${isEn 
+        ? `We are glad to inform you that the download link for <strong>${assetTitle}</strong> that you reported as broken has been successfully restored by our team.` 
+        : `Nos alegra informarte que el enlace de descarga para el modelo <strong>${assetTitle}</strong> que reportaste como caído ha sido restaurado exitosamente por nuestro equipo.`}
+    </p>
+    <p style="font-size:15px; line-height:1.5; margin-bottom:25px;">
+      ${isEn 
+        ? 'You can now access the asset and download it directly from your account.' 
+        : 'Ya puedes acceder al asset y descargarlo directamente desde tu cuenta.'}
+    </p>
+    <div style="text-align:center;">
+      <a href="${assetUrl}" style="background-color:#7c3aed; color:#ffffff; padding:12px 24px; text-decoration:none; border-radius:6px; font-weight:bold; display:inline-block;">
+        ${isEn ? 'Go to Model' : 'Ir al Modelo'}
+      </a>
+    </div>
+  </div>
+  
+  <div style="text-align:center; margin-top:25px; color:#818199; font-size:12px;">
+    ${isEn ? 'This is an automatic email, please do not reply to this message.' : 'Este es un correo automático, por favor no respondas a este mensaje.'}
+  </div>
+</div>`;
+
+      try {
+        await transporter.sendMail({
+          from: `"STL HUB" <${process.env.EMAIL_USER}>`,
+          to: u.email,
+          subject: `${isEn ? 'Broken Link Restored!' : '¡Enlace caído restaurado!'} - STL HUB`,
+          html: mailHtml
+        });
+      } catch (mailErr) {
+        console.warn(`[NOTIF][MAIL] Failed to send restoration email to ${u.email}:`, mailErr.message);
+      }
+    }
+  } catch (err) {
+    console.error('[NOTIF][RESOLVE] Error resolving reports and notifying users:', err);
   }
 }

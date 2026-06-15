@@ -58,8 +58,10 @@ export const createBrokenReport = async (req, res) => {
     }
     const ua = req.headers['user-agent'] || ''
 
+    const userId = req.user?.id || null;
+
     const created = await prisma.brokenReport.create({
-      data: { assetId, note, status: 'NEW', ip, ua },
+      data: { assetId, note, status: 'NEW', ip, ua, userId },
       select: { id: true, assetId: true, status: true, createdAt: true },
     })
 

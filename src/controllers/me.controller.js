@@ -334,3 +334,90 @@ export const registerFreebieRoll = async (req, res) => {
     return res.status(500).json({ message: 'Error registering freebie roll' });
   }
 };
+
+export const getMyNotifications = async (req, res) => {
+  try {
+    const userId = Number(req.user?.id);
+    if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize) || 10, 1), 50);
+
+    const [total, notifications] = await prisma.$transaction([
+      prisma.userNotification.count({ where: { userId } }),
+      prisma.userNotification.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        select: {
+          id: true,
+          title: true,
+          body: true,
+          isRead: true,
+          assetId: true,
+          createdAt: true
+        }
+      })
+    ]);
+
+    return res.json({ data: notifications, total, page, pageSize });
+  } catch (e) {
+    console.error('[ME] getMyNotifications error:', e);
+    return res.status(500).json({ message: 'Error getting notifications' });
+  }
+};
+
+export const getMyNotificationsUnreadCount = async (req, res) => {
+  try {
+    const userId = Number(req.user?.id);
+    if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+    const count = await prisma.userNotification.count({
+      where: { userId, isRead: false }
+    });
+
+    return res.json({ count });
+  } catch (e) {
+    console.error('[ME] getMyNotificationsUnreadCount error:', e);
+    return res.status(500).json({ message: 'Error getting notifications unread count' });
+  }
+};
+
+export const markMyNotificationAsRead = async (req, res) => {
+  try {
+    const userId = Number(req.user?.id);
+    if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ message: 'Invalid notification id' });
+
+    const updated = await prisma.userNotification.update({
+      where: { id, userId },
+      data: { isRead: true }
+    });
+
+    return res.json({ ok: true, data: updated });
+  } catch (e) {
+    if (e?.code === 'P2025') return res.status(404).json({ message: 'Notification not found' });
+    console.error('[ME] markMyNotificationAsRead error:', e);
+    return res.status(500).json({ message: 'Error marking notification as read' });
+  }
+};
+
+export const markAllMyNotificationsAsRead = async (req, res) => {
+  try {
+    const userId = Number(req.user?.id);
+    if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+    await prisma.userNotification.updateMany({
+      where: { userId, isRead: false },
+      data: { isRead: true }
+    });
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[ME] markAllMyNotificationsAsRead error:', e);
+    return res.status(500).json({ message: 'Error marking all notifications as read' });
+  }
+};

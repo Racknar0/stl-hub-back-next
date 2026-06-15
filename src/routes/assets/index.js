@@ -70,7 +70,7 @@ router.get('/slugs', optionalAuth, listPublishedSlugs);
 router.get('/slug/:slug', optionalAuth, getAssetBySlug);
 router.get('/:id(\\d+)', optionalAuth, getAsset);
 router.post('/:id/request-download', requestDownload);
-router.post('/:id/report-broken-link', createBrokenReport);
+router.post('/:id/report-broken-link', optionalAuth, createBrokenReport);
 
 // Réplicas (público para UI de progreso)
 router.get('/:id/replicas', listAssetReplicas);

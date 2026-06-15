@@ -65,6 +65,9 @@ model user {
   // Freebie/Daily rolls tracking
   dailyRolls userDailyRolls[]
 
+  brokenReports     BrokenReport[]
+  userNotifications UserNotification[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -388,9 +391,12 @@ model BrokenReport {
   createdAt DateTime           @default(now())
   ip        String?
   ua        String?
+  userId    Int?
+  user      user?              @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@index([createdAt(sort: Desc)])
   @@index([assetId])
+  @@index([userId])
   @@map("brokenreport")
 }
 
@@ -777,5 +783,20 @@ model userDailyRolls {
   @@unique([userId, date])
   @@index([userId])
   @@map("userdailyrolls")
+}
+
+model UserNotification {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      user     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  body      String?  @db.LongText
+  isRead    Boolean  @default(false)
+  assetId   Int?     // Opcional: enlace al asset restaurado
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([createdAt(sort: Desc)])
+  @@map("usernotification")
 }
 
