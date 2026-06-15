@@ -17,6 +17,12 @@ globalThis.__searchCleanupState = searchCleanupState
 const UTC5_OFFSET_HOURS = 5
 const UTC5_OFFSET_MS = UTC5_OFFSET_HOURS * 60 * 60 * 1000
 
+function getStartOfDayUtc5(now = new Date()) {
+  const utc5Date = new Date(now.getTime() - UTC5_OFFSET_MS)
+  utc5Date.setUTCHours(0, 0, 0, 0)
+  return new Date(utc5Date.getTime() + UTC5_OFFSET_MS)
+}
+
 const SITE_VISIT_MIN_INTERVAL_MS = Math.max(5000, Number(process.env.SITE_VISIT_MIN_INTERVAL_MS || 15000) || 15000)
 const SITE_VISIT_MAX_PER_IP_PER_MIN = Math.max(30, Number(process.env.SITE_VISIT_MAX_PER_IP_PER_MIN || 240) || 240)
 const SITE_VISIT_IP_HASH_SALT = process.env.SITE_VISIT_IP_HASH_SALT || process.env.JWT_SECRET || 'stl-hub-site-visit'
@@ -231,15 +237,20 @@ const salesProviderLabel = (providerRaw) => {
   return provider || 'Otro';
 };
 
-const buildSalesRangeBoundaries = (now = new Date()) => ({
-  'hoy': new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000),
-  '2d': new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000),
-  '3d': new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000),
-  '7d': new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000),
-  '15d': new Date(now.getTime() - 15 * 24 * 60 * 60 * 1000),
-  '1m': new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000),
-  '1y': new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000),
-});
+const buildSalesRangeBoundaries = (now = new Date()) => {
+  const todayStartUtc5 = getStartOfDayUtc5(now);
+  return {
+    'hoy': todayStartUtc5,
+    '1d': todayStartUtc5,
+    '2d': new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000),
+    '3d': new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000),
+    '7d': new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000),
+    '1w': new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000),
+    '15d': new Date(now.getTime() - 15 * 24 * 60 * 60 * 1000),
+    '1m': new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000),
+    '1y': new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000),
+  };
+};
 
 const roundMoney = (value) => {
   const n = Number(value || 0);
@@ -335,7 +346,7 @@ export async function getVpsMemoryMetrics(req, res) {
 export async function getUploadsMetrics(req, res) {
   try {
     const now = new Date()
-    const todayStart = startOfDay(now)
+    const todayStart = getStartOfDayUtc5(now)
     const twoDaysAgo = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000)
     const threeDaysAgo = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000)
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
@@ -437,7 +448,7 @@ export async function getUploadsMetrics(req, res) {
 export async function getConnectionsToday(req, res) {
   try {
     const now = new Date();
-    const todayStart = startOfDay(now);
+    const todayStart = getStartOfDayUtc5(now);
     const count = await prisma.user.count({ where: { lastLogin: { gte: todayStart } } });
     return res.json({ today: count });
   } catch (e) {
@@ -463,13 +474,13 @@ export async function getUsersCount(req, res) {
 export async function getDownloadMetrics(req, res) {
   try {
     const now = new Date()
-    const oneDayAgo = new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000)
+    const todayStartUtc5 = getStartOfDayUtc5(now)
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
     const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
     const threeSixtyFiveDaysAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000)
 
     const [d1, d7, d30, d365, total] = await Promise.all([
-      prisma.downloadHistory.count({ where: { downloadedAt: { gte: oneDayAgo } } }),
+      prisma.downloadHistory.count({ where: { downloadedAt: { gte: todayStartUtc5 } } }),
       prisma.downloadHistory.count({ where: { downloadedAt: { gte: sevenDaysAgo } } }),
       prisma.downloadHistory.count({ where: { downloadedAt: { gte: thirtyDaysAgo } } }),
       prisma.downloadHistory.count({ where: { downloadedAt: { gte: threeSixtyFiveDaysAgo } } }),
@@ -502,8 +513,13 @@ export async function getSalesMetrics(req, res) {
       },
     });
 
-    const totals = { 'hoy': 0, '2d': 0, '3d': 0, '7d': 0, '15d': 0, '1m': 0, '1y': 0, all: 0 };
-    const items = { 'hoy': [], '2d': [], '3d': [], '7d': [], '15d': [], '1m': [], '1y': [], all: [] };
+    const rangeKeys = ['hoy', '1d', '2d', '3d', '7d', '1w', '15d', '1m', '1y', 'all'];
+    const totals = {};
+    const items = {};
+    for (const key of rangeKeys) {
+      totals[key] = 0;
+      items[key] = [];
+    }
 
     for (const payment of completedPayments) {
       const paymentDate = payment?.createdAt ? new Date(payment.createdAt) : null;
@@ -524,21 +540,13 @@ export async function getSalesMetrics(req, res) {
       totals.all += amountCop;
       if (items.all.length < maxItemsPerRange) items.all.push(row);
 
-      if (paymentDate >= boundaries['1d']) {
-        totals['1d'] += amountCop;
-        if (items['1d'].length < maxItemsPerRange) items['1d'].push(row);
-      }
-      if (paymentDate >= boundaries['1w']) {
-        totals['1w'] += amountCop;
-        if (items['1w'].length < maxItemsPerRange) items['1w'].push(row);
-      }
-      if (paymentDate >= boundaries['1m']) {
-        totals['1m'] += amountCop;
-        if (items['1m'].length < maxItemsPerRange) items['1m'].push(row);
-      }
-      if (paymentDate >= boundaries['1y']) {
-        totals['1y'] += amountCop;
-        if (items['1y'].length < maxItemsPerRange) items['1y'].push(row);
+      for (const [key, boundaryDate] of Object.entries(boundaries)) {
+        if (boundaryDate && paymentDate >= boundaryDate) {
+          totals[key] += amountCop;
+          if (items[key].length < maxItemsPerRange) {
+            items[key].push(row);
+          }
+        }
       }
     }
 
@@ -563,14 +571,14 @@ export async function getSalesMetrics(req, res) {
 export async function getRegistrationMetrics(req, res) {
   try {
     const now = new Date()
-    const oneDayAgo = new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000)
+    const todayStartUtc5 = getStartOfDayUtc5(now)
     const threeDaysAgo = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000)
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
     const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
     const threeSixtyFiveDaysAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000)
 
     const [d1, d3, d7, d30, d365, total] = await Promise.all([
-      prisma.user.count({ where: { createdAt: { gte: oneDayAgo } } }),
+      prisma.user.count({ where: { createdAt: { gte: todayStartUtc5 } } }),
       prisma.user.count({ where: { createdAt: { gte: threeDaysAgo } } }),
       prisma.user.count({ where: { createdAt: { gte: sevenDaysAgo } } }),
       prisma.user.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
