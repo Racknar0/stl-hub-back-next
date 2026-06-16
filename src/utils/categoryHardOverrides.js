@@ -6,49 +6,52 @@ export const categoryHardOverrideRules = [
   {
     regex: /\b(busto|bust|bustos|busts)\b/i,
     categoryTerms: ['busto', 'bust', 'bustos', 'busts'],
-    tagTerms: ['busto', 'bust', 'bustos', 'busts']
+    tagTerms: ['busto', 'bust', 'bustos', 'busts'],
+    slug: 'busto'
   },
   {
     regex: /(flexi|flexible|articulado|articuled|articulated)/i,
     categoryTerms: ['articulados', 'articulado', 'articulated'],
     tagTerms: ['articulado', 'articulated', 'flexible', 'flexi'],
-    slug: 'articulated'
+    slug: 'articulados'
   },
   {
     regex: /(keychain|llavero)/i,
-    categoryTerms: ['llaveros', 'llavero', 'keychains', 'keychain'],
+    categoryTerms: ['llavero', 'llaveros', 'keychains', 'keychain'],
     tagTerms: ['llavero', 'keychain', 'llaveros', 'keychains'],
     slug: 'llavero'
   },
   {
     regex: /(helmet|mask|armor|casco|mascara|armadura)/i,
     categoryTerms: ['cosplay'],
-    tagTerms: ['cosplay', 'casco', 'mascara', 'armadura', 'helmet', 'mask', 'armor']
+    tagTerms: ['cosplay', 'casco', 'mascara', 'armadura', 'helmet', 'mask', 'armor'],
+    slug: 'cosplay'
   },
   {
     regex: /(mug|cup|taza|vaso)/i,
     categoryTerms: ['mugs', 'mug', 'mugs-y-tazas', 'tazas', 'taza', 'vasos', 'vaso'],
-    tagTerms: ['mug', 'mugs', 'taza', 'tazas', 'vaso', 'vasos', 'cup', 'cups']
+    tagTerms: ['mug', 'mugs', 'taza', 'tazas', 'vaso', 'vasos', 'cup', 'cups'],
+    slug: 'mugs'
   },
   {
     regex: /(maceta|macetas|planta|plantas|planter|planters|pot|pots|plant|plants)/i,
-    categoryTerms: ['macetas', 'pots', 'planters', 'planter'],
+    categoryTerms: ['macetas y jardín', 'macetas-y-jardn', 'macetas', 'pots', 'planters', 'planter'],
     tagTerms: ['macetas', 'pots', 'maceta', 'pot', 'planta', 'plant', 'plantas', 'plants'],
-    slug: 'macetas'
+    slug: 'macetas-y-jardn'
   },
   {
     regex: /(litho|lito)(f|ph|p)an/i,
-    categoryTerms: ['litofania', 'lithophanie'],
-    tagTerms: ['litofania', 'lithophanie'],
+    categoryTerms: ['litofanias', 'litofania', 'lithophanie'],
+    tagTerms: ['litofanias', 'litofania', 'lithophanie'],
     categoryOverrideEs: 'litofanias',
-    slug: 'litofania'
+    slug: 'litofanias'
   },
   {
     regex: /\b(lamp|l[aá]mpar)a?s?\b/i,
-    categoryTerms: ['lampara', 'lamp'],
-    tagTerms: ['lampara', 'lamp'],
+    categoryTerms: ['lamparas', 'lampara', 'lamp'],
+    tagTerms: ['lamparas', 'lampara', 'lamp'],
     categoryOverrideEs: 'lamparas',
-    slug: 'lampara'
+    slug: 'lamparas'
   }
 ]
 
