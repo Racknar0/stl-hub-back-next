@@ -1195,6 +1195,13 @@ export const getAsset = async (req, res) => {
         }
 
         const assetSafe = toJsonSafe(asset);
+
+        // Ocultar megaLink para usuarios que no sean administradores
+        const isAdmin = req.user && Number(req.user.roleId) === 2;
+        if (!isAdmin && assetSafe) {
+            delete assetSafe.megaLink;
+        }
+
         return res.json(assetSafe);
     } catch (e) {
         console.error('[ASSETS] getAsset error:', e);
@@ -3463,8 +3470,14 @@ export const getAssetBySlug = async (req, res) => {
             const autoDescriptionEs = hasDescriptionEs ? safe.description : buildDescriptionEs();
             const autoDescriptionEn = hasDescriptionEn ? safe.descriptionEn : buildDescriptionEn();
 
+            const cleanSafe = { ...safe };
+            const isAdmin = req.user && Number(req.user.roleId) === 2;
+            if (!isAdmin) {
+                delete cleanSafe.megaLink;
+            }
+
             return res.json({
-                ...safe,
+                ...cleanSafe,
                 tagsEs,
                 tagsEn,
                 unpublished: a.status !== 'PUBLISHED',
