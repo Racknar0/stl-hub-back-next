@@ -29,12 +29,35 @@ class PinterestPublisherService {
       // 2. Resolver boardId si es null/auto/Automático
       let resolvedBoardId = boardId;
       if (!resolvedBoardId || resolvedBoardId === 'auto' || resolvedBoardId === 'Automático') {
-        const boardName = 'STL Hub';
-        resolvedBoardId = await this.findOrCreateDefaultBoard(boardName, accessToken);
-        if (!resolvedBoardId) {
-          throw new Error('No se pudo obtener ningún tablero predeterminado de Pinterest. Crea al menos un tablero en tu cuenta de Pinterest manualmente.');
+        let matchedBoardId = null;
+        if (assetId) {
+          try {
+            const dbAsset = await prisma.asset.findUnique({
+              where: { id: Number(assetId) },
+              include: { categories: true }
+            });
+            if (dbAsset && dbAsset.categories && dbAsset.categories.length > 0) {
+              const categoryName = dbAsset.categories[0].name;
+              console.log(`[Pinterest Publisher] Resolviendo tablero dinámico para asset #${assetId} (categoría: ${categoryName})`);
+              matchedBoardId = await this.findBoardByName(categoryName, accessToken);
+              if (matchedBoardId) {
+                resolvedBoardId = matchedBoardId;
+                console.log(`[Pinterest Publisher] Coincidencia dinámica encontrada: Tablero ID ${resolvedBoardId} para "${categoryName}"`);
+              }
+            }
+          } catch (dbErr) {
+            console.error('[Pinterest Publisher] Error buscando categoría de asset:', dbErr.message);
+          }
         }
-        console.log(`[Pinterest] Using default board ID: ${resolvedBoardId}`);
+
+        if (!resolvedBoardId || resolvedBoardId === 'auto' || resolvedBoardId === 'Automático') {
+          const boardName = 'STL Hub';
+          resolvedBoardId = await this.findOrCreateDefaultBoard(boardName, accessToken);
+          if (!resolvedBoardId) {
+            throw new Error('No se pudo obtener ningún tablero predeterminado de Pinterest. Crea al menos un tablero en tu cuenta de Pinterest manualmente.');
+          }
+          console.log(`[Pinterest] Using default board ID: ${resolvedBoardId}`);
+        }
       }
 
       // 3. Descargar la imagen a memoria RAM
@@ -226,6 +249,33 @@ class PinterestPublisherService {
     } catch (e) {
       console.error('[Pinterest] Error resolving default board:', e.message);
       throw e;
+    }
+  }
+
+  // Helper para buscar un tablero en Pinterest por su nombre exacto
+  async findBoardByName(boardName, accessToken) {
+    try {
+      console.log(`[Pinterest] Looking for board by name: "${boardName}"...`);
+      const response = await fetch(`${this.baseUrl}/boards`, {
+        headers: { 'Authorization': `Bearer ${accessToken}` }
+      });
+      if (!response.ok) {
+        const errText = await response.text();
+        console.warn(`[Pinterest] Error listing boards for name match (HTTP ${response.status}): ${errText}`);
+        return null;
+      }
+      const data = await response.json();
+      const boards = data.items || [];
+      const exactBoard = boards.find(b => 
+        b.name.toLowerCase() === boardName.toLowerCase()
+      );
+      if (exactBoard) {
+        return exactBoard.id;
+      }
+      return null;
+    } catch (e) {
+      console.error('[Pinterest] Error in findBoardByName:', e.message);
+      return null;
     }
   }
 
