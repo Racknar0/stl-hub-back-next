@@ -2584,7 +2584,7 @@ export const searchAssets = async (req, res) => {
       plan,
       isPremium,
             is_ai_search,
-      order // ignorado a propósito: siempre latest-first
+      order
     } = req.query || {};
 
     // --- Paginación (zero-based) ---
@@ -2719,8 +2719,14 @@ export const searchAssets = async (req, res) => {
       },
     };
 
-    // --- ORDEN: siempre los últimos subidos primero ---
-    const orderBy = [{ createdAt: 'desc' }, { id: 'desc' }];
+    // --- ORDEN ---
+    const orderBy = [];
+    if (String(order || '').toLowerCase() === 'downloads') {
+      orderBy.push({ downloads: 'desc' });
+    } else {
+      orderBy.push({ createdAt: 'desc' });
+    }
+    orderBy.push({ id: 'desc' });
 
         // --- Búsqueda IA semántica (Qdrant) ---
         if (isAiSearch && qLower) {
