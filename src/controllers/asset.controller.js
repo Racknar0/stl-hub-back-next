@@ -3166,7 +3166,7 @@ export const requestDownload = async (req, res) => {
     // 1) Cargar asset primero (fail-fast)
     const asset = await prisma.asset.findUnique({
       where: { id },
-      select: { id: true, status: true, megaLink: true, megaLinkAlive: true , megaLinkCheckedAt: true, title: true },
+      select: { id: true, status: true, megaLink: true, megaLinkAlive: true , megaLinkCheckedAt: true, title: true, isPremium: true },
     });
 
     if (!asset) return res.status(404).json({ message: 'Asset not found' });
@@ -3327,7 +3327,7 @@ export const requestDownload = async (req, res) => {
           limit = limitFreePass;
           allowed = true;
         } else {
-          const freeToday = await isAssetFreeToday(asset.id, prisma);
+          const freeToday = asset.isPremium === false || await isAssetFreeToday(asset.id, prisma);
           if (!freeToday) {
             // Asset es premium (no está en dailyFreebie hoy)
             if (!lastSub) {
