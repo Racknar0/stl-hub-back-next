@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import { QdrantClient } from '@qdrant/js-client-rest';
 import qdrantMultimodalService from '../services/qdrantMultimodal.service.js';
 import { buildNsfwWhere } from '../middlewares/nsfwFilter.js';
+import { enrichFreebieStatus } from '../utils/freebieHelper.js';
 
 const prisma = new PrismaClient();
 const qdrantHost = process.env.QDRANT_HOST || '127.0.0.1';
@@ -162,7 +163,8 @@ export const searchByImageHandler = async (req, res) => {
       };
     }).filter(Boolean);
 
-    return res.json({ items, total: items.length });
+    const enriched = await enrichFreebieStatus(items, prisma);
+    return res.json({ items: enriched, total: enriched.length });
   } catch (error) {
     console.error('[AI MULTIMODAL] Error en búsqueda por imagen:', error?.message || error);
     return res.status(500).json({ message: error?.message || 'Error interno en búsqueda visual' });

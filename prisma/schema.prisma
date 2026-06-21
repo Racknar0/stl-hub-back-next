@@ -255,12 +255,29 @@ model asset {
   replicas  AssetReplica[]
   // Hashes por imagen para comparación de similitud
   imageHashes AssetImageHash[]
+  // Freebies diarios (tabla separada para no tocar asset en el cron)
+  dailyFreebies dailyFreebie[]
 
   @@index([accountId])
   @@index([status, createdAt(sort: Desc)])
   @@index([status, downloads(sort: Desc)])
   @@index([isPremium])
   @@map("asset")
+}
+
+// Freebies diarios: registra qué assets son gratuitos cada día.
+// Sustituye la rotación masiva de asset.isPremium por inserts/deletes ligeros.
+model dailyFreebie {
+  id        Int      @id @default(autoincrement())
+  assetId   Int
+  date      String   // Formato "YYYY-MM-DD"
+  createdAt DateTime @default(now())
+
+  asset asset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@unique([assetId, date])
+  @@index([date])
+  @@map("daily_freebie")
 }
 
 // Hash perceptual por imagen de asset para búsqueda de similitud escalable

@@ -16,9 +16,10 @@ export function getRandomizeFreebiesCountFromEnv(env = process.env) {
 }
 
 /**
- * Randomiza freebies:
- * - Marca todos los assets PUBLISHED como premium
- * - Selecciona N aleatorios y los deja como free (isPremium=false)
+ * Randomiza freebies usando la tabla dailyFreebie.
+ * - Limpia los freebies de hoy en dailyFreebie (idempotente)
+ * - Selecciona N assets publicados aleatorios y los inserta en dailyFreebie
+ * - NO modifica la tabla asset (cero impacto en SEO / I/O)
  */
 export async function randomizeFreebies({
   count,
@@ -45,11 +46,10 @@ export async function randomizeFreebies({
     const total = await client.asset.count({ where });
     if (total === 0) return { total: 0, selected: 0, count: effectiveN };
 
-    // Solo tocar los que realmente cambian (free -> premium) para evitar escrituras masivas innecesarias.
-    await client.asset.updateMany({
-      where: { ...where, isPremium: false },
-      data: { isPremium: true },
-    });
+    const today = new Date().toISOString().slice(0, 10);
+
+    // Limpiar freebies de hoy (idempotente para re-ejecuciones)
+    await client.dailyFreebie.deleteMany({ where: { date: today } });
 
     if (effectiveN <= 0) return { total, selected: 0, count: effectiveN };
 
@@ -65,9 +65,11 @@ export async function randomizeFreebies({
     }
 
     const pick = ids.slice(0, Math.min(effectiveN, ids.length));
-    await client.asset.updateMany({
-      where: { id: { in: pick }, isPremium: true },
-      data: { isPremium: false },
+
+    // Insertar los freebies de hoy en la tabla separada
+    await client.dailyFreebie.createMany({
+      data: pick.map((assetId) => ({ assetId, date: today })),
+      skipDuplicates: true,
     });
 
     return { total, selected: pick.length, count: effectiveN };

@@ -22,6 +22,7 @@ import { buildNsfwWhere, buildNsfwCategoryWhere, isAssetNSFW as isAssetNSFWBacke
 const prisma = new PrismaClient();
 import { randomizeFreebies, getRandomizeFreebiesCountFromEnv } from '../utils/randomizeFreebies.js';
 import { applyCategorySlugsOverrides } from '../utils/categoryHardOverrides.js';
+import { enrichFreebieStatus, isAssetFreeToday, getTodayDateStr } from '../utils/freebieHelper.js';
 
 
 const ASSET_META_AI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
@@ -738,10 +739,11 @@ export const listAssets = async (req, res) => {
                 { archiveName: { contains: qStr } },
             ];
         }
-        // plan=free|premium o isPremium=true|false
+        // plan=free|premium o isPremium=true|false → filtro via dailyFreebie
+        const todayStr = getTodayDateStr();
         const planStr = String(plan || '').toLowerCase();
-        if (planStr === 'free') where.isPremium = false;
-        else if (planStr === 'premium') where.isPremium = true;
+        if (planStr === 'free') where.dailyFreebies = { some: { date: todayStr } };
+        else if (planStr === 'premium') where.dailyFreebies = { none: { date: todayStr } };
 
         if (
             isPremium !== undefined &&
@@ -749,8 +751,8 @@ export const listAssets = async (req, res) => {
             String(isPremium).length
         ) {
             const b = String(isPremium).toLowerCase();
-            if (b === 'true') where.isPremium = true;
-            if (b === 'false') where.isPremium = false;
+            if (b === 'true') where.dailyFreebies = { none: { date: todayStr } };
+            if (b === 'false') where.dailyFreebies = { some: { date: todayStr } };
         }
 
         // Filtro por cuenta (ID directo o alias -> ID)
@@ -2230,7 +2232,8 @@ export const latestAssets = async (req, res) => {
             return { ...it, tagsEs, tagsEn };
         });
 
-        return res.json(enriched);
+        const withFreebie = await enrichFreebieStatus(enriched, prisma);
+        return res.json(withFreebie);
     } catch (e) {
         console.error('[ASSETS] latest error:', e);
         return res.status(500).json({ message: 'Error getting latest assets' });
@@ -2279,7 +2282,8 @@ export const mostDownloadedAssets = async (req, res) => {
             return { ...it, tagsEs, tagsEn };
         });
 
-        return res.json(enriched);
+        const withFreebie = await enrichFreebieStatus(enriched, prisma);
+        return res.json(withFreebie);
     } catch (e) {
         console.error('[ASSETS] mostDownloaded error:', e);
         return res
@@ -2645,15 +2649,16 @@ export const searchAssets = async (req, res) => {
     const nsfwWhere = buildNsfwWhere(req);
     const where = { status: 'PUBLISHED', ...nsfwWhere };
 
-    // Opcional: plan/isPremium (se respeta si lo usas en el front)
+    // Opcional: plan/isPremium → filtro via dailyFreebie
+    const todayStr = getTodayDateStr();
     const planStr = String(plan || '').toLowerCase();
-    if (planStr === 'free') where.isPremium = false;
-    else if (planStr === 'premium') where.isPremium = true;
+    if (planStr === 'free') where.dailyFreebies = { some: { date: todayStr } };
+    else if (planStr === 'premium') where.dailyFreebies = { none: { date: todayStr } };
 
     if (isPremium !== undefined && String(isPremium).length) {
       const b = String(isPremium).toLowerCase();
-      if (b === 'true') where.isPremium = true;
-      if (b === 'false') where.isPremium = false;
+      if (b === 'true') where.dailyFreebies = { none: { date: todayStr } };
+      if (b === 'false') where.dailyFreebies = { some: { date: todayStr } };
     }
 
     const andArr = [];
@@ -2785,6 +2790,9 @@ export const searchAssets = async (req, res) => {
                 return { ...rest, tagsEs, tagsEn };
             });
 
+            // Enriquecer con estado freebie calculado
+            const itemsWithFreebie = await enrichFreebieStatus(items, prisma);
+
             // --- AI Suggestions: second query with lower threshold ---
             let suggestions = [];
             try {
@@ -2817,7 +2825,7 @@ export const searchAssets = async (req, res) => {
                         allSugDb.push(...batch);
                     }
                     const sugById = new Map(allSugDb.map((it) => [Number(it.id), it]));
-                    suggestions = sugIds
+                    const rawSuggestions = sugIds
                         .map((id) => sugById.get(id))
                         .filter(Boolean)
                         .map((it) => {
@@ -2827,12 +2835,13 @@ export const searchAssets = async (req, res) => {
                                 : [];
                             return { ...it, tagsEs, tagsEn };
                         });
+                    suggestions = await enrichFreebieStatus(rawSuggestions, prisma);
                 }
             } catch (sugErr) {
                 console.warn('[SEARCH] AI suggestions error:', sugErr?.message);
             }
 
-            return res.json({ items, total, page, pageSize: size, hasMore, suggestions });
+            return res.json({ items: itemsWithFreebie, total, page, pageSize: size, hasMore, suggestions });
         }
 
         // --- total + página ---
@@ -2863,9 +2872,10 @@ export const searchAssets = async (req, res) => {
                 return { ...rest, tagsEs, tagsEn };
             });
 
+            const itemsWithFreebie = await enrichFreebieStatus(items, prisma);
             const hasMore = (page + 1) * size < total;
 
-            return res.json({ items, total, page, pageSize: size, hasMore });
+            return res.json({ items: itemsWithFreebie, total, page, pageSize: size, hasMore });
         }
 
         // Rama para qLower: realizar 3 consultas separadas y concatenar
@@ -3067,7 +3077,8 @@ export const searchAssets = async (req, res) => {
                         return { ...it, tagsEs, tagsEn };
                     });
 
-                    return res.json({ items, total: mergedTotal, page, pageSize: size, hasMore: mergedHasMore, aiFallback: true });
+                    const itemsWithFreebie = await enrichFreebieStatus(items, prisma);
+                    return res.json({ items: itemsWithFreebie, total: mergedTotal, page, pageSize: size, hasMore: mergedHasMore, aiFallback: true });
                 }
             } catch (fbErr) {
                 console.warn('[ASSETS] AI fallback error (degrading gracefully):', fbErr?.message || fbErr);
@@ -3116,7 +3127,7 @@ export const searchAssets = async (req, res) => {
                         allSugDb.push(...batch);
                     }
                     const sugById = new Map(allSugDb.map((it) => [Number(it.id), it]));
-                    suggestions = sugIds
+                    const rawSuggestions = sugIds
                         .map((id) => sugById.get(id))
                         .filter(Boolean)
                         .map((it) => {
@@ -3126,13 +3137,16 @@ export const searchAssets = async (req, res) => {
                                 : [];
                             return { ...it, tagsEs, tagsEn };
                         });
+                    suggestions = await enrichFreebieStatus(rawSuggestions, prisma);
                 }
             } catch (sugErr) {
                 console.warn('[SEARCH] AI suggestions error (normal):', sugErr?.message);
             }
         }
 
-        return res.json({ items, total, page, pageSize: size, hasMore, suggestions });
+        const itemsWithFreebie = await enrichFreebieStatus(items, prisma);
+        const suggestionsWithFreebie = suggestions.length > 0 ? await enrichFreebieStatus(suggestions, prisma) : suggestions;
+        return res.json({ items: itemsWithFreebie, total, page, pageSize: size, hasMore, suggestions: suggestionsWithFreebie });
 
         // (la lógica de respuesta ya fue manejada en las ramas anteriores)
   } catch (e) {
@@ -3152,7 +3166,7 @@ export const requestDownload = async (req, res) => {
     // 1) Cargar asset primero (fail-fast)
     const asset = await prisma.asset.findUnique({
       where: { id },
-      select: { id: true, status: true, isPremium: true, megaLink: true, megaLinkAlive: true , megaLinkCheckedAt: true, title: true },
+      select: { id: true, status: true, megaLink: true, megaLinkAlive: true , megaLinkCheckedAt: true, title: true },
     });
 
     if (!asset) return res.status(404).json({ message: 'Asset not found' });
@@ -3313,8 +3327,9 @@ export const requestDownload = async (req, res) => {
           limit = limitFreePass;
           allowed = true;
         } else {
-          if (asset.isPremium) {
-            // Modo Normal: no se permiten descargas premium para usuarios gratuitos
+          const freeToday = await isAssetFreeToday(asset.id, prisma);
+          if (!freeToday) {
+            // Asset es premium (no está en dailyFreebie hoy)
             if (!lastSub) {
               return res.status(403).json({ code: 'NO_SUB', message: 'Subscription required' });
             }
@@ -3482,8 +3497,12 @@ export const getAssetBySlug = async (req, res) => {
                 delete cleanSafe.megaLink;
             }
 
+            // Calcular isPremium desde dailyFreebie en vez del campo legacy
+            const freeToday = await isAssetFreeToday(a.id, prisma);
+
             return res.json({
                 ...cleanSafe,
+                isPremium: !freeToday,
                 tagsEs,
                 tagsEn,
                 unpublished: a.status !== 'PUBLISHED',
