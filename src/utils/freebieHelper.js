@@ -40,7 +40,7 @@ export async function enrichFreebieStatus(assets, prisma) {
 
   return assets.map((a) => ({
     ...a,
-    isPremium: !freeSet.has(a.id),
+    isPremium: a.isPremium === false ? false : !freeSet.has(a.id),
   }));
 }
 

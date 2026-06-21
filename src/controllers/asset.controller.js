@@ -3502,7 +3502,7 @@ export const getAssetBySlug = async (req, res) => {
 
             return res.json({
                 ...cleanSafe,
-                isPremium: !freeToday,
+                isPremium: cleanSafe.isPremium === false ? false : !freeToday,
                 tagsEs,
                 tagsEn,
                 unpublished: a.status !== 'PUBLISHED',
