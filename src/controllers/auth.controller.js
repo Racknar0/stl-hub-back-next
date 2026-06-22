@@ -5,6 +5,7 @@ import { generateRandomToken } from '../utils/cryptoUtils.js';
 import { generateJWT } from '../utils/jwtUtils.js';
 import { pickTrackingForDb, resolveMarketingCampaignId, resolveTrackingForRequest } from '../utils/attribution.js';
 import { sendTikTokEvent } from '../utils/tiktokCapi.js';
+import { sendMetaEvent } from '../utils/metaCapi.js';
 import { OAuth2Client } from 'google-auth-library';
 import crypto from 'crypto';
 
@@ -231,6 +232,15 @@ export const googleLogin = async (req, res) => {
 
             // Evento de Servidor: TikTok CAPI (CompleteRegistration)
             sendTikTokEvent({
+                eventName: 'CompleteRegistration',
+                eventId: eventId || `reg-g-${user.id}`,
+                userEmail: email,
+                userIp: req.ip,
+                userAgent: req.headers['user-agent']
+            });
+
+            // Evento de Servidor: Meta CAPI (CompleteRegistration)
+            sendMetaEvent({
                 eventName: 'CompleteRegistration',
                 eventId: eventId || `reg-g-${user.id}`,
                 userEmail: email,
@@ -685,6 +695,15 @@ export const register = async (req, res) => {
 
         // Evento de Servidor: TikTok CAPI (CompleteRegistration)
         sendTikTokEvent({
+            eventName: 'CompleteRegistration',
+            eventId: eventId || `reg-${user.id}`,
+            userEmail: email,
+            userIp: req.ip,
+            userAgent: req.headers['user-agent']
+        });
+
+        // Evento de Servidor: Meta CAPI (CompleteRegistration)
+        sendMetaEvent({
             eventName: 'CompleteRegistration',
             eventId: eventId || `reg-${user.id}`,
             userEmail: email,

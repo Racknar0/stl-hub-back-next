@@ -11,6 +11,7 @@ import {
 } from '../utils/paymentCurrency.js';
 import { dispatchSaleNotification } from '../utils/saleNotifications.js';
 import { sendTikTokEvent } from '../utils/tiktokCapi.js';
+import { sendMetaEvent } from '../utils/metaCapi.js';
 
 const prisma = new PrismaClient();
 
@@ -200,6 +201,17 @@ async function capturePayPalOrder(req, res) {
 
             // Evento de Servidor: TikTok CAPI (CompletePayment)
             sendTikTokEvent({
+                eventName: 'CompletePayment',
+                eventId: captureResult.id,
+                userEmail: user?.email,
+                userIp: req.ip,
+                userAgent: req.headers['user-agent'],
+                value: paymentAmount,
+                currency: paymentCurrency
+            });
+
+            // Evento de Servidor: Meta CAPI (CompletePayment)
+            sendMetaEvent({
                 eventName: 'CompletePayment',
                 eventId: captureResult.id,
                 userEmail: user?.email,
