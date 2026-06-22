@@ -415,6 +415,12 @@ router.get('/search-assets', requireAuth, requireAdmin, async (req, res) => {
 
     let assets = [];
 
+    // Get list of asset IDs already in the Pinterest queue (either published or pending)
+    const uploadedPins = await prisma.pinterestPinQueue.findMany({
+      select: { assetId: true }
+    });
+    const uploadedIds = Array.from(new Set(uploadedPins.map(p => p.assetId)));
+
     if (mode === 'id') {
       // Support comma-separated IDs: "12878, 15432, 9876"
       const ids = String(q).split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
@@ -431,7 +437,7 @@ router.get('/search-assets', requireAuth, requireAdmin, async (req, res) => {
 
       assets = await prisma.asset.findMany({
         where: {
-          id: { gte: startId },
+          id: { gte: startId, notIn: uploadedIds },
           status: 'PUBLISHED'
         },
         orderBy: { id: 'asc' },
@@ -452,7 +458,10 @@ router.get('/search-assets', requireAuth, requireAdmin, async (req, res) => {
         if (qdrantResults && qdrantResults.length > 0) {
           const ids = qdrantResults.map(r => Number(r.id)).filter(Boolean);
           const dbAssets = await prisma.asset.findMany({
-            where: { id: { in: ids }, status: 'PUBLISHED' },
+            where: {
+              id: { in: ids, notIn: uploadedIds },
+              status: 'PUBLISHED'
+            },
             include: { categories: true, tags: true }
           });
 
