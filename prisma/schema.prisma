@@ -68,6 +68,12 @@ model user {
   brokenReports     BrokenReport[]
   userNotifications UserNotification[]
 
+  // IP y país de tracking (registro + último login)
+  registerIp       String? @db.VarChar(45)
+  registerCountry  String? @db.VarChar(2)
+  lastLoginIp      String? @db.VarChar(45)
+  lastLoginCountry String? @db.VarChar(2)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

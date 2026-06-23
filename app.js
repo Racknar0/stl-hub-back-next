@@ -10,6 +10,9 @@ import { log } from './src/utils/logger.js';
 
 const app = express();
 
+// Confiamos en el proxy (Cloudflare → Nginx → Express) para obtener la IP real del cliente
+app.set('trust proxy', true);
+
 // CORS robusto: permitir orígenes configurables y manejar preflight
 const allowedOrigins = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
 const corsOptions = {

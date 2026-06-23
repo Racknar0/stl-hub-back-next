@@ -6,6 +6,7 @@ import { generateJWT } from '../utils/jwtUtils.js';
 import { pickTrackingForDb, resolveMarketingCampaignId, resolveTrackingForRequest } from '../utils/attribution.js';
 import { sendTikTokEvent } from '../utils/tiktokCapi.js';
 import { sendMetaEvent } from '../utils/metaCapi.js';
+import { getClientIp, getCountryFromIp } from '../utils/geoip.js';
 import { OAuth2Client } from 'google-auth-library';
 import crypto from 'crypto';
 
@@ -119,11 +120,17 @@ export const login = async (req, res) => {
             ? generateJWT({ id: user.id, roleId: user.roleId }, null)
             : generateJWT({ id: user.id, roleId: user.roleId });
 
-        // Actualizar lastLogin en la base de datos
+        // Actualizar lastLogin + IP/País en la base de datos
         try {
+            const clientIp = getClientIp(req);
+            const clientCountry = getCountryFromIp(clientIp);
             await prisma.user.update({
                 where: { id: user.id },
-                data: { lastLogin: new Date() },
+                data: {
+                    lastLogin: new Date(),
+                    lastLoginIp: clientIp,
+                    lastLoginCountry: clientCountry,
+                },
             });
         } catch (e) {
             // No interrumpir el login si por alguna razón no se puede guardar la fecha
@@ -187,9 +194,15 @@ export const googleLogin = async (req, res) => {
                 : generateJWT({ id: user.id, roleId: user.roleId });
                 
             try {
+                const clientIp = getClientIp(req);
+                const clientCountry = getCountryFromIp(clientIp);
                 await prisma.user.update({
                     where: { id: user.id },
-                    data: { lastLogin: new Date() },
+                    data: {
+                        lastLogin: new Date(),
+                        lastLoginIp: clientIp,
+                        lastLoginCountry: clientCountry,
+                    },
                 });
             } catch (e) {
                 console.warn('Could not update lastLogin for user', user.id, e.message);
@@ -215,6 +228,8 @@ export const googleLogin = async (req, res) => {
             const marketingCampaignId = marketingCampaignIdFromTracking || trackingResolved?.marketingCampaignId || null;
             const trackingDb = pickTrackingForDb(tracking);
             const trackingNow = tracking ? new Date() : null;
+            const clientIpReg = getClientIp(req);
+            const clientCountryReg = getCountryFromIp(clientIpReg);
 
             user = await prisma.user.create({
                 data: {
@@ -227,6 +242,8 @@ export const googleLogin = async (req, res) => {
                     ...trackingDb,
                     utmFirstAt: trackingNow,
                     utmLastAt: trackingNow,
+                    registerIp: clientIpReg,
+                    registerCountry: clientCountryReg,
                 },
             });
 
@@ -250,9 +267,15 @@ export const googleLogin = async (req, res) => {
             
             const jwtToken = generateJWT({ id: user.id, roleId: user.roleId });
             try {
+                const clientIpLogin = getClientIp(req);
+                const clientCountryLogin = getCountryFromIp(clientIpLogin);
                 await prisma.user.update({
                     where: { id: user.id },
-                    data: { lastLogin: new Date() },
+                    data: {
+                        lastLogin: new Date(),
+                        lastLoginIp: clientIpLogin,
+                        lastLoginCountry: clientCountryLogin,
+                    },
                 });
             } catch (e) {
                 console.warn('Could not update lastLogin for user', user.id, e.message);
@@ -607,6 +630,8 @@ export const registerUserSale = async (req, res) => {
         const marketingCampaignId = marketingCampaignIdFromTracking || trackingResolved?.marketingCampaignId || null;
         const trackingDb = pickTrackingForDb(tracking);
         const trackingNow = tracking ? new Date() : null;
+        const clientIp = getClientIp(req);
+        const clientCountry = getCountryFromIp(clientIp);
 
         // Transacción: crear usuario (activo) y su suscripción
         const result = await prisma.$transaction(async (tx) => {
@@ -620,6 +645,8 @@ export const registerUserSale = async (req, res) => {
                     ...trackingDb,
                     utmFirstAt: trackingNow,
                     utmLastAt: trackingNow,
+                    registerIp: clientIp,
+                    registerCountry: clientCountry,
                 },
             });
 
@@ -676,6 +703,8 @@ export const register = async (req, res) => {
         const marketingCampaignId = marketingCampaignIdFromTracking || trackingResolved?.marketingCampaignId || null;
         const trackingDb = pickTrackingForDb(tracking);
         const trackingNow = tracking ? new Date() : null;
+        const clientIp = getClientIp(req);
+        const clientCountry = getCountryFromIp(clientIp);
 
         // Crea el usuario
         const user = await prisma.user.create({
@@ -690,6 +719,8 @@ export const register = async (req, res) => {
                 ...trackingDb,
                 utmFirstAt: trackingNow,
                 utmLastAt: trackingNow,
+                registerIp: clientIp,
+                registerCountry: clientCountry,
             },
         });
 

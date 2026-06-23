@@ -39,7 +39,7 @@ export const createUser = async (req, res) => {
 export const getUsers = async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page) || 1, 1);
-    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize) || 10, 1), 100);
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize) || 10, 1), 1000);
     const q = (req.query.q || '').trim();
 
     const where = q ? { email: { contains: q } } : {};
@@ -56,6 +56,10 @@ export const getUsers = async (req, res) => {
           isActive: true,
           createdAt: true,
           updatedAt: true,
+          registerIp: true,
+          registerCountry: true,
+          lastLoginIp: true,
+          lastLoginCountry: true,
           subscriptions: {
             where: { status: 'ACTIVE' },
             orderBy: { startedAt: 'desc' },
@@ -127,6 +131,10 @@ export const getUserById = async (req, res) => {
         createdAt: true,
         updatedAt: true,
         roleId: true,
+        registerIp: true,
+        registerCountry: true,
+        lastLoginIp: true,
+        lastLoginCountry: true,
         // Attribution
         utmSource: true,
         utmMedium: true,
