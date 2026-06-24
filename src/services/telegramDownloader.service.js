@@ -301,6 +301,15 @@ class TelegramDownloaderService {
         let messagesScanned = 0;
         const maxLimit = 3000;
 
+        if (onProgress) {
+            onProgress({
+                type: 'scan_progress',
+                channelName,
+                scanned: 0,
+                maxLimit
+            });
+        }
+
         while (messagesScanned < maxLimit) {
             const chunk = await this.client.getMessages(channelName, {
                 limit: Math.min(100, maxLimit - messagesScanned),
@@ -314,15 +323,6 @@ class TelegramDownloaderService {
                 messagesScanned++;
                 currentOffsetId = msg.id;
 
-                if (onProgress && messagesScanned % 20 === 0) {
-                    onProgress({
-                        type: 'scan_progress',
-                        channelName,
-                        scanned: messagesScanned,
-                        maxLimit
-                    });
-                }
-
                 if (!msg.media) continue;
                 fileCount++;
                 if (msg.media.document) {
@@ -330,6 +330,15 @@ class TelegramDownloaderService {
                 } else {
                     totalBytes += this.estimateMediaSizeBytes(msg);
                 }
+            }
+
+            if (onProgress) {
+                onProgress({
+                    type: 'scan_progress',
+                    channelName,
+                    scanned: messagesScanned,
+                    maxLimit
+                });
             }
         }
         const totalMessages = messagesScanned;
@@ -356,6 +365,15 @@ class TelegramDownloaderService {
         let messagesScanned = 0;
         const maxLimit = 5000;
 
+        if (onProgress) {
+            onProgress({
+                type: 'scan_progress',
+                channelName,
+                scanned: 0,
+                maxLimit
+            });
+        }
+
         while (messagesScanned < maxLimit) {
             const chunk = await this.client.getMessages(channelName, {
                 limit: Math.min(100, maxLimit - messagesScanned),
@@ -368,15 +386,6 @@ class TelegramDownloaderService {
             for (const msg of chunk) {
                 messagesScanned++;
                 currentOffsetId = msg.id;
-
-                if (onProgress && messagesScanned % 20 === 0) {
-                    onProgress({
-                        type: 'scan_progress',
-                        channelName,
-                        scanned: messagesScanned,
-                        maxLimit
-                    });
-                }
 
                 if (!msg.media) continue;
                 
@@ -392,6 +401,15 @@ class TelegramDownloaderService {
                 cumSize += size;
                 lastFitId = msg.id;
                 fileCount++;
+            }
+
+            if (onProgress) {
+                onProgress({
+                    type: 'scan_progress',
+                    channelName,
+                    scanned: messagesScanned,
+                    maxLimit
+                });
             }
 
             if (shouldStop) break;
