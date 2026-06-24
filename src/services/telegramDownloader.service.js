@@ -295,26 +295,36 @@ class TelegramDownloaderService {
             return { newFiles: 0, totalMessages: 0, totalSize: '0 B', totalSizeBytes: 0, maxId };
         }
 
-        // Fetch up to 3000 messages from startFrom forward
-        const allMessages = await this.client.getMessages(channelName, {
-            limit: 3000,
-            offsetId: startFrom,
-            reverse: true,
-        });
-
+        let currentOffsetId = startFrom - 1;
         let fileCount = 0;
         let totalBytes = 0;
-        const totalMessages = allMessages ? allMessages.length : 0;
+        let messagesScanned = 0;
+        const maxLimit = 3000;
 
-        for (const msg of (allMessages || [])) {
-            if (!msg.media) continue;
-            fileCount++;
-            if (msg.media.document) {
-                totalBytes += Number(msg.media.document.size || 0);
-            } else {
-                totalBytes += this.estimateMediaSizeBytes(msg);
+        while (messagesScanned < maxLimit) {
+            const chunk = await this.client.getMessages(channelName, {
+                limit: Math.min(100, maxLimit - messagesScanned),
+                offsetId: currentOffsetId,
+                reverse: true,
+            });
+
+            if (!chunk || chunk.length === 0) break;
+
+            for (const msg of chunk) {
+                messagesScanned++;
+                currentOffsetId = msg.id;
+                if (!msg.media) continue;
+                fileCount++;
+                if (msg.media.document) {
+                    totalBytes += Number(msg.media.document.size || 0);
+                } else {
+                    totalBytes += this.estimateMediaSizeBytes(msg);
+                }
             }
+
+            if (chunk.length < Math.min(100, maxLimit - messagesScanned)) break;
         }
+        const totalMessages = messagesScanned;
 
         return {
             newFiles: fileCount,
@@ -330,31 +340,48 @@ class TelegramDownloaderService {
         await this.initClient();
 
         const maxBytes = maxGB * 1024 * 1024 * 1024;
-        // Fetch up to 5000 messages from startId forward
-        const messages = await this.client.getMessages(channelName, {
-            limit: 5000,
-            offsetId: startId,
-            reverse: true,
-        });
-
-        if (!messages || messages.length === 0) {
-            return { suggestedEndId: startId, totalFiles: 0, totalSizeStr: '0 B', totalSizeBytes: 0 };
-        }
-
+        let currentOffsetId = startId - 1; 
         let cumSize = 0;
         let lastFitId = startId;
         let fileCount = 0;
+        let shouldStop = false;
+        let messagesScanned = 0;
+        const maxLimit = 5000;
 
-        for (const msg of messages) {
-            if (!msg.media) continue;
-            let size = 0;
-            if (msg.media.document) size = Number(msg.media.document.size || 0);
-            else size = this.estimateMediaSizeBytes(msg);
+        while (messagesScanned < maxLimit) {
+            const chunk = await this.client.getMessages(channelName, {
+                limit: Math.min(100, maxLimit - messagesScanned),
+                offsetId: currentOffsetId,
+                reverse: true
+            });
 
-            if (cumSize + size > maxBytes) break;
-            cumSize += size;
-            lastFitId = msg.id;
-            fileCount++;
+            if (!chunk || chunk.length === 0) break;
+
+            for (const msg of chunk) {
+                messagesScanned++;
+                currentOffsetId = msg.id;
+                if (!msg.media) continue;
+                
+                let size = 0;
+                if (msg.media.document) size = Number(msg.media.document.size || 0);
+                else size = this.estimateMediaSizeBytes(msg);
+
+                if (cumSize + size > maxBytes) {
+                    shouldStop = true;
+                    break;
+                }
+                
+                cumSize += size;
+                lastFitId = msg.id;
+                fileCount++;
+            }
+
+            if (shouldStop) break;
+            if (chunk.length < Math.min(100, maxLimit - messagesScanned)) break;
+        }
+        
+        if (fileCount === 0 && cumSize === 0) {
+            return { suggestedEndId: startId, totalFiles: 0, totalSizeStr: '0 B', totalSizeBytes: 0 };
         }
 
         return {
@@ -541,14 +568,39 @@ class TelegramDownloaderService {
             await this.initClient();
             this.emitProgress({ type: 'info', message: `Calculando archivos para ${channelName}...` });
 
-            const limit = endId - startId + 1;
-            const messages = await this.client.getMessages(channelName, {
-                limit: limit,
-                offsetId: startId, // offsetId is actually where it starts getting older messages, so we might need reverse: true
-                reverse: true,
-            });
+            const messages = [];
+            let currentOffsetId = endId + 1;
+            
+            while (true) {
+                if (this.shouldCancel) break;
+                
+                const chunk = await this.client.getMessages(channelName, {
+                    limit: 100,
+                    offsetId: currentOffsetId,
+                    reverse: false // Fetches newest to oldest cleanly
+                });
+                
+                if (!chunk || chunk.length === 0) break;
+                
+                let reachedStart = false;
+                for (const msg of chunk) {
+                    if (msg.id < startId) {
+                        reachedStart = true;
+                        break;
+                    }
+                    if (msg.id <= endId) {
+                        messages.push(msg);
+                    }
+                    currentOffsetId = msg.id;
+                }
+                
+                if (reachedStart) break;
+            }
+            
+            // Revertir para procesar en orden cronológico (de startId a endId)
+            messages.reverse();
 
-            if (!messages || messages.length === 0) {
+            if (messages.length === 0) {
                 this.emitProgress({ type: 'error', message: 'No se encontraron mensajes en ese rango.' });
                 return;
             }
@@ -557,7 +609,6 @@ class TelegramDownloaderService {
             const downloadList = [];
 
             for (const msg of messages) {
-                if (msg.id > endId) break;
                 if (msg.media) {
                     let size = 0;
                     let originalName = '';
