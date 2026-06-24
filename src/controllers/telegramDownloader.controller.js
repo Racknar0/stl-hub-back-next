@@ -199,7 +199,13 @@ export const quickScan = async (req, res) => {
         const { channelName } = req.query;
         if (!channelName) return res.status(400).json({ success: false, message: 'channelName required' });
 
-        await telegramCheckerService.syncChannelData(channelName);
+        broadcastToClients({ type: 'scan_start', channelName });
+        
+        await telegramCheckerService.syncChannelData(channelName, (prog) => {
+            broadcastToClients(prog);
+        });
+        
+        broadcastToClients({ type: 'scan_finish', channelName });
 
         const chan = await prisma.telegramChannel.findUnique({ where: { name: channelName } });
         if (!chan) {
@@ -250,7 +256,18 @@ export const scanWithLimit = async (req, res) => {
         const { channelName, startId, maxGB } = req.query;
         if (!channelName || !startId) return res.status(400).json({ success: false, message: 'Faltan parámetros' });
         
-        const result = await telegramDownloaderService.scanWithLimit(channelName, Number(startId), Number(maxGB) || 150);
+        broadcastToClients({ type: 'scan_start', channelName });
+        
+        const result = await telegramDownloaderService.scanWithLimit(
+            channelName, 
+            Number(startId), 
+            Number(maxGB) || 150,
+            (prog) => {
+                broadcastToClients(prog);
+            }
+        );
+        
+        broadcastToClients({ type: 'scan_finish', channelName });
         res.json({ success: true, ...result });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });

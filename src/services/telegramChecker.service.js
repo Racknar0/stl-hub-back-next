@@ -99,7 +99,7 @@ class TelegramCheckerService {
         }
     }
 
-    async syncChannelData(channelName) {
+    async syncChannelData(channelName, onProgress = null) {
         const channel = await prisma.telegramChannel.findUnique({ where: { name: channelName } });
         if (!channel) return;
 
@@ -137,7 +137,7 @@ class TelegramCheckerService {
             }
 
             // 3. Ejecutar escaneo rápido de archivos pendientes
-            const scan = await telegramDownloaderService.quickScanFiles(channelName);
+            const scan = await telegramDownloaderService.quickScanFiles(channelName, onProgress);
             
             await prisma.telegramChannel.update({
                 where: { name: channelName },
