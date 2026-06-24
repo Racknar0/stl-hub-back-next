@@ -321,8 +321,6 @@ class TelegramDownloaderService {
                     totalBytes += this.estimateMediaSizeBytes(msg);
                 }
             }
-
-            if (chunk.length < Math.min(100, maxLimit - messagesScanned)) break;
         }
         const totalMessages = messagesScanned;
 
@@ -377,7 +375,6 @@ class TelegramDownloaderService {
             }
 
             if (shouldStop) break;
-            if (chunk.length < Math.min(100, maxLimit - messagesScanned)) break;
         }
         
         if (fileCount === 0 && cumSize === 0) {
