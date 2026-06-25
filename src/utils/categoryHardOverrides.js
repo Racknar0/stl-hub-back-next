@@ -10,9 +10,9 @@ export const categoryHardOverrideRules = [
     slug: 'busto'
   },
   {
-    regex: /(flexi|flexible|articulado|articuled|articulated)/i,
+    regex: /(flexi|felxi|flexible|articulado|articuled|articulated)/i,
     categoryTerms: ['articulados', 'articulado', 'articulated'],
-    tagTerms: ['articulado', 'articulated', 'flexible', 'flexi'],
+    tagTerms: ['articulado', 'articulated', 'flexible', 'flexi', 'felxi'],
     slug: 'articulados'
   },
   {
