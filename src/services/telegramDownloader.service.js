@@ -280,6 +280,7 @@ class TelegramDownloaderService {
 
     // Quick scan that counts actual FILES (not text messages)
     async quickScanFiles(channelName, onProgress = null) {
+        this.shouldCancel = false;
         await this.initClient();
 
         const lastDownload = await this.getLastDownloadForChannel(channelName);
@@ -299,7 +300,7 @@ class TelegramDownloaderService {
         let fileCount = 0;
         let totalBytes = 0;
         let messagesScanned = 0;
-        const maxLimit = 3000;
+        const maxLimit = 200000;
 
         if (onProgress) {
             onProgress({
@@ -311,6 +312,7 @@ class TelegramDownloaderService {
         }
 
         while (messagesScanned < maxLimit) {
+            if (this.shouldCancel) break;
             const chunk = await this.client.getMessages(channelName, {
                 limit: Math.min(100, maxLimit - messagesScanned),
                 offsetId: currentOffsetId,
@@ -354,6 +356,7 @@ class TelegramDownloaderService {
 
     // Scan messages to calculate how many fit within maxGB
     async scanWithLimit(channelName, startId, maxGB, onProgress = null) {
+        this.shouldCancel = false;
         await this.initClient();
 
         const maxBytes = maxGB * 1024 * 1024 * 1024;
@@ -363,7 +366,7 @@ class TelegramDownloaderService {
         let fileCount = 0;
         let shouldStop = false;
         let messagesScanned = 0;
-        const maxLimit = 5000;
+        const maxLimit = 200000;
 
         if (onProgress) {
             onProgress({
@@ -375,6 +378,7 @@ class TelegramDownloaderService {
         }
 
         while (messagesScanned < maxLimit) {
+            if (this.shouldCancel) break;
             const chunk = await this.client.getMessages(channelName, {
                 limit: Math.min(100, maxLimit - messagesScanned),
                 offsetId: currentOffsetId,
