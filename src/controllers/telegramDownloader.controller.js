@@ -318,6 +318,10 @@ export const downloadStatus = (req, res) => {
 // --- SSE (Server-Sent Events) ---
 let clients = [];
 
+export const broadcastToClients = (data) => {
+    clients.forEach(client => client.write(`data: ${JSON.stringify(data)}\n\n`));
+};
+
 export const streamProgress = (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
