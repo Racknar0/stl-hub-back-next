@@ -10,6 +10,8 @@ import { getClientIp, getCountryFromIp } from '../utils/geoip.js';
 import { OAuth2Client } from 'google-auth-library';
 import crypto from 'crypto';
 
+import { syncContactToBrevo } from '../utils/brevo.js';
+
 const prisma = new PrismaClient();
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -186,6 +188,24 @@ export const googleLogin = async (req, res) => {
                     where: { id: user.id },
                     data: { isActive: true, activationToken: null }
                 });
+
+                // Sync to Brevo in real-time
+                syncContactToBrevo(user.email, user.language || 'es', user.createdAt).catch(async (err) => {
+                    console.error('[BREVO-SYNC] Error syncing user to Brevo on Google login activation:', err.message);
+                    try {
+                        await prisma.notification.create({
+                            data: {
+                                title: 'Error de Brevo - Sincronización',
+                                body: `Fallo al sincronizar al usuario ${user.email} con Brevo en el login de Google.\nDetalle: ${err.message}`,
+                                type: 'MAIL',
+                                typeStatus: 'ERROR',
+                                status: 'UNREAD',
+                            }
+                        });
+                    } catch (notifErr) {
+                        console.error('Failed to create Brevo error notification:', notifErr.message);
+                    }
+                });
             }
             
             const isAdmin = Number(user.roleId) === 2;
@@ -245,6 +265,24 @@ export const googleLogin = async (req, res) => {
                     registerIp: clientIpReg,
                     registerCountry: clientCountryReg,
                 },
+            });
+
+            // Sync to Brevo in real-time (don't await so it doesn't block response)
+            syncContactToBrevo(email, language, new Date()).catch(async (err) => {
+                console.error('[BREVO-SYNC] Error syncing user to Brevo in googleLogin:', err.message);
+                try {
+                    await prisma.notification.create({
+                        data: {
+                            title: 'Error de Brevo - Sincronización',
+                            body: `Fallo al registrar usuario ${email} en Brevo durante el registro de Google.\nDetalle: ${err.message}`,
+                            type: 'MAIL',
+                            typeStatus: 'ERROR',
+                            status: 'UNREAD',
+                        }
+                    });
+                } catch (notifErr) {
+                    console.error('Failed to create Brevo error notification:', notifErr.message);
+                }
             });
 
             // Evento de Servidor: TikTok CAPI (CompleteRegistration)
@@ -662,6 +700,24 @@ export const registerUserSale = async (req, res) => {
             return { user, subscription };
         });
 
+        // Sync to Brevo in real-time (don't await so it doesn't block response)
+        syncContactToBrevo(result.user.email, result.user.language || 'es', now).catch(async (err) => {
+            console.error('[BREVO-SYNC] Error syncing user to Brevo in registerUserSale:', err.message);
+            try {
+                await prisma.notification.create({
+                    data: {
+                        title: 'Error de Brevo - Sincronización',
+                        body: `Fallo al registrar usuario ${result.user.email} en Brevo durante el registro por venta.\nDetalle: ${err.message}`,
+                        type: 'MAIL',
+                        typeStatus: 'ERROR',
+                        status: 'UNREAD',
+                    }
+                });
+            } catch (notifErr) {
+                console.error('Failed to create Brevo error notification:', notifErr.message);
+            }
+        });
+
         return res.status(201).json({
             message: 'User registered successfully',
             user: { id: result.user.id, email: result.user.email },
@@ -986,6 +1042,24 @@ export const activateAccount = async (req, res) => {
         await prisma.user.update({
             where: { id: user.id },
             data: { isActive: true, activationToken: null },
+        });
+
+        // Sync to Brevo in real-time on successful activation
+        syncContactToBrevo(user.email, user.language || 'es', new Date()).catch(async (err) => {
+            console.error('[BREVO-SYNC] Error syncing user to Brevo on activateAccount:', err.message);
+            try {
+                await prisma.notification.create({
+                    data: {
+                        title: 'Error de Brevo - Sincronización',
+                        body: `Fallo al sincronizar al usuario ${user.email} con Brevo tras activar su cuenta.\nDetalle: ${err.message}`,
+                        type: 'MAIL',
+                        typeStatus: 'ERROR',
+                        status: 'UNREAD',
+                    }
+                });
+            } catch (notifErr) {
+                console.error('Failed to create Brevo error notification:', notifErr.message);
+            }
         });
 
         // Auto-redeem gift code if provided
