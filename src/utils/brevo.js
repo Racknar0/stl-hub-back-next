@@ -8,9 +8,9 @@
  * @param {Date} [registrationDate] Optional date of registration, defaults to now
  */
 export async function syncContactToBrevo(email, language, registrationDate = new Date()) {
-    const apiKey = process.env.EMAIL_PASS;
+    const apiKey = process.env.BREVO_API_KEY;
     if (!apiKey) {
-        console.warn('[BREVO-SYNC] No EMAIL_PASS API key found in environment.');
+        console.warn('[BREVO-SYNC] No BREVO_API_KEY API key found in environment.');
         return;
     }
 
