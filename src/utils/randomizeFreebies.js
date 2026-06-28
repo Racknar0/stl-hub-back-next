@@ -46,7 +46,11 @@ export async function randomizeFreebies({
     const total = await client.asset.count({ where });
     if (total === 0) return { total: 0, selected: 0, count: effectiveN };
 
-    const today = new Date().toISOString().slice(0, 10);
+    const d = new Date();
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const today = `${year}-${month}-${day}`;
 
     // Limpiar freebies de hoy (idempotente para re-ejecuciones)
     await client.dailyFreebie.deleteMany({ where: { date: today } });
