@@ -1375,6 +1375,34 @@ async function processBackupsForCompletedItem(item) {
           },
         })
 
+        // Registrar/actualizar réplica en BD para que el sistema de restauración pueda encontrarla
+        const remoteFolder = path.posix.join((backup.baseFolder || '/').replace(/\\/g, '/'), asset.slug)
+        try {
+          const existingReplica = await prisma.assetReplica.findFirst({
+            where: { assetId: asset.id, accountId: backup.id },
+          })
+          if (!existingReplica) {
+            await prisma.assetReplica.create({
+              data: {
+                assetId: asset.id,
+                accountId: backup.id,
+                status: 'COMPLETED',
+                remotePath: remoteFolder,
+                startedAt: new Date(),
+                finishedAt: new Date(),
+              },
+            })
+          } else {
+            await prisma.assetReplica.update({
+              where: { id: existingReplica.id },
+              data: { status: 'COMPLETED', remotePath: remoteFolder, finishedAt: new Date() },
+            })
+          }
+          console.log(`[BATCH][BACKUP][REPLICA] assetReplica registrada asset=${asset.id} backup=${backup.id}`)
+        } catch (replicaErr) {
+          console.warn(`[BATCH][BACKUP][REPLICA][WARN] No se pudo registrar réplica asset=${asset.id} backup=${backup.id}: ${replicaErr.message}`)
+        }
+
         // Mantener storage de backups sincronizado tras cada transacción de subida.
         try {
           await refreshMainAccountStorageMetrics(backup, `item=${item.id} phase=backup acc=${backup.id}`)
