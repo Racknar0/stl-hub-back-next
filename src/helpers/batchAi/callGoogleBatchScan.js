@@ -709,7 +709,7 @@ async function classifySingleItem(ai, payload, item) {
     '- Si es una figura para hacer algo especifico es un gadget',
     '- Si es un vaso o taza la daras la categoria mug',
     '- Si es algo relacionado con musica le daras categoria musica',
-    '- Si es algun personaje o algo relacionado con videojuegos debes darle la categoria "video-juego"',
+    '- REGLA VIDEOJUEGOS: Solo clasifica como "video-juego" si el personaje es ORIGINARIO de un videojuego (ejemplos: Mario, Luigi, Link, Zelda, Kratos, Sonic, Master Chief, Lara Croft, Minecraft, Fortnite, League of Legends, Overwatch, Genshin Impact, Hollow Knight, Elden Ring, Dark Souls, God of War, Resident Evil, etc). Personajes de anime/manga (Dragon Ball, Naruto, One Piece, Pokemon, Demon Slayer, etc), comics (Marvel, DC), peliculas o series de TV que TAMBIEN aparezcan en videojuegos NO deben clasificarse como video-juego, deben ir en su categoria original (anime, marvel, comics, etc). Pokemon es ANIME, no videojuego.',
     '- Si es un carro avion etc le daras vehiculo',
     '- Si la imagen muestra algun desnudo, topless o desnudo femenino, debes asignarle obligatoriamente la categoria "adultos" y añadirle el tag "adultos".',
     '- Si es un elemento para vestir como una mascara, casco o armadura, debes asignarle la categoria "cosplay".',
