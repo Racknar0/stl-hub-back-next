@@ -13,10 +13,10 @@ const UPLOADS_DIR = path.resolve('uploads')
 const MAX_IMAGES_PER_ITEM = Math.max(1, Number(process.env.BATCH_AI_MAX_IMAGES_PER_ITEM) || 1)
 const MAX_IMAGE_BYTES = Math.max(256 * 1024, (Number(process.env.BATCH_AI_MAX_IMAGE_MB) || 4) * 1024 * 1024)
 const IMAGE_RESOLUTION_ENV = String(process.env.BATCH_AI_MEDIA_RESOLUTION || 'low').trim().toLowerCase()
-const AI_RETRY_MAX_ATTEMPTS = Math.max(0, Number(process.env.BATCH_AI_RETRY_MAX_ATTEMPTS) || 4)
-const AI_RETRY_BASE_MS = Math.max(250, Number(process.env.BATCH_AI_RETRY_BASE_MS) || 1500)
-const AI_RETRY_MAX_MS = Math.max(AI_RETRY_BASE_MS, Number(process.env.BATCH_AI_RETRY_MAX_MS) || 30_000)
-const AI_RATE_LIMIT_COOLDOWN_MS = Math.max(500, Number(process.env.BATCH_AI_RATE_LIMIT_COOLDOWN_MS) || 1200)
+const AI_RETRY_MAX_ATTEMPTS = Math.max(0, Number(process.env.BATCH_AI_RETRY_MAX_ATTEMPTS) || 6)
+const AI_RETRY_BASE_MS = Math.max(250, Number(process.env.BATCH_AI_RETRY_BASE_MS) || 2000)
+const AI_RETRY_MAX_MS = Math.max(AI_RETRY_BASE_MS, Number(process.env.BATCH_AI_RETRY_MAX_MS) || 90_000)
+const AI_RATE_LIMIT_COOLDOWN_MS = Math.max(500, Number(process.env.BATCH_AI_RATE_LIMIT_COOLDOWN_MS) || 45_000)
 
 function resolveMediaResolutionLevel(raw) {
   if (raw === 'high') return PartMediaResolutionLevel.MEDIA_RESOLUTION_HIGH
