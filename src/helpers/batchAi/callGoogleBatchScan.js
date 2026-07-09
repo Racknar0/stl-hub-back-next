@@ -748,13 +748,25 @@ async function classifySingleItem(ai, payload, item) {
     JSON.stringify(promptPayload, null, 2),
   ].join('\n\n')
 
-  
+  const promptTextLength = String(prompt || '').length
+  const imagePartsInfo = imageParts.map((p, i) => ({
+    index: i,
+    mime: p?.inlineData?.mimeType || 'unknown',
+    base64Bytes: (p?.inlineData?.data || '').length,
+  }))
+  const totalImageBase64Bytes = imagePartsInfo.reduce((sum, p) => sum + p.base64Bytes, 0)
 
-  console.log('[BATCH][AI][INPUT]', {
+  console.log('[BATCH][AI][INPUT]', JSON.stringify({
     item: getItemDisplayName(item),
+    model: MODEL_NAME,
+    mediaResolution: IMAGE_MEDIA_RESOLUTION_LEVEL || 'NOT_SET',
+    promptTextChars: promptTextLength,
     attachedImages,
     availableImages: Number(item?.imagesCount || 0),
-  })
+    totalImageBase64Bytes,
+    estimatedImageTokens: attachedImages > 0 ? `~${attachedImages * 258} (LOW) o ~${attachedImages * 20000} (HIGH)` : '0',
+    imageDetails: imagePartsInfo,
+  }))
 
   let response = null
   let retriesUsed = 0
