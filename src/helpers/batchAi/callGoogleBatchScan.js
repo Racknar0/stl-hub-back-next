@@ -789,8 +789,20 @@ async function classifySingleItem(ai, payload, item) {
 
       retriesUsed += 1
       const waitMs = computeRetryWaitMs(retriesUsed, error)
+      const retryStatusCode = extractErrorStatusCode(error)
+      const retryIsRateLimit = isRateLimitError(error)
       console.warn(
-        `[BATCH][AI][RETRY] item="${getItemDisplayName(item)}" retry=${retriesUsed}/${AI_RETRY_MAX_ATTEMPTS} waitMs=${waitMs} status=${extractErrorStatusCode(error) || '-'} reason=${String(error?.message || error).slice(0, 220)}`,
+        `[BATCH][AI][RETRY] item="${getItemDisplayName(item)}" retry=${retriesUsed}/${AI_RETRY_MAX_ATTEMPTS}`,
+        JSON.stringify({
+          waitMs,
+          statusCode: retryStatusCode || null,
+          rateLimited: retryIsRateLimit,
+          model: MODEL_NAME,
+          errorMessage: String(error?.message || error).slice(0, 500),
+          errorName: error?.name || null,
+          errorCode: error?.code || null,
+          errorStatus: error?.status || null,
+        }),
       )
       await sleep(waitMs)
     }
@@ -915,8 +927,31 @@ export async function callGoogleBatchScan(payload) {
         if (rateLimited) rateLimitedItems += 1
         failedItems += 1
         if (Number(item?.itemId || 0) > 0) failedItemIds.push(Number(item.itemId))
-        console.error('[BATCH][AI][ITEM_ERROR]', getItemDisplayName(item), error?.message || error)
-        console.error('[BATCH][AI][ITEM_ERROR][DETAIL]', toDebugText(error))
+
+        // ── Log detallado de error ──
+        const errStatusCode = extractErrorStatusCode(error)
+        const errIsRateLimit = isRateLimitError(error)
+        const errIsRetryable = isRetryableAiError(error)
+        const itemImages = Number(item?.imagesCount || 0)
+        console.error(`[BATCH][AI][ITEM_ERROR] item="${getItemDisplayName(item)}"`,
+          JSON.stringify({
+            statusCode: errStatusCode || null,
+            rateLimited: errIsRateLimit,
+            retryable: errIsRetryable,
+            retriesUsed,
+            maxRetries: AI_RETRY_MAX_ATTEMPTS,
+            model: MODEL_NAME,
+            itemId: item?.itemId || null,
+            imagesAvailable: itemImages,
+            mediaResolution: IMAGE_MEDIA_RESOLUTION_LEVEL || 'NOT_SET',
+            errorName: error?.name || null,
+            errorCode: error?.code || null,
+            errorStatus: error?.status || null,
+            errorMessage: String(error?.message || error).slice(0, 800),
+          }),
+        )
+        console.error('[BATCH][AI][ITEM_ERROR][STACK]', error?.stack || 'no stack')
+        console.error('[BATCH][AI][ITEM_ERROR][FULL_BODY]', toDebugText(error))
       } finally {
         done += 1
         const endPct = Math.round((done / total) * 100)
