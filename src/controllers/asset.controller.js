@@ -25,7 +25,7 @@ import { applyCategorySlugsOverrides } from '../utils/categoryHardOverrides.js';
 import { enrichFreebieStatus, isAssetFreeToday, getTodayDateStr } from '../utils/freebieHelper.js';
 
 
-const ASSET_META_AI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
+const ASSET_META_AI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const ASSET_DESCRIPTION_FALLBACK = 'No hay descripción de este producto.';
 const ASSET_DESCRIPTION_EN_FALLBACK = 'No description available for this product.';
 const ASSET_META_MAX_IMAGES_PER_ITEM = Math.max(1, Math.min(4, Number(process.env.ASSET_META_MAX_IMAGES_PER_ITEM) || 1));

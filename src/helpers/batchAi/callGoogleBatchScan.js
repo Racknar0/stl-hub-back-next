@@ -8,7 +8,7 @@ import {
 } from '@google/genai'
 import { categoryHardOverrideRules } from '../../utils/categoryHardOverrides.js'
 
-const MODEL_NAME = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite'
+const MODEL_NAME = process.env.GEMINI_MODEL || 'gemini-2.5-flash'
 const UPLOADS_DIR = path.resolve('uploads')
 const MAX_IMAGES_PER_ITEM = Math.max(1, Number(process.env.BATCH_AI_MAX_IMAGES_PER_ITEM) || 1)
 const MAX_IMAGE_BYTES = Math.max(256 * 1024, (Number(process.env.BATCH_AI_MAX_IMAGE_MB) || 4) * 1024 * 1024)
