@@ -768,6 +768,7 @@ async function classifySingleItem(ai, payload, item) {
         config: {
           responseMimeType: 'application/json',
           responseJsonSchema: SINGLE_RESULT_SCHEMA,
+          mediaResolution: IMAGE_MEDIA_RESOLUTION_LEVEL,
         },
       })
       break
@@ -920,6 +921,10 @@ export async function callGoogleBatchScan(payload) {
         done += 1
         const endPct = Math.round((done / total) * 100)
         console.info(`[BATCH][AI][PROGRESS] ${endPct}% (${done}/${total})`)
+        if (done < total) {
+          const pacingMs = Math.max(500, Number(process.env.BATCH_AI_PACING_MS) || 3500)
+          await sleep(pacingMs)
+        }
       }
     }
 
