@@ -17,6 +17,7 @@ const AI_RETRY_MAX_ATTEMPTS = Math.max(0, Number(process.env.BATCH_AI_RETRY_MAX_
 const AI_RETRY_BASE_MS = Math.max(250, Number(process.env.BATCH_AI_RETRY_BASE_MS) || 2000)
 const AI_RETRY_MAX_MS = Math.max(AI_RETRY_BASE_MS, Number(process.env.BATCH_AI_RETRY_MAX_MS) || 90_000)
 const AI_RATE_LIMIT_COOLDOWN_MS = Math.max(500, Number(process.env.BATCH_AI_RATE_LIMIT_COOLDOWN_MS) || 45_000)
+const BATCH_AI_CONCURRENCY = Math.max(1, Math.min(20, Number(process.env.BATCH_AI_CONCURRENCY) || 5))
 
 function resolveMediaResolutionLevel(raw) {
   if (raw === 'high') return PartMediaResolutionLevel.MEDIA_RESOLUTION_HIGH
@@ -900,7 +901,10 @@ export async function callGoogleBatchScan(payload) {
       ? payload.scanContext.scannedItems
       : []
 
-    console.info(`[BATCH][AI][START] items=${scannedItems.length} model=${MODEL_NAME}`)
+    let concurrency = BATCH_AI_CONCURRENCY
+    const pacingMs = Math.max(200, Number(process.env.BATCH_AI_PACING_MS) || 500)
+
+    console.info(`[BATCH][AI][START] items=${scannedItems.length} model=${MODEL_NAME} concurrency=${concurrency} pacingMs=${pacingMs}`)
 
     const normalized = []
     const failedItemIds = []
@@ -910,68 +914,103 @@ export async function callGoogleBatchScan(payload) {
     let rateLimitedItems = 0
     let rateLimitRecoveredItems = 0
     let done = 0
-    for (const item of scannedItems) {
-      const total = scannedItems.length || 1
-      const startPct = Math.round((done / total) * 100)
-      console.info(`[BATCH][AI][PROGRESS] ${startPct}% (${done}/${total}) procesando "${getItemDisplayName(item)}"`)
-      try {
-        const result = await classifySingleItem(ai, payload, item)
-        const itemResults = Array.isArray(result?.results) ? result.results : []
-        const retriesUsed = Math.max(0, Number(result?.retriesUsed || 0))
-        const rateLimitedSeen = !!result?.rateLimitedSeen
+    const total = scannedItems.length || 1
 
-        normalized.push(...itemResults)
-        if (retriesUsed > 0) {
-          retriedItems += 1
-          retryAttempts += retriesUsed
-        }
-        if (rateLimitedSeen) {
-          rateLimitRecoveredItems += 1
-        }
-      } catch (error) {
-        const aiMeta = error?.__batchAiMeta || {}
-        const retriesUsed = Math.max(0, Number(aiMeta?.retriesUsed || 0))
-        const rateLimited = !!aiMeta?.rateLimited || isRateLimitError(error)
-        if (retriesUsed > 0) {
-          retriedItems += 1
-          retryAttempts += retriesUsed
-        }
-        if (rateLimited) rateLimitedItems += 1
-        failedItems += 1
-        if (Number(item?.itemId || 0) > 0) failedItemIds.push(Number(item.itemId))
+    // Procesar en chunks concurrentes
+    for (let chunkStart = 0; chunkStart < scannedItems.length; chunkStart += concurrency) {
+      const chunk = scannedItems.slice(chunkStart, chunkStart + concurrency)
+      const chunkPct = Math.round((done / total) * 100)
+      console.info(`[BATCH][AI][CHUNK] ${chunkPct}% procesando chunk ${Math.floor(chunkStart / concurrency) + 1} (${chunk.length} items, concurrency=${concurrency})`)
 
-        // ── Log detallado de error ──
-        const errStatusCode = extractErrorStatusCode(error)
-        const errIsRateLimit = isRateLimitError(error)
-        const errIsRetryable = isRetryableAiError(error)
-        const itemImages = Number(item?.imagesCount || 0)
-        console.error(`[BATCH][AI][ITEM_ERROR] item="${getItemDisplayName(item)}"`,
-          JSON.stringify({
-            statusCode: errStatusCode || null,
-            rateLimited: errIsRateLimit,
-            retryable: errIsRetryable,
-            retriesUsed,
-            maxRetries: AI_RETRY_MAX_ATTEMPTS,
-            model: MODEL_NAME,
-            itemId: item?.itemId || null,
-            imagesAvailable: itemImages,
-            mediaResolution: IMAGE_MEDIA_RESOLUTION_LEVEL || 'NOT_SET',
-            errorName: error?.name || null,
-            errorCode: error?.code || null,
-            errorStatus: error?.status || null,
-            errorMessage: String(error?.message || error).slice(0, 800),
-          }),
-        )
-        console.error('[BATCH][AI][ITEM_ERROR][STACK]', error?.stack || 'no stack')
-        console.error('[BATCH][AI][ITEM_ERROR][FULL_BODY]', toDebugText(error))
-      } finally {
+      const chunkPromises = chunk.map(async (item) => {
+        const itemName = getItemDisplayName(item)
+        try {
+          const result = await classifySingleItem(ai, payload, item)
+          return { status: 'ok', item, result }
+        } catch (error) {
+          return { status: 'error', item, error }
+        }
+      })
+
+      const chunkResults = await Promise.allSettled(chunkPromises)
+      let chunkHadRateLimit = false
+
+      for (const settled of chunkResults) {
+        const { status: settledStatus, value } = settled.status === 'fulfilled'
+          ? { status: 'fulfilled', value: settled.value }
+          : { status: 'rejected', value: { status: 'error', item: null, error: settled.reason } }
+
         done += 1
+
+        if (value.status === 'ok') {
+          const itemResults = Array.isArray(value.result?.results) ? value.result.results : []
+          const itemRetries = Math.max(0, Number(value.result?.retriesUsed || 0))
+          const itemRateLimited = !!value.result?.rateLimitedSeen
+
+          normalized.push(...itemResults)
+          if (itemRetries > 0) {
+            retriedItems += 1
+            retryAttempts += itemRetries
+          }
+          if (itemRateLimited) {
+            rateLimitRecoveredItems += 1
+            chunkHadRateLimit = true
+          }
+        } else {
+          const error = value.error
+          const item = value.item
+          const aiMeta = error?.__batchAiMeta || {}
+          const itemRetries = Math.max(0, Number(aiMeta?.retriesUsed || 0))
+          const rateLimited = !!aiMeta?.rateLimited || isRateLimitError(error)
+          if (itemRetries > 0) {
+            retriedItems += 1
+            retryAttempts += itemRetries
+          }
+          if (rateLimited) {
+            rateLimitedItems += 1
+            chunkHadRateLimit = true
+          }
+          failedItems += 1
+          if (item && Number(item?.itemId || 0) > 0) failedItemIds.push(Number(item.itemId))
+
+          // ── Log detallado de error ──
+          const errStatusCode = extractErrorStatusCode(error)
+          const errIsRateLimit = isRateLimitError(error)
+          const errIsRetryable = isRetryableAiError(error)
+          const itemImages = Number(item?.imagesCount || 0)
+          console.error(`[BATCH][AI][ITEM_ERROR] item="${getItemDisplayName(item)}"`,
+            JSON.stringify({
+              statusCode: errStatusCode || null,
+              rateLimited: errIsRateLimit,
+              retryable: errIsRetryable,
+              retriesUsed: itemRetries,
+              maxRetries: AI_RETRY_MAX_ATTEMPTS,
+              model: MODEL_NAME,
+              itemId: item?.itemId || null,
+              imagesAvailable: itemImages,
+              mediaResolution: IMAGE_MEDIA_RESOLUTION_LEVEL || 'NOT_SET',
+              errorName: error?.name || null,
+              errorCode: error?.code || null,
+              errorStatus: error?.status || null,
+              errorMessage: String(error?.message || error).slice(0, 800),
+            }),
+          )
+          console.error('[BATCH][AI][ITEM_ERROR][STACK]', error?.stack || 'no stack')
+          console.error('[BATCH][AI][ITEM_ERROR][FULL_BODY]', toDebugText(error))
+        }
+
         const endPct = Math.round((done / total) * 100)
         console.info(`[BATCH][AI][PROGRESS] ${endPct}% (${done}/${total})`)
-        if (done < total) {
-          const pacingMs = Math.max(500, Number(process.env.BATCH_AI_PACING_MS) || 3500)
-          await sleep(pacingMs)
-        }
+      }
+
+      // Concurrencia adaptativa: si hubo rate limit en este chunk, reducir concurrencia
+      if (chunkHadRateLimit && concurrency > 1) {
+        const prevConcurrency = concurrency
+        concurrency = Math.max(1, Math.floor(concurrency / 2))
+        console.warn(`[BATCH][AI][ADAPTIVE] Rate limit detectado, reduciendo concurrencia ${prevConcurrency} → ${concurrency}`)
+        await sleep(AI_RATE_LIMIT_COOLDOWN_MS)
+      } else if (done < total) {
+        await sleep(pacingMs)
       }
     }
 
