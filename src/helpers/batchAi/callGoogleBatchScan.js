@@ -553,9 +553,16 @@ function sanitizeItemForPrompt(item) {
 }
 
 function buildSingleItemPromptPayload(payload, item, attachedImages) {
+  // Evitamos enviar la lista gigante de 8,000+ tags para no inflar los tokens del prompt
+  const dbCatalogPrompt = {
+    categories: payload?.dbCatalog?.categories || [],
+    adultCategoryCandidates: payload?.dbCatalog?.adultCategoryCandidates || [],
+    tags: [] // Enviamos la lista de etiquetas vacía a la IA
+  }
+
   return {
     domainContext: payload?.domainContext || {},
-    dbCatalog: payload?.dbCatalog || {},
+    dbCatalog: dbCatalogPrompt,
     scanItem: sanitizeItemForPrompt(item),
     visualContext: {
       attachedImages,
