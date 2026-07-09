@@ -795,6 +795,10 @@ async function classifySingleItem(ai, payload, item) {
     }
   }
 
+  if (response?.usageMetadata) {
+    console.info(`[BATCH][AI][TOKENS] item="${getItemDisplayName(item)}" promptTokens=${response.usageMetadata.promptTokenCount} candidateTokens=${response.usageMetadata.candidatesTokenCount} totalTokens=${response.usageMetadata.totalTokenCount}`)
+  }
+
   const parsed = extractJsonFromText(response?.text)
   if (!parsed) {
     const rawResponseText = String(response?.text || '').trim()
