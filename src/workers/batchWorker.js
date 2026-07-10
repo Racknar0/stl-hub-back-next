@@ -349,6 +349,12 @@ function megaPutWithStall({
         // Aunque MEGA no imprima porcentajes, hay actividad útil para evitar falsos stalls.
         lastProgressAt = Date.now()
       }
+      // Detectar cuenta llena de inmediato sin esperar stall timeout
+      if (/exceeded.*available storage|storage.*quota.*exceeded/i.test(txt)) {
+        killProcessTreeBestEffort(child, logPrefix)
+        fail(new Error('ACCOUNT_STORAGE_LIMIT_REACHED exceeded available storage'))
+        return
+      }
       const re = /([0-9]{1,3}(?:\.[0-9]+)?)\s*%/g
       let m, last = null
       while ((m = re.exec(txt)) !== null) last = m[1]
@@ -1289,6 +1295,53 @@ async function processMainQueueItem(item) {
     const folderName = String(item?.folderName || '').trim() || '-'
     const slug = String(ctx?.slug || '').trim() || '-'
     const stackTop = String(err?.stack || '').split('\n').slice(0, 3).join(' | ').slice(0, 500)
+
+    // ── CUENTA LLENA: marcar este item + todos los QUEUED de la misma cuenta como FAILED ──
+    const isStorageFull = /ACCOUNT_STORAGE_LIMIT_REACHED|exceeded.*available storage/i.test(msg)
+    if (isStorageFull && accId !== '-') {
+      const storageLimitMsg = `Cuenta llena (accId=${accId}). Reasigna la cuenta y reintenta.`
+      console.warn(`[BATCH][MAIN][STORAGE_FULL] item=${item.id} accId=${accId} — marcando items de esta cuenta como FAILED`)
+
+      await updateItem({
+        status: 'FAILED',
+        mainStatus: 'ERROR',
+        backupStatus: 'ERROR',
+        error: storageLimitMsg,
+      })
+
+      // Marcar todos los demás items QUEUED asignados a la misma cuenta como FAILED
+      try {
+        const bulkResult = await prisma.batchImportItem.updateMany({
+          where: {
+            status: 'QUEUED',
+            targetAccount: Number(accId),
+            id: { not: item.id },
+          },
+          data: {
+            status: 'FAILED',
+            mainStatus: 'ERROR',
+            backupStatus: 'ERROR',
+            error: storageLimitMsg,
+          },
+        })
+        if (bulkResult.count > 0) {
+          console.warn(`[BATCH][MAIN][STORAGE_FULL] ${bulkResult.count} items adicionales de accId=${accId} marcados como FAILED`)
+        }
+      } catch (bulkErr) {
+        console.error(`[BATCH][MAIN][STORAGE_FULL] Error marcando items en lote: ${bulkErr.message}`)
+      }
+
+      await notifyAutomation({
+        title: `Cuenta MEGA llena (accId=${accId})`,
+        body: `item=${item.id} folder=${folderName} — Todos los items asignados a esta cuenta fueron marcados como FAILED. Reasigna y reintenta.`,
+        typeStatus: 'ERROR',
+      })
+
+      if (ctx?.finalArchivePath) {
+        deleteLocalArchiveBestEffort(ctx.finalArchivePath, `item=${item.id} phase=main storage-full`)
+      }
+      return
+    }
 
     console.error(`[BATCH][MAIN][FAIL] item=${item.id} acc=${accId} folder=${folderName} slug=${slug} err=${msg}`)
     if (stackTop) {
