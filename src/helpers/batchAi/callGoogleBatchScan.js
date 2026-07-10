@@ -725,10 +725,11 @@ async function classifySingleItem(ai, payload, item) {
     'Solo si realmente no existe equivalente en el catalogo, propone tag nuevo en formato bilingue (es/en).',
     'REGLAS OBLIGATORIAS PARA NOMBRE DEL ASSET:',
     '1. PRIORIDAD MAXIMA: Cruza el nombre del archivo (sourceTitle, assetName, sourcePathHint) CON la imagen adjunta para identificar EXACTAMENTE de que personaje, serie, videojuego, pelicula o franquicia se trata.',
-    '2. Si puedes identificar el personaje, el nombre DEBE incluir el nombre real del personaje y la franquicia. Ejemplos correctos: "Figura Goku Dragon Ball", "Figura Spider-Man Marvel", "Figura Link Zelda", "Figura Pikachu Pokemon". Ejemplos INCORRECTOS y PROHIBIDOS: "Figura de guerrero con armadura dorada", "Figura cibernetica en capsula", "Figura de guerrera urbana con katana".',
+    '2. Si puedes identificar el personaje, el nombre DEBE incluir el nombre real del personaje y la franquicia. Ejemplos correctos: "Goku Dragon Ball", "Spider-Man Marvel", "Link Zelda Breath of the Wild", "Pikachu Pokemon". Ejemplos INCORRECTOS y PROHIBIDOS: "Figura de guerrero con armadura dorada", "Figura cibernetica en capsula", "Figura de guerrera urbana con katana".',
     '3. PROHIBIDO inventar nombres genericos o descriptivos cuando el personaje es identificable. Si la imagen muestra un personaje conocido, DEBES poner su nombre real aunque el archivo diga "asset desconocido".',
     '4. SOLO si realmente NO puedes identificar el personaje ni por la imagen ni por el nombre del archivo, entonces puedes usar un nombre descriptivo comercial.',
     '5. El nombre debe ser limpio, comercial, corto (3-9 palabras), legible para tienda. No copies literalmente sourceTitle/sourcePathHint cuando vengan feos (guiones, underscores, versionado, extensiones, ruido tecnico).',
+    '6. PROHIBIDO comenzar el nombre con la palabra "Figura" o "Figure". No uses "Figura" como prefijo. El nombre debe empezar directamente con el nombre del personaje o la descripcion del modelo.',
     'El nombre del asset debe devolverse SIEMPRE bilingue en el objeto nombre: { es, en }.',
     'La categoria debe devolverse SIEMPRE bilingue en el objeto categoria: { es, en }.',
     'La descripcion debe devolverse SIEMPRE bilingue en el objeto descripcion: { es, en }.',
@@ -737,7 +738,7 @@ async function classifySingleItem(ai, payload, item) {
     'La descripcion debe: (1) describir visualmente lo que se ve en las imagenes del modelo (pose, detalles, accesorios, base), (2) indicar para que tipo de impresion se recomienda (resina/FDM/PLA), (3) si el modelo parece tener multiples piezas o una sola, (4) sugerir un uso o contexto (exhibicion, coleccion, cosplay, regalo, decoracion), (5) mencionar nivel de detalle visible (alto/medio para resina o PLA). Todo basado SOLO en lo que se observa en las imagenes.',
     'Responde SOLO JSON valido, sin markdown ni texto extra, usando EXACTAMENTE esta forma:',
     JSON.stringify({
-      nombre: { es: 'figura anime samurai', en: 'samurai anime figure' },
+      nombre: { es: 'Samurai Anime Estilo Ronin', en: 'Ronin Style Anime Samurai' },
       categoria: { es: 'Anime', en: 'Anime' },
       tags: [
         { es: 'samurai', en: 'samurai' },
