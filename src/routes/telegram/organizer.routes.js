@@ -79,7 +79,7 @@ router.post('/package', (req, res) => {
             }
 
             base = base.replace(/^(?:[\w-]+_)?\d+_/, '');
-            base = base.replace(/@.*$/, '');
+            base = base.replace(/@\S+/g, '');
             base = base.trim();
             if (!base) base = 'asset_desconocido';
             return { base, ext };
