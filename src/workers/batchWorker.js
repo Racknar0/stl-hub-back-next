@@ -16,7 +16,7 @@
 import { PrismaClient } from '@prisma/client'
 import fs from 'fs'
 import path from 'path'
-import { spawn } from 'child_process'
+import { spawn, execSync } from 'child_process'
 import sharp from 'sharp'
 import crypto from 'crypto'
 import { withMegaLock, cancelPendingAutoLogout } from '../utils/megaQueue.js'
@@ -59,10 +59,48 @@ let activeMegaProxyUrl = ''
 const preferredProxyByAccountId = new Map()
 const sessionUploadedMbByAccountId = new Map()
 const MAX_ACCOUNT_UPLOAD_MB = Number(process.env.BATCH_ACCOUNT_MAX_MB) || (18 * 1024)
+const DISK_MIN_FREE_GB = Number(process.env.BATCH_DISK_MIN_FREE_GB) || 50
 
 // ────────────────────────────── HELPERS ──────────────────────────────
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
+
+/** Devuelve los GB libres en la partición de uploads. */
+function getDiskFreeGB() {
+  try {
+    const out = execSync("df --output=avail --block-size=1G / | tail -1", { timeout: 5000 }).toString().trim()
+    return Number(out) || 0
+  } catch {
+    return Infinity // Si falla el chequeo, no bloquear el flujo
+  }
+}
+
+/** Circuit breaker: si el disco baja del mínimo, desasigna todos los MAIN pendientes. */
+async function diskSpaceCircuitBreaker() {
+  const freeGB = getDiskFreeGB()
+  if (freeGB >= DISK_MIN_FREE_GB) return false
+
+  console.warn(`[BATCH][CIRCUIT-BREAKER] ⚠️ Disco bajo: ${freeGB} GB libres (mínimo: ${DISK_MIN_FREE_GB} GB). Desasignando items MAIN pendientes...`)
+
+  const result = await prisma.batchImportItem.updateMany({
+    where: {
+      status: { in: ['QUEUED'] },
+      mainStatus: { not: 'OK' },
+    },
+    data: {
+      status: 'DRAFT',
+      mainStatus: 'PENDING',
+      targetAccount: null,
+      error: `Auto-desasignado: disco bajo (${freeGB} GB libres). Reasignar cuando haya espacio.`,
+    },
+  })
+
+  if (result.count > 0) {
+    console.warn(`[BATCH][CIRCUIT-BREAKER] 🛑 ${result.count} items MAIN desasignados. Backup continuará liberando espacio.`)
+  }
+
+  return true
+}
 
 function envFlag(name, defaultValue = false) {
   const raw = process.env[name]
@@ -1604,6 +1642,13 @@ export async function startBatchWorker() {
       }
 
       if (nextMainItem) {
+        // ── CIRCUIT BREAKER: verificar espacio en disco antes de procesar MAIN ──
+        const diskTripped = await diskSpaceCircuitBreaker()
+        if (diskTripped) {
+          // Disco bajo: no procesar MAIN, saltar a backup para liberar espacio
+          await sleep(3000)
+          continue
+        }
         await processMainQueueItem(nextMainItem)
         await sleep(1500)
         continue
