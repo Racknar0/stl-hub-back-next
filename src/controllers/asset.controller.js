@@ -3526,10 +3526,15 @@ export const listPublishedSlugs = async (req, res) => {
             if (!isNaN(d.getTime())) where.updatedAt = { gt: d };
         }
         const limit = req.query.limit ? Math.min(Number(req.query.limit) || 50000, 50000) : 50000;
+        const orderParam = String(req.query.order || req.query.sortOrder || '').toLowerCase();
+        const sortOrder = orderParam === 'asc' ? 'asc' : 'desc';
+        const sortByParam = String(req.query.sortBy || '').toLowerCase();
+        const sortField = sortByParam === 'id' ? 'id' : (sortByParam === 'createdat' ? 'createdAt' : 'updatedAt');
+
         const rows = await prisma.asset.findMany({
             where,
-            select: { slug: true, updatedAt: true },
-            orderBy: { updatedAt: 'desc' }, // más recientes primero
+            select: { id: true, slug: true, updatedAt: true },
+            orderBy: { [sortField]: sortOrder },
             take: limit,
         });
         return res.json(rows);
