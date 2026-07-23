@@ -23,8 +23,8 @@ function getStartOfDayUtc5(now = new Date()) {
   return new Date(utc5Date.getTime() + UTC5_OFFSET_MS)
 }
 
-const SITE_VISIT_MIN_INTERVAL_MS = Math.max(5000, Number(process.env.SITE_VISIT_MIN_INTERVAL_MS || 15000) || 15000)
-const SITE_VISIT_MAX_PER_IP_PER_MIN = Math.max(30, Number(process.env.SITE_VISIT_MAX_PER_IP_PER_MIN || 240) || 240)
+const SITE_VISIT_MIN_INTERVAL_MS = Math.max(5000, Number(process.env.SITE_VISIT_MIN_INTERVAL_MS || 30000) || 30000)
+const SITE_VISIT_MAX_PER_IP_PER_MIN = Math.max(10, Number(process.env.SITE_VISIT_MAX_PER_IP_PER_MIN || 30) || 30)
 const SITE_VISIT_IP_HASH_SALT = process.env.SITE_VISIT_IP_HASH_SALT || process.env.JWT_SECRET || 'stl-hub-site-visit'
 const SITE_VISIT_ALLOWED_HOSTS = new Set([
   'stl-hub.com',
@@ -1015,7 +1015,7 @@ export async function getTaxonomyCounts(req, res) {
 export async function recordSiteVisit(req, res) {
   try {
     const userAgent = req.headers['user-agent'] || ''
-    const botPattern = /bot|googlebot|crawler|spider|robot|crawling|curl|wget|slurp|facebookexternalhit|whatsapp|bingbot|yandex|baiduspider/i
+    const botPattern = /bot|googlebot|crawler|spider|robot|crawling|curl|wget|slurp|facebookexternalhit|whatsapp|bingbot|yandex|baiduspider|headless|python|axios|go-http|httpx|aiohttp|scrapy|node-fetch|undici/i
 
     if (botPattern.test(userAgent)) {
       return res.status(200).json({ ok: true, ignored: true, reason: 'bot_detected' })
@@ -1048,12 +1048,13 @@ export async function recordSiteVisit(req, res) {
     const nowMs = Date.now()
     cleanupSiteVisitGuard(nowMs)
 
-    const rateLimitKey = ipHash || sessionId || visitorId || null
+    const rateLimitKey = ipHash || visitorId || sessionId || null
     if (isIpRateLimited(rateLimitKey, nowMs)) {
       return res.status(200).json({ ok: true, ignored: true, reason: 'rate_limited' })
     }
 
-    const identityKey = sessionId || visitorId || ipHash || 'anonymous'
+    // Priorizar ipHash y visitorId antes de sessionId para evitar bypass de deduplicación con sessionIds aleatorios
+    const identityKey = ipHash || visitorId || sessionId || 'anonymous'
     const dedupeKey = `${identityKey}|${path}`
     if (isDuplicateSiteVisit(dedupeKey, nowMs)) {
       return res.status(200).json({ ok: true, ignored: true, reason: 'duplicate_window' })
