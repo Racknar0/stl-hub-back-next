@@ -69,7 +69,7 @@ export const sendMetaEvent = async ({
             event_id: eventId,
             user_data: userData,
             action_source: "website",
-            event_source_url: eventName === 'CompleteRegistration' ? 'https://stl-hub.com/register' : 'https://stl-hub.com/'
+            event_source_url: `${(process.env.FRONT_URL || 'https://stlgratis.com').replace(/\/$/, '')}${eventName === 'CompleteRegistration' ? '/register' : '/'}`
         };
 
         // Si es un evento de valor (compra), añadimos las propiedades

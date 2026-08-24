@@ -4123,7 +4123,7 @@ async function resolveReportsAndNotify(assetId, assetTitle, newLink) {
     });
 
     const isProduction = process.env.NODE_ENV === 'production';
-    const siteUrl = isProduction ? 'https://stl-hub.com' : 'http://localhost:3000';
+    const siteUrl = process.env.FRONT_URL ? process.env.FRONT_URL.replace(/\/$/, '') : (isProduction ? 'https://stlgratis.com' : 'http://localhost:3000');
 
     for (const u of users) {
       const isEn = u.language === 'en';

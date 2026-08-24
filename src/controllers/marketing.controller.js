@@ -17,7 +17,7 @@ const safePath = (value) => {
 };
 
 const buildTrackingUrl = (campaign) => {
-  const frontUrl = String(process.env.FRONT_URL || 'https://stl-hub.com').replace(/\/$/, '');
+  const frontUrl = String(process.env.FRONT_URL || 'https://stlgratis.com').replace(/\/$/, '');
   const path = safePath(campaign?.landingPath || '/');
   const params = new URLSearchParams();
 

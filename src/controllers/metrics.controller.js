@@ -27,6 +27,9 @@ const SITE_VISIT_MIN_INTERVAL_MS = Math.max(5000, Number(process.env.SITE_VISIT_
 const SITE_VISIT_MAX_PER_IP_PER_MIN = Math.max(10, Number(process.env.SITE_VISIT_MAX_PER_IP_PER_MIN || 30) || 30)
 const SITE_VISIT_IP_HASH_SALT = process.env.SITE_VISIT_IP_HASH_SALT || process.env.JWT_SECRET || 'stl-hub-site-visit'
 const SITE_VISIT_ALLOWED_HOSTS = new Set([
+  'stlgratis.com',
+  'www.stlgratis.com',
+  'api.stlgratis.com',
   'stl-hub.com',
   'www.stl-hub.com',
   'api.stl-hub.com',
@@ -89,7 +92,7 @@ function isAllowedTrackingHost(hostname) {
   const host = String(hostname || '').trim().toLowerCase()
   if (!host) return false
   if (SITE_VISIT_ALLOWED_HOSTS.has(host)) return true
-  if (host.endsWith('.stl-hub.com')) return true
+  if (host.endsWith('.stlgratis.com') || host.endsWith('.stl-hub.com')) return true
   return false
 }
 

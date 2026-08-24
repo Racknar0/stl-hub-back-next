@@ -32,7 +32,7 @@ export const dispatchSaleNotification = async ({
   const planTextEn = String(planNameEn || planText || 'N/D');
   const userIdText = Number.isFinite(Number(userId)) ? String(Number(userId)) : String(userId || 'N/D');
   const buyerEmailText = String(buyerEmail || 'N/D').trim() || 'N/D';
-  const dashboardLink = `${String(process.env.FRONT_URL || '').replace(/\/+$/, '') || 'https://stl-hub.com'}/`;
+  const dashboardLink = `${String(process.env.FRONT_URL || '').replace(/\/+$/, '') || 'https://stlgratis.com'}/`;
 
   const isEn = String(userLanguage || 'es').toLowerCase() === 'en';
   const buyerPlanText = isEn ? planTextEn : planText;
