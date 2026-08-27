@@ -634,6 +634,7 @@ class TelegramDownloaderService {
 
             const messages = [];
             let currentOffsetId = endId + 1;
+            let chunksFetched = 0;
             
             while (true) {
                 if (this.shouldCancel) break;
@@ -643,6 +644,11 @@ class TelegramDownloaderService {
                     offsetId: currentOffsetId,
                     reverse: false // Fetches newest to oldest cleanly
                 });
+                
+                chunksFetched++;
+                if (chunksFetched % 5 === 0) {
+                    this.emitProgress({ type: 'info', message: `Escaneando historial... (Lote ${chunksFetched})` });
+                }
                 
                 if (!chunk || chunk.length === 0) break;
                 
