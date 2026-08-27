@@ -153,7 +153,22 @@ class TelegramDownloaderService {
     }
 
     async initClient() {
-        if (this.client && await this.client.checkAuthorization()) return;
+        const checkAuthWithTimeout = async () => {
+            if (!this.client) return false;
+            try {
+                return await Promise.race([
+                    this.client.checkAuthorization(),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), 5000))
+                ]);
+            } catch (err) {
+                console.log('checkAuthorization timeout/error, recreating client...');
+                try { await this.client.disconnect(); } catch (e) {}
+                this.client = null;
+                return false;
+            }
+        };
+
+        if (await checkAuthWithTimeout()) return;
 
         let existingSession = '';
         if (fs.existsSync(SESSION_PATH)) {
@@ -176,7 +191,17 @@ class TelegramDownloaderService {
             baseLogger,
         });
 
-        await this.client.connect(); // Since session is already authenticated
+        try {
+            await Promise.race([
+                this.client.connect(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), 15000))
+            ]);
+        } catch (err) {
+            console.log('connect timeout/error, destroying client...');
+            try { await this.client.disconnect(); } catch (e) {}
+            this.client = null;
+            throw new Error('Error de conexión con Telegram (Timeout). Intenta de nuevo.');
+        }
     }
 
     // --- Last Downloads Tracking ---
