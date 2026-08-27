@@ -756,7 +756,7 @@ class TelegramDownloaderService {
                         if (info?.location && info?.dcId) {
                             const sizeBig = info.size;
                             const size = sizeBig ? Number(sizeBig.toString()) : Number(msgToDownload.media.document.size || 0);
-                            await this.parallelDownloadToFile(this.client, info.location, {
+                            return this.parallelDownloadToFile(this.client, info.location, {
                                 dcId: info.dcId,
                                 fileSizeBytes: size,
                                 outputFile: tempPath,
@@ -765,10 +765,35 @@ class TelegramDownloaderService {
                                 progressCallback,
                             });
                         } else {
-                            await this.client.downloadMedia(msgToDownload, { outputFile: tempPath, progressCallback });
+                            return this.client.downloadMedia(msgToDownload, { outputFile: tempPath, progressCallback });
                         }
                     } else {
-                        await this.client.downloadMedia(msgToDownload, { outputFile: tempPath, progressCallback });
+                        return this.client.downloadMedia(msgToDownload, { outputFile: tempPath, progressCallback });
+                    }
+                };
+
+                const downloadWithStallDetector = async (msgToDownload) => {
+                    lastTime = Date.now(); // reset timer
+                    let interval;
+                    const stallPromise = new Promise((_, reject) => {
+                        interval = setInterval(() => {
+                            if (this.shouldCancel) {
+                                clearInterval(interval);
+                                reject(new Error('Cancelada'));
+                            } else if (Date.now() - lastTime > 120000) {
+                                clearInterval(interval);
+                                reject(new Error('Descarga estancada (timeout de 2 minutos sin progreso)'));
+                            }
+                        }, 5000);
+                    });
+
+                    try {
+                        await Promise.race([
+                            downloadOnce(msgToDownload),
+                            stallPromise
+                        ]);
+                    } finally {
+                        clearInterval(interval);
                     }
 
                     if (!this.shouldCancel) {
@@ -784,7 +809,7 @@ class TelegramDownloaderService {
                 };
 
                 try {
-                    await downloadOnce(item.msg);
+                    await downloadWithStallDetector(item.msg);
                 } catch (err) {
                     if (this.isFileReferenceExpiredError(err)) {
                         this.emitProgress({ type: 'info', message: `Referencia expirada en ${item.msg.id}. Reintentando...` });
@@ -795,7 +820,7 @@ class TelegramDownloaderService {
                                 if (fs.existsSync(tempPath)) {
                                     try { fs.unlinkSync(tempPath); } catch {}
                                 }
-                                await downloadOnce(fresh);
+                                await downloadWithStallDetector(fresh);
                                 continue;
                             }
                         } catch (retryErr) {
