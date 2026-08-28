@@ -203,360 +203,96 @@ export async function runAutoRestoreMain(){
     } catch(e){}
 
     if (forced){
-      main = await prisma.megaAccount.findUnique({ where:{ id:forced }, include:{ credentials:true, backups:{ include:{ backupAccount:{ include:{ credentials:true } } } } } })
+      const main = await prisma.megaAccount.findUnique({ where:{ id:forced }, include:{ credentials:true, backups:{ include:{ backupAccount:{ include:{ credentials:true } } } } } })
       if (!main) throw new Error(`Main forzada inválida`)
-    } else {
-      const mains = await prisma.megaAccount.findMany({
-        where:{ type:'main', suspended:false, backups:{ some:{} }, assets:{ some:{} } },
-        include:{ credentials:true, backups:{ include:{ backupAccount:{ include:{ credentials:true } } } } }
-      })
-
-      // Tratamos MAIN + BACKUPs como un solo ente:
-      // priorizamos el grupo cuya última revisión MÁS ANTIGUA sea la más vieja.
-      // Esto evita que un backup quede desatendido aunque su main se haya revisado recientemente.
-      const getTs = (d) => (d instanceof Date ? d.getTime() : (d ? new Date(d).getTime() : 0));
-
-      const scored = mains.map(m => {
-        const mainTs = getTs(m.lastCheckAt);
-        const backups = (m.backups || [])
-          .map(r => r?.backupAccount)
-          .filter(b => b && b.suspended === false);
-
-        let oldestTs = mainTs;
-        let driver = { type: 'main', id: m.id, ts: mainTs };
-
-        for (const b of backups) {
-          const bTs = getTs(b.lastCheckAt);
-          if (bTs < oldestTs) {
-            oldestTs = bTs;
-            driver = { type: 'backup', id: b.id, ts: bTs };
-          }
-        }
-
-        return { m, oldestTs, driver };
-      });
-
-      scored.sort((a, b) => a.oldestTs - b.oldestTs);
-      main = scored[0]?.m;
-      if (main) {
-        const s0 = scored[0];
-        log.info(`[CRON][PICK] grupo elegido por lastCheckAt más viejo: mainId=${main.id} driver=${s0.driver.type}:${s0.driver.id} oldestTs=${new Date(s0.oldestTs).toISOString()}`);
-      }
+      return await processSingleMainGroup(main, maxAssets)
     }
-    if (!main) { log.info('[CRON] No hay main candidate'); return { ok:true, skipped:true, reason:'NO_MAIN' } }
-    if (!main.credentials) throw new Error('Main sin credenciales')
-    
-    const backupAccounts = (main.backups||[]).map(r=>r.backupAccount).filter(Boolean)
-    if (!backupAccounts.length){ log.info('[CRON] Main sin backups'); return { ok:true, skipped:true, reason:'NO_BACKUPS' } }
 
-    if (maxAssets === 0) return { ok:true, skipped:true, reason:'MAX_ASSETS_ZERO' }
-
-    let candidateAssets = await prisma.asset.findMany({
-      where: { accountId: main.id },
-      select: { id: true, slug: true, archiveName: true, megaLink: true }
+    const mains = await prisma.megaAccount.findMany({
+      where:{ type:'main', suspended:false, backups:{ some:{} }, assets:{ some:{} } },
+      include:{ credentials:true, backups:{ include:{ backupAccount:{ include:{ credentials:true } } } } }
     })
-    
-    if (!candidateAssets.length){
-      const backupIds = (backupAccounts||[]).map(b=>b.id)
-      if (backupIds.length){
-        const replicas = await prisma.assetReplica.findMany({
-          where: { accountId: { in: backupIds }, status: 'COMPLETED' },
-          select: { asset: { select: { id: true, slug: true, archiveName: true, megaLink: true } } }
-        })
-        const uniq = new Map(); for (const r of replicas){ if (r.asset) uniq.set(r.asset.id, r.asset) }
-        candidateAssets = Array.from(uniq.values())
-        if (candidateAssets.length) log.info(`[CRON][FALLBACK] Usando ${candidateAssets.length} assets de réplicas`)
-      }
-    }
-    const assetMap = new Map(candidateAssets.map(a => [a.id, a]))
-    if (maxAssets) candidateAssets = candidateAssets.slice(0, maxAssets)
 
-    // --- ESCENARIO 1: SOLO METRICAS ---
-    if (!candidateAssets.length){
-      log.info('[CRON] MAIN sin assets. Actualizando métricas...')
-      await withMegaLock(async () => {
-        const px = await setStickyProxyForAccount(main);
-        if (!px?.ok) throw new Error(`NO_PROXY main metrics: ${px?.reason || 'unknown'}`);
+    if (!mains.length){
+      log.info('[CRON] No hay cuentas main candidatas');
+      return { ok:true, skipped:true, reason:'NO_MAIN' }
+    }
+
+    // Tratamos MAIN + BACKUPs como un solo ente:
+    // priorizamos el grupo cuya última revisión MÁS ANTIGUA sea la más vieja.
+    const getTs = (d) => (d instanceof Date ? d.getTime() : (d ? new Date(d).getTime() : 0));
+
+    const scored = mains.map(m => {
+      const mainTs = getTs(m.lastCheckAt);
+      const backups = (m.backups || [])
+        .map(r => r?.backupAccount)
+        .filter(b => b && b.suspended === false);
+
+      let oldestTs = mainTs;
+      let driver = { type: 'main', id: m.id, ts: mainTs };
+
+      for (const b of backups) {
+        const bTs = getTs(b.lastCheckAt);
+        if (bTs < oldestTs) {
+          oldestTs = bTs;
+          driver = { type: 'backup', id: b.id, ts: bTs };
+        }
+      }
+
+      return { m, oldestTs, driver };
+    });
+
+    scored.sort((a, b) => a.oldestTs - b.oldestTs);
+
+    // CÁLCULO DINÁMICO DE BATCH
+    // Garantiza que sin importar la cantidad de cuentas, se revisen todas en un máximo de TARGET_DAYS (50 días).
+    const TARGET_DAYS = Number(process.env.AUTO_BACKUP_TARGET_DAYS) || 50;
+    const RUNS_PER_DAY = Number(process.env.AUTO_BACKUP_RUNS_PER_DAY) || 24; // Asumiendo cron horario
+    const batchSize = Math.max(1, Math.ceil(mains.length / (TARGET_DAYS * RUNS_PER_DAY)));
+
+    const toProcess = scored.slice(0, batchSize);
+    log.info(`[CRON][DYNAMIC] Total mains: ${mains.length} | Meta: ${TARGET_DAYS} días (${RUNS_PER_DAY} runs/día) | Procesando batch de ${toProcess.length} grupo(s)`);
+
+    const summaryResults = [];
+    for (let i = 0; i < toProcess.length; i++) {
+      const item = toProcess[i];
+      const m = item.m;
+      log.info(`[CRON][PICK] [${i + 1}/${toProcess.length}] Procesando grupo mainId=${m.id} driver=${item.driver.type}:${item.driver.id} oldestTs=${new Date(item.oldestTs).toISOString()}`);
+      try {
+        const res = await processSingleMainGroup(m, maxAssets);
+        summaryResults.push({ mainId: m.id, ok: true, res });
+      } catch (e) {
+        log.error(`[CRON][ERROR] Fallo procesando grupo mainId=${m.id} (${m.alias || '--'}): ${e.message}`);
         try {
-          const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
-          await safeMegaLogout(buildCtx(main), 'metrics-main-pre'); await megaLogin(payload, buildCtx(main))
-          const m = await getAccountMetrics((main.baseFolder||'/').replaceAll('\\','/'))
-          await prisma.megaAccount.update({ where:{ id: main.id }, data:{
-            status: 'CONNECTED', lastCheckAt: new Date(),
-            storageUsedMB: m.storageUsedMB, storageTotalMB: m.storageTotalMB, fileCount: m.fileCount, folderCount: m.folderCount,
-          }})
-        } catch(e){} finally { await safeMegaLogout(buildCtx(main), 'metrics-main-finally'); }
-      }, 'CRON-METRICS-MAIN')
-      
-      // Warmup Backups
-      for (const b of backupAccounts){
-        if (!b?.credentials) continue
-        await sleep(2000); 
-        await withMegaLock(async () => {
-          const px = await setStickyProxyForAccount(b);
-          if (!px?.ok) throw new Error(`NO_PROXY backup metrics: ${px?.reason || 'unknown'}`);
-          try {
-             const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
-             await safeMegaLogout(buildCtx(b), 'metrics-backup-pre'); await megaLogin(payloadB, buildCtx(b))
-             const m = await getAccountMetrics((b.baseFolder||'/').replaceAll('\\','/'))
-             await prisma.megaAccount.update({ where:{ id: b.id }, data:{
-                status: 'CONNECTED', lastCheckAt: new Date(),
-                storageUsedMB: m.storageUsedMB, storageTotalMB: m.storageTotalMB, fileCount: m.fileCount, folderCount: m.folderCount,
-             }})
-          } catch(e){} finally { await safeMegaLogout(buildCtx(b), 'metrics-backup-finally'); }
-        }, `CRON-METRICS-${b.id}`)
-      }
-      return { ok:true, skipped:true, reason:'NO_ASSETS' }
-    }
-
-    // --- ESCENARIO 2: RESTAURACIÓN ---
-    log.info('____ INICIANDO RESTAURACIÓN (ANTI-BAN) ____')
-    const existingSet = new Set(), needDownload = new Map(), recovered = new Map()
-    let regeneratedLinks=0, restored=0
-
-    // FASE 1: MAIN (Scan)
-    await withMegaLock(async () => {
-      const px = await setStickyProxyForAccount(main);
-      if (!px?.ok) throw new Error(`NO_PROXY main phase1: ${px?.reason || 'unknown'}`);
-      const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
-      await safeMegaLogout(buildCtx(main), 'phase1-main-pre')
-      await megaLogin(payload, buildCtx(main))
-      const remoteBaseMain = (main.baseFolder||'/').replaceAll('\\','/')
-      for (let i=0;i<candidateAssets.length;i++){
-        const asset = candidateAssets[i]
-        const remoteFolder = path.posix.join(remoteBaseMain, asset.slug)
-        const expectedFile = asset.archiveName ? path.basename(asset.archiveName) : null
-        let lsOut=''
-        try { const ls = await runCmd('mega-ls',[remoteFolder],{ quiet:true }); lsOut=ls.out } catch {}
-        const lines = String(lsOut).split(/\r?\n/).map(l=>l.trim()).filter(Boolean)
-        let fileName=null
-        if (expectedFile && lines.includes(expectedFile)) fileName=expectedFile
-        if (!fileName) fileName = pickFirstFileFromLs(lsOut)
-        const exists=!!fileName
-        if (exists){
-          existingSet.add(asset.id)
-          if (!asset.megaLink && fileName){
-            try {
-              const remoteFile = path.posix.join(remoteFolder, fileName)
-              try { await runCmd('mega-export',['-d', remoteFile],{ quiet:true }) } catch{}
-              const exp= await runCmd('mega-export',['-a', remoteFile],{ quiet:true })
-              const m = exp.out.match(/https?:\/\/mega\.nz\/\S+/i)
-              if (m){ await prisma.asset.update({ where:{ id: asset.id }, data:{ megaLink:m[0], status:'PUBLISHED' } }); regeneratedLinks++; }
-            } catch (e){ log.warn(`[CRON][ESCANEO] No se pudo regenerar link para asset=${asset.id} -> ${e.message}`) }
-          }
-        } else {
-          needDownload.set(asset.id, asset)
-        }
-      }
-      // Medimos y actualizamos métricas de la MAIN
-      try {
-        const m = await getAccountMetrics(remoteBaseMain)
-        await prisma.megaAccount.update({
-          where:{ id: main.id },
-          data:{
-            status: 'CONNECTED',
-            statusMessage: null,
-            lastCheckAt: new Date(),
-            storageUsedMB: m.storageUsedMB,
-            storageTotalMB: m.storageTotalMB,
-            fileCount: m.fileCount,
-            folderCount: m.folderCount,
-          }
-        })
-        log.info(`[CRON][MÉTRICAS][MAIN] alias=${main.alias||'--'} usados=${m.storageUsedMB}MB de ${m.storageTotalMB}MB | archivos=${m.fileCount} carpetas=${m.folderCount} (fuente=${m.storageSource})`)
-      } catch(e){ log.warn(`[CRON][MÉTRICAS][MAIN][WARN] No se pudo actualizar métricas: ${e.message}`) }
-      await safeMegaLogout(buildCtx(main), 'phase1-main-post')
-    }, 'CRON-PHASE1')
-    log.info(`[CRON][RESUMEN][FASE1] existentes=${existingSet.size} faltantes=${needDownload.size} linksRegenerados=${regeneratedLinks}`)
-
-    // FASE 2: Descargar faltantes desde BACKUPs
-    if (needDownload.size){
-      for (const b of backupAccounts){
-        if (!needDownload.size) break
-        const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
-        await withMegaLock( async () => {
-          const px = await setStickyProxyForAccount(b);
-          if (!px?.ok) throw new Error(`NO_PROXY backup phase2: ${px?.reason || 'unknown'}`);
-          await safeMegaLogout(buildCtx(b), 'phase2-backup-pre'); await megaLogin(payloadB, buildCtx(b))
-
-          let proxyIndex = 0;
-          const getProxyIndex = () => proxyIndex;
-          const setProxyIndex = (v) => { proxyIndex = v };
-          const reloginB = async () => {
-            await safeMegaLogout(buildCtx(b), 'stall-relogin');
-            await megaLogin(payloadB, buildCtx(b));
-          };
-
-          for (const [assetId, asset] of Array.from(needDownload.entries())){
-            const remoteBaseB = (b.baseFolder||'/').replaceAll('\\','/')
-            const remoteFolderB = path.posix.join(remoteBaseB, asset.slug)
-            let lsOut=''; try { const ls = await runCmd('mega-ls',[remoteFolderB],{ quiet:true }); lsOut=ls.out } catch { continue }
-            const fileName = pickFirstFileFromLs(lsOut); if (!fileName) continue
-            const remoteFile = path.posix.join(remoteFolderB, fileName)
-            const localTemp = path.join(TEMP_DIR, `restore-${asset.id}-${Date.now()}-${fileName}`)
-            try {
-              await megaGetWithStallRetry({
-                remoteFile,
-                destLocal: localTemp,
-                ctx: `${buildCtx(b)} asset=${asset.id}`,
-                account: b,
-                getProxyIndex,
-                setProxyIndex,
-                relogin: reloginB,
-              });
-              if (fs.existsSync(localTemp)){
-                const size = fs.statSync(localTemp).size
-                recovered.set(asset.id,{ fileName, localTemp, size }); needDownload.delete(asset.id)
-                log.info(`[CRON][DESCARGA] asset=${asset.id} desde backup=${b.id} bytes=${size}`)
-              }
-            } catch (e){ log.warn(`[CRON][DESCARGA] fallo asset=${asset.id} desde backup=${b.id} -> ${e.message}`) }
-          }
-          await safeMegaLogout(buildCtx(b), 'phase2-backup-post')
-
-        }, `CRON-DL-${b.id}`)
+          await prisma.megaAccount.update({
+            where: { id: m.id },
+            data: { status: 'ERROR', statusMessage: `Fallo cron: ${String(e.message).slice(0, 200)}` }
+          });
+          const errBody = `Ocurrió un error al procesar/restaurar grupo (MAIN id=${m.id} alias=${m.alias || '--'}): ${e.message}`;
+          await prisma.notification.create({
+            data: {
+              title: 'Error en revisión/restauración automática de backups',
+              body: truncateBody(errBody),
+              status: 'UNREAD',
+              type: 'STORAGE',
+              typeStatus: 'ERROR'
+            }
+          });
+        } catch {}
+        summaryResults.push({ mainId: m.id, ok: false, error: e.message });
       }
     }
 
-    // FASE 3: Subir a MAIN y exportar link
-    await withMegaLock(async () => {
-      if (recovered.size){
-        const px = await setStickyProxyForAccount(main);
-        if (!px?.ok) throw new Error(`NO_PROXY main phase3: ${px?.reason || 'unknown'}`);
-        const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag)
-        await safeMegaLogout(buildCtx(main), 'phase3-main-pre'); await megaLogin(payload, buildCtx(main))
-        let proxyIndex = 0;
-        const getProxyIndex = () => proxyIndex;
-        const setProxyIndex = (v) => { proxyIndex = v };
-        const reloginMain = async () => {
-          await safeMegaLogout(buildCtx(main), 'stall-relogin');
-          await megaLogin(payload, buildCtx(main));
-        };
+    return { ok: true, batchSize, processed: summaryResults.length, results: summaryResults };
 
-        for (const [assetId, info] of recovered.entries()){
-          const asset = assetMap.get(assetId)
-          const remoteBase = (main.baseFolder||'/').replaceAll('\\','/')
-          const remoteFolder = path.posix.join(remoteBase, asset.slug)
-            try { await runCmd('mega-mkdir',['-p', remoteFolder],{ quiet:true }) } catch{}
-          const remoteFile = path.posix.join(remoteFolder, info.fileName)
-          try {
-            await megaPutWithStallRetry({
-              localPath: info.localTemp,
-              remoteFolderOrFile: remoteFolder,
-              ctx: `${buildCtx(main)} asset=${assetId}`,
-              account: main,
-              getProxyIndex,
-              setProxyIndex,
-              relogin: reloginMain,
-            });
-            try { await runCmd('mega-export',['-d', remoteFile],{ quiet:true }) } catch{}
-            const exp = await runCmd('mega-export',['-a', remoteFile],{ quiet:true })
-            const m = exp.out.match(/https?:\/\/mega\.nz\/\S+/i)
-            if (!m) throw new Error('No link')
-            await prisma.asset.update({ where:{ id: asset.id }, data:{ megaLink:m[0], status:'PUBLISHED' } })
-            restored++
-            log.info(`[CRON][SUBIDA] asset=${asset.id} restaurado y publicado`)
-          } catch (e){ log.error(`[CRON][SUBIDA] fallo asset=${asset.id} -> ${e.message}`) }
-          finally { try { if (fs.existsSync(info.localTemp)) fs.unlinkSync(info.localTemp) } catch{} }
-        }
-        await safeMegaLogout(buildCtx(main), 'phase3-main-post');
-      }
-    }, 'CRON-PHASE3')
-
-    const skippedExisting = existingSet.size
-    const notRecovered = Array.from(needDownload.keys()).length
-    const durMs = Date.now() - tStart
-    const completos = (restored===0 && skippedExisting===candidateAssets.length)
-    if (completos){
-      log.info(`[CRON][FINAL] Assets COMPLETOS para MAIN alias=${main.alias||'--'} (id=${main.id}). total=${candidateAssets.length} (existentes=${skippedExisting}, restaurados=0, linksRegenerados=${regeneratedLinks}). duraciónMs=${durMs}`)
-    } else {
-      log.info(`[CRON][FINAL] MAIN alias=${main.alias||'--'} (id=${main.id}). total=${candidateAssets.length} restaurados=${restored} existentes=${skippedExisting} linksRegenerados=${regeneratedLinks} noRecuperados=${notRecovered} duraciónMs=${durMs}`)
-    }
-    await prisma.megaAccount.update({ where:{ id: main.id }, data:{ lastCheckAt: new Date() } }).catch(()=>{})
-
-    // Solo ahora, cuando todo el proceso de MAIN ha finalizado, actualizamos BACKUPs
-    log.info('[CRON][WARMUP] Esperando 10s antes de autenticar BACKUPs (post-proceso MAIN)...')
-    await sleep(10000)
-    for (const b of backupAccounts){
-      if (!b?.credentials) continue
-      const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag)
-      await withMegaLock(async () => {
-        const px = await setStickyProxyForAccount(b);
-        if (!px?.ok) throw new Error(`NO_PROXY backup warmup: ${px?.reason || 'unknown'}`);
-        try {
-          await safeMegaLogout(buildCtx(b), 'warmup-backup-pre');
-          await megaLogin(payloadB, buildCtx(b))
-          const remoteBaseB = (b.baseFolder||'/').replaceAll('\\','/')
-          try {
-            const m = await getAccountMetrics(remoteBaseB)
-            await prisma.megaAccount.update({
-              where:{ id: b.id },
-              data:{
-                status: 'CONNECTED',
-                statusMessage: null,
-                lastCheckAt: new Date(),
-                storageUsedMB: m.storageUsedMB,
-                storageTotalMB: m.storageTotalMB,
-                fileCount: m.fileCount,
-                folderCount: m.folderCount,
-              }
-            })
-            log.info(`[CRON][MÉTRICAS][BACKUP] alias=${b.alias||'--'} usados=${m.storageUsedMB}MB de ${m.storageTotalMB}MB | archivos=${m.fileCount} carpetas=${m.folderCount} (fuente=${m.storageSource})`)
-          } catch(me){
-            await prisma.megaAccount.update({ where:{ id: b.id }, data:{ lastCheckAt: new Date(), status: 'CONNECTED', statusMessage: null } })
-            log.warn(`[CRON][MÉTRICAS][BACKUP][WARN] No se pudieron obtener métricas de alias=${b.alias||'--'}: ${me.message}`)
-          }
-        } catch(e){
-          log.warn(`[CRON][WARMUP][WARN] No se pudo autenticar backup id=${b.id}: ${e.message}`)
-          await notifyAutomationError({
-            title: 'Fallo validación/autenticación BACKUP (CRON)',
-            body: `Backup id=${b.id} alias=${b.alias||'--'} email=${b.email||'--'} | error=${e.message}`
-          })
-        } finally {
-          try { await safeMegaLogout(buildCtx(b), 'warmup-backup-finally') } catch{}
-        }
-      }, `CRON-WARMUP-${b.id}`)
-    }
-    
-    if (restored > 0) {
-      try {
-        const notifTitle = 'Restauración automática de assets desde backups completada'
-        const notifBody = `Cuenta MAIN ${main.alias||'--'} (${main.email||'--'}). Total: ${candidateAssets.length}. Restaurados: ${restored}. Existentes: ${skippedExisting}. Links regenerados: ${regeneratedLinks}. No recuperados: ${notRecovered}. Duración: ${durMs} ms.`
-        await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody), status: 'UNREAD', type: 'STORAGE', typeStatus: 'SUCCESS' } })
-      } catch(e){ log.warn('[NOTIF][CRON] No se pudo crear notificación (restored>0): '+e.message) }
-    } else if (notRecovered > 0) {
-      try {
-        const pendingIds = Array.from(needDownload.keys())
-        const notifTitle = 'Fallo en restauración automática de assets'
-        const notifBody = `Cuenta MAIN ${main.alias||'--'} (${main.email||'--'}). Faltantes=${pendingIds.length}. Ninguno restaurado. IDs pendientes: ${pendingIds.slice(0,50).join(', ')}${pendingIds.length>50?' ...':''}. Links regenerados: ${regeneratedLinks}. Duración: ${durMs} ms.`
-        await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody), status: 'UNREAD', type: 'STORAGE', typeStatus: 'ERROR' } })
-      } catch(e){ log.warn('[NOTIF][CRON][FAIL] No se pudo crear notificación de fallo: '+e.message) }
-    } else {
-      log.info('[CRON][NOTIF][SKIP] restored=0 pero noRecovered=0 (todos existen, sin restauraciones)')
-    }
-    return { ok:true, restored, existing: skippedExisting, regeneratedLinks, notRecovered, total: candidateAssets.length }
   } catch (e){
     log.error(`[CRON][RESTORE] fallo general: ${e.message}`)
-    try {
-      const errBody = `Ocurrió un error al restaurar backups hacia assets (MAIN id=${main?.id||'?'} alias=${main?.alias||'--'}): ${e.message}`
-      await prisma.notification.create({
-        data: {
-          title: 'Error en restauración automática de backups',
-          body: truncateBody(errBody),
-          status: 'UNREAD',
-          type: 'STORAGE',
-          typeStatus: 'ERROR'
-        }
-      })
-    } catch(err){ log.warn('[NOTIF][CRON][ERROR] No se pudo crear notificación de error: '+err.message) }
     return { ok:false, error:e.message }
   } finally {
     try { if (fs.existsSync(RUN_LOCK)) fs.unlinkSync(RUN_LOCK) } catch{}
     // Nunca tocar sesión/proxy si hay subidas activas (protege uploader en paralelo)
     if (!uploadsAreActiveNow()) {
       try {
-        /* CÓDIGO ANTERIOR RESPALDADO
-        await runCmd('mega-logout',[],{ quiet:true })
-        */
         await runCmd('mega-logout', ['--keep-session'], { quiet: true })
       } catch{}
       try { await clearProxy() } catch{}
