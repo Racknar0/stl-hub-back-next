@@ -166,14 +166,362 @@ async function megaLogin(payload, ctx) {
 
 
 // ==========================================
-// LÓGICA PRINCIPAL
+// PROCESAMIENTO INDIVIDUAL DE GRUPO (MAIN + BACKUPS)
+// ==========================================
+async function processSingleMainGroup(main, maxAssets) {
+  const tStart = Date.now();
+  if (!main.credentials) throw new Error('Main sin credenciales');
+  
+  const backupAccounts = (main.backups || []).map(r => r.backupAccount).filter(Boolean);
+  if (!backupAccounts.length) {
+    log.info(`[CRON] Main ${main.alias || main.id} sin backups`);
+    return { ok: true, skipped: true, reason: 'NO_BACKUPS' };
+  }
+
+  if (maxAssets === 0) return { ok: true, skipped: true, reason: 'MAX_ASSETS_ZERO' };
+
+  let candidateAssets = await prisma.asset.findMany({
+    where: { accountId: main.id },
+    select: { id: true, slug: true, archiveName: true, megaLink: true }
+  });
+  
+  if (!candidateAssets.length) {
+    const backupIds = (backupAccounts || []).map(b => b.id);
+    if (backupIds.length) {
+      const replicas = await prisma.assetReplica.findMany({
+        where: { accountId: { in: backupIds }, status: 'COMPLETED' },
+        select: { asset: { select: { id: true, slug: true, archiveName: true, megaLink: true } } }
+      });
+      const uniq = new Map();
+      for (const r of replicas) {
+        if (r.asset) uniq.set(r.asset.id, r.asset);
+      }
+      candidateAssets = Array.from(uniq.values());
+      if (candidateAssets.length) log.info(`[CRON][FALLBACK] Usando ${candidateAssets.length} assets de réplicas`);
+    }
+  }
+  const assetMap = new Map(candidateAssets.map(a => [a.id, a]));
+  if (maxAssets) candidateAssets = candidateAssets.slice(0, maxAssets);
+
+  // --- ESCENARIO 1: SOLO METRICAS ---
+  if (!candidateAssets.length) {
+    log.info(`[CRON] MAIN ${main.alias || main.id} sin assets. Actualizando métricas...`);
+    await withMegaLock(async () => {
+      const px = await setStickyProxyForAccount(main);
+      if (!px?.ok) throw new Error(`NO_PROXY main metrics: ${px?.reason || 'unknown'}`);
+      try {
+        const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag);
+        await safeMegaLogout(buildCtx(main), 'metrics-main-pre');
+        await megaLogin(payload, buildCtx(main));
+        const m = await getAccountMetrics((main.baseFolder || '/').replaceAll('\\', '/'));
+        await prisma.megaAccount.update({
+          where: { id: main.id },
+          data: {
+            status: 'CONNECTED',
+            lastCheckAt: new Date(),
+            storageUsedMB: m.storageUsedMB,
+            storageTotalMB: m.storageTotalMB,
+            fileCount: m.fileCount,
+            folderCount: m.folderCount,
+          }
+        });
+      } catch (e) {
+      } finally {
+        await safeMegaLogout(buildCtx(main), 'metrics-main-finally');
+      }
+    }, 'CRON-METRICS-MAIN');
+    
+    // Warmup Backups
+    for (const b of backupAccounts) {
+      if (!b?.credentials) continue;
+      await sleep(2000); 
+      await withMegaLock(async () => {
+        const px = await setStickyProxyForAccount(b);
+        if (!px?.ok) throw new Error(`NO_PROXY backup metrics: ${px?.reason || 'unknown'}`);
+        try {
+          const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag);
+          await safeMegaLogout(buildCtx(b), 'metrics-backup-pre');
+          await megaLogin(payloadB, buildCtx(b));
+          const m = await getAccountMetrics((b.baseFolder || '/').replaceAll('\\', '/'));
+          await prisma.megaAccount.update({
+            where: { id: b.id },
+            data: {
+              status: 'CONNECTED',
+              lastCheckAt: new Date(),
+              storageUsedMB: m.storageUsedMB,
+              storageTotalMB: m.storageTotalMB,
+              fileCount: m.fileCount,
+              folderCount: m.folderCount,
+            }
+          });
+        } catch (e) {
+        } finally {
+          await safeMegaLogout(buildCtx(b), 'metrics-backup-finally');
+        }
+      }, `CRON-METRICS-${b.id}`);
+    }
+    return { ok: true, skipped: true, reason: 'NO_ASSETS' };
+  }
+
+  // --- ESCENARIO 2: RESTAURACIÓN ---
+  log.info(`____ INICIANDO RESTAURACIÓN (ANTI-BAN) MAIN ${main.alias || main.id} ____`);
+  const existingSet = new Set(), needDownload = new Map(), recovered = new Map();
+  let regeneratedLinks = 0, restored = 0;
+
+  // FASE 1: MAIN (Scan)
+  await withMegaLock(async () => {
+    const px = await setStickyProxyForAccount(main);
+    if (!px?.ok) throw new Error(`NO_PROXY main phase1: ${px?.reason || 'unknown'}`);
+    const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag);
+    await safeMegaLogout(buildCtx(main), 'phase1-main-pre');
+    await megaLogin(payload, buildCtx(main));
+    const remoteBaseMain = (main.baseFolder || '/').replaceAll('\\', '/');
+    for (let i = 0; i < candidateAssets.length; i++) {
+      const asset = candidateAssets[i];
+      const remoteFolder = path.posix.join(remoteBaseMain, asset.slug);
+      const expectedFile = asset.archiveName ? path.basename(asset.archiveName) : null;
+      let lsOut = '';
+      try {
+        const ls = await runCmd('mega-ls', [remoteFolder], { quiet: true });
+        lsOut = ls.out;
+      } catch {}
+      const lines = String(lsOut).split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+      let fileName = null;
+      if (expectedFile && lines.includes(expectedFile)) fileName = expectedFile;
+      if (!fileName) fileName = pickFirstFileFromLs(lsOut);
+      const exists = !!fileName;
+      if (exists) {
+        existingSet.add(asset.id);
+        if (!asset.megaLink && fileName) {
+          try {
+            const remoteFile = path.posix.join(remoteFolder, fileName);
+            try { await runCmd('mega-export', ['-d', remoteFile], { quiet: true }); } catch {}
+            const exp = await runCmd('mega-export', ['-a', remoteFile], { quiet: true });
+            const m = exp.out.match(/https?:\/\/mega\.nz\/\S+/i);
+            if (m) {
+              await prisma.asset.update({ where: { id: asset.id }, data: { megaLink: m[0], status: 'PUBLISHED' } });
+              regeneratedLinks++;
+            }
+          } catch (e) {
+            log.warn(`[CRON][ESCANEO] No se pudo regenerar link para asset=${asset.id} -> ${e.message}`);
+          }
+        }
+      } else {
+        needDownload.set(asset.id, asset);
+      }
+    }
+    // Medimos y actualizamos métricas de la MAIN
+    try {
+      const m = await getAccountMetrics(remoteBaseMain);
+      await prisma.megaAccount.update({
+        where: { id: main.id },
+        data: {
+          status: 'CONNECTED',
+          statusMessage: null,
+          lastCheckAt: new Date(),
+          storageUsedMB: m.storageUsedMB,
+          storageTotalMB: m.storageTotalMB,
+          fileCount: m.fileCount,
+          folderCount: m.folderCount,
+        }
+      });
+      log.info(`[CRON][MÉTRICAS][MAIN] alias=${main.alias || '--'} usados=${m.storageUsedMB}MB de ${m.storageTotalMB}MB | archivos=${m.fileCount} carpetas=${m.folderCount} (fuente=${m.storageSource})`);
+    } catch (e) {
+      log.warn(`[CRON][MÉTRICAS][MAIN][WARN] No se pudo actualizar métricas: ${e.message}`);
+    }
+    await safeMegaLogout(buildCtx(main), 'phase1-main-post');
+  }, 'CRON-PHASE1');
+  log.info(`[CRON][RESUMEN][FASE1] existentes=${existingSet.size} faltantes=${needDownload.size} linksRegenerados=${regeneratedLinks}`);
+
+  // FASE 2: Descargar faltantes desde BACKUPs
+  if (needDownload.size) {
+    for (const b of backupAccounts) {
+      if (!needDownload.size) break;
+      const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag);
+      await withMegaLock(async () => {
+        const px = await setStickyProxyForAccount(b);
+        if (!px?.ok) throw new Error(`NO_PROXY backup phase2: ${px?.reason || 'unknown'}`);
+        await safeMegaLogout(buildCtx(b), 'phase2-backup-pre');
+        await megaLogin(payloadB, buildCtx(b));
+
+        let proxyIndex = 0;
+        const getProxyIndex = () => proxyIndex;
+        const setProxyIndex = (v) => { proxyIndex = v; };
+        const reloginB = async () => {
+          await safeMegaLogout(buildCtx(b), 'stall-relogin');
+          await megaLogin(payloadB, buildCtx(b));
+        };
+
+        for (const [assetId, asset] of Array.from(needDownload.entries())) {
+          const remoteBaseB = (b.baseFolder || '/').replaceAll('\\', '/');
+          const remoteFolderB = path.posix.join(remoteBaseB, asset.slug);
+          let lsOut = '';
+          try {
+            const ls = await runCmd('mega-ls', [remoteFolderB], { quiet: true });
+            lsOut = ls.out;
+          } catch {
+            continue;
+          }
+          const fileName = pickFirstFileFromLs(lsOut);
+          if (!fileName) continue;
+          const remoteFile = path.posix.join(remoteFolderB, fileName);
+          const localTemp = path.join(TEMP_DIR, `restore-${asset.id}-${Date.now()}-${fileName}`);
+          try {
+            await megaGetWithStallRetry({
+              remoteFile,
+              destLocal: localTemp,
+              ctx: `${buildCtx(b)} asset=${asset.id}`,
+              account: b,
+              getProxyIndex,
+              setProxyIndex,
+              relogin: reloginB,
+            });
+            if (fs.existsSync(localTemp)) {
+              const size = fs.statSync(localTemp).size;
+              recovered.set(asset.id, { fileName, localTemp, size });
+              needDownload.delete(asset.id);
+              log.info(`[CRON][DESCARGA] asset=${asset.id} desde backup=${b.id} bytes=${size}`);
+            }
+          } catch (e) {
+            log.warn(`[CRON][DESCARGA] fallo asset=${asset.id} desde backup=${b.id} -> ${e.message}`);
+          }
+        }
+        await safeMegaLogout(buildCtx(b), 'phase2-backup-post');
+      }, `CRON-DL-${b.id}`);
+    }
+  }
+
+  // FASE 3: Subir a MAIN y exportar link
+  await withMegaLock(async () => {
+    if (recovered.size) {
+      const px = await setStickyProxyForAccount(main);
+      if (!px?.ok) throw new Error(`NO_PROXY main phase3: ${px?.reason || 'unknown'}`);
+      const payload = decryptToJson(main.credentials.encData, main.credentials.encIv, main.credentials.encTag);
+      await safeMegaLogout(buildCtx(main), 'phase3-main-pre');
+      await megaLogin(payload, buildCtx(main));
+      let proxyIndex = 0;
+      const getProxyIndex = () => proxyIndex;
+      const setProxyIndex = (v) => { proxyIndex = v };
+      const reloginMain = async () => {
+        await safeMegaLogout(buildCtx(main), 'stall-relogin');
+        await megaLogin(payload, buildCtx(main));
+      };
+
+      for (const [assetId, info] of recovered.entries()) {
+        const asset = assetMap.get(assetId);
+        const remoteBase = (main.baseFolder || '/').replaceAll('\\', '/');
+        const remoteFolder = path.posix.join(remoteBase, asset.slug);
+        try { await runCmd('mega-mkdir', ['-p', remoteFolder], { quiet: true }); } catch {}
+        const remoteFile = path.posix.join(remoteFolder, info.fileName);
+        try {
+          await megaPutWithStallRetry({
+            localPath: info.localTemp,
+            remoteFolderOrFile: remoteFolder,
+            ctx: `${buildCtx(main)} asset=${assetId}`,
+            account: main,
+            getProxyIndex,
+            setProxyIndex,
+            relogin: reloginMain,
+          });
+          try { await runCmd('mega-export', ['-d', remoteFile], { quiet: true }); } catch {}
+          const exp = await runCmd('mega-export', ['-a', remoteFile], { quiet: true });
+          const m = exp.out.match(/https?:\/\/mega\.nz\/\S+/i);
+          if (!m) throw new Error('No link');
+          await prisma.asset.update({ where: { id: asset.id }, data: { megaLink: m[0], status: 'PUBLISHED' } });
+          restored++;
+          log.info(`[CRON][SUBIDA] asset=${asset.id} restaurado y publicado`);
+        } catch (e) {
+          log.error(`[CRON][SUBIDA] fallo asset=${asset.id} -> ${e.message}`);
+        } finally {
+          try { if (fs.existsSync(info.localTemp)) fs.unlinkSync(info.localTemp); } catch {}
+        }
+      }
+      await safeMegaLogout(buildCtx(main), 'phase3-main-post');
+    }
+  }, 'CRON-PHASE3');
+
+  const skippedExisting = existingSet.size;
+  const notRecovered = Array.from(needDownload.keys()).length;
+  const durMs = Date.now() - tStart;
+  const completos = (restored === 0 && skippedExisting === candidateAssets.length);
+  if (completos) {
+    log.info(`[CRON][FINAL] Assets COMPLETOS para MAIN alias=${main.alias || '--'} (id=${main.id}). total=${candidateAssets.length} (existentes=${skippedExisting}, restaurados=0, linksRegenerados=${regeneratedLinks}). duraciónMs=${durMs}`);
+  } else {
+    log.info(`[CRON][FINAL] MAIN alias=${main.alias || '--'} (id=${main.id}). total=${candidateAssets.length} restaurados=${restored} existentes=${skippedExisting} linksRegenerados=${regeneratedLinks} noRecuperados=${notRecovered} duraciónMs=${durMs}`);
+  }
+  await prisma.megaAccount.update({ where: { id: main.id }, data: { lastCheckAt: new Date() } }).catch(() => {});
+
+  // Solo ahora, cuando todo el proceso de MAIN ha finalizado, actualizamos BACKUPs
+  log.info('[CRON][WARMUP] Esperando 10s antes de autenticar BACKUPs (post-proceso MAIN)...');
+  await sleep(10000);
+  for (const b of backupAccounts) {
+    if (!b?.credentials) continue;
+    await sleep(2000);
+    await withMegaLock(async () => {
+      const px = await setStickyProxyForAccount(b);
+      if (!px?.ok) throw new Error(`NO_PROXY backup warmup: ${px?.reason || 'unknown'}`);
+      try {
+        const payloadB = decryptToJson(b.credentials.encData, b.credentials.encIv, b.credentials.encTag);
+        await safeMegaLogout(buildCtx(b), 'warmup-backup-pre');
+        await megaLogin(payloadB, buildCtx(b));
+        const remoteBaseB = (b.baseFolder || '/').replaceAll('\\', '/');
+        try {
+          const m = await getAccountMetrics(remoteBaseB);
+          await prisma.megaAccount.update({
+            where: { id: b.id },
+            data: {
+              status: 'CONNECTED',
+              statusMessage: null,
+              lastCheckAt: new Date(),
+              storageUsedMB: m.storageUsedMB,
+              storageTotalMB: m.storageTotalMB,
+              fileCount: m.fileCount,
+              folderCount: m.folderCount,
+            }
+          });
+          log.info(`[CRON][MÉTRICAS][BACKUP] alias=${b.alias || '--'} usados=${m.storageUsedMB}MB de ${m.storageTotalMB}MB | archivos=${m.fileCount} carpetas=${m.folderCount}`);
+        } catch (me) {
+          await prisma.megaAccount.update({ where: { id: b.id }, data: { lastCheckAt: new Date(), status: 'CONNECTED', statusMessage: null } });
+          log.warn(`[CRON][MÉTRICAS][BACKUP][WARN] No se pudieron obtener métricas de alias=${b.alias || '--'}: ${me.message}`);
+        }
+      } catch (e) {
+        log.warn(`[CRON][WARMUP][WARN] No se pudo autenticar backup id=${b.id}: ${e.message}`);
+        await notifyAutomationError({
+          title: 'Fallo validación/autenticación BACKUP (CRON)',
+          body: `Backup id=${b.id} alias=${b.alias || '--'} email=${b.email || '--'} | error=${e.message}`
+        });
+      } finally {
+        try { await safeMegaLogout(buildCtx(b), 'warmup-backup-finally'); } catch {}
+      }
+    }, `CRON-WARMUP-${b.id}`);
+  }
+  
+  if (restored > 0) {
+    try {
+      const notifTitle = 'Restauración automática de assets desde backups completada';
+      const notifBody = `Cuenta MAIN ${main.alias || '--'} (${main.email || '--'}). Total: ${candidateAssets.length}. Restaurados: ${restored}. Existentes: ${skippedExisting}. Links regenerados: ${regeneratedLinks}. No recuperados: ${notRecovered}. Duración: ${durMs} ms.`
+      await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody), status: 'UNREAD', type: 'STORAGE', typeStatus: 'SUCCESS' } });
+    } catch (e) { log.warn('[NOTIF][CRON] No se pudo crear notificación (restored>0): ' + e.message); }
+  } else if (notRecovered > 0) {
+    try {
+      const pendingIds = Array.from(needDownload.keys());
+      const notifTitle = 'Fallo en restauración automática de assets';
+      const notifBody = `Cuenta MAIN ${main.alias || '--'} (${main.email || '--'}). Faltantes=${pendingIds.length}. Ninguno restaurado. IDs pendientes: ${pendingIds.slice(0, 50).join(', ')}${pendingIds.length > 50 ? ' ...' : ''}. Links regenerados: ${regeneratedLinks}. Duración: ${durMs} ms.`;
+      await prisma.notification.create({ data: { title: notifTitle, body: truncateBody(notifBody), status: 'UNREAD', type: 'STORAGE', typeStatus: 'ERROR' } });
+    } catch (e) { log.warn('[NOTIF][CRON][FAIL] No se pudo crear notificación de fallo: ' + e.message); }
+  } else {
+    log.info('[CRON][NOTIF][SKIP] restored=0 pero noRecovered=0 (todos existen, sin restauraciones)');
+  }
+  return { ok: true, restored, existing: skippedExisting, regeneratedLinks, notRecovered, total: candidateAssets.length };
+}
+
+// ==========================================
+// LÓGICA PRINCIPAL (EJECUCIÓN DINÁMICA)
 // ==========================================
 export async function runAutoRestoreMain(){
-  const tStart = Date.now()
   const RUN_LOCK = path.join(TEMP_DIR, 'auto-restore-main.running')
   const forced = process.env.MAIN_ACCOUNT_ID?Number(process.env.MAIN_ACCOUNT_ID):null
   const maxAssets = process.env.MAX_ASSETS!==undefined ? Number(process.env.MAX_ASSETS) : null
-  let main
   
   try {
      await runCmd('mega-speed-limit', ['-d', '2048'], { quiet:true });
