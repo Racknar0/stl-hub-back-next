@@ -36,11 +36,20 @@ const SEVEN_ZIP = (() => {
  */
 export function run7z(args, options = {}) {
   const onProgress = typeof options?.onProgress === 'function' ? options.onProgress : null;
+  const timeoutMs = Number(options?.timeoutMs) || 5 * 60 * 1000;
   return new Promise((resolve, reject) => {
-    const child = spawn(SEVEN_ZIP, args, { shell: false });
+    // stdio: ['ignore', 'pipe', 'pipe'] evita prompts interactivos de stdin
+    const child = spawn(SEVEN_ZIP, args, { shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
     let stdoutCarry = '';
     let stderrCarry = '';
+    let timedOut = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill('SIGKILL'); } catch {}
+      reject(new Error(`7z timeout tras ${Math.round(timeoutMs / 1000)}s de ejecución`));
+    }, timeoutMs);
 
     const emitProgressFromChunk = (chunkText, source) => {
       if (!onProgress) return;
@@ -82,8 +91,14 @@ export function run7z(args, options = {}) {
       emitProgressFromChunk(parts.join('\n'), 'stderr');
     });
 
-    child.on('error', (e) => reject(new Error(`Spawn error: ${e.message}`)));
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      if (!timedOut) reject(new Error(`Spawn error: ${e.message}`));
+    });
+
     child.on('close', code => {
+      clearTimeout(timer);
+      if (timedOut) return;
       emitProgressFromChunk(stdoutCarry, 'stdout-tail');
       emitProgressFromChunk(stderrCarry, 'stderr-tail');
       if (code === 0) resolve(out);
@@ -103,11 +118,20 @@ export function run7z(args, options = {}) {
  */
 function runUnrar(args, options = {}) {
   const onProgress = typeof options?.onProgress === 'function' ? options.onProgress : null;
+  const timeoutMs = Number(options?.timeoutMs) || 5 * 60 * 1000;
   return new Promise((resolve, reject) => {
-    const child = spawn('unrar', args, { shell: false });
+    // stdio: ['ignore', 'pipe', 'pipe'] evita prompts interactivos de contraseña
+    const child = spawn('unrar', args, { shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
     let stdoutCarry = '';
     let stderrCarry = '';
+    let timedOut = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill('SIGKILL'); } catch {}
+      reject(new Error(`unrar timeout tras ${Math.round(timeoutMs / 1000)}s de ejecución`));
+    }, timeoutMs);
 
     const emitProgressFromChunk = (chunkText, source) => {
       if (!onProgress) return;
@@ -141,8 +165,14 @@ function runUnrar(args, options = {}) {
       emitProgressFromChunk(parts.join('\n'), 'stderr');
     });
 
-    child.on('error', (e) => reject(new Error(`Spawn error: ${e.message}`)));
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      if (!timedOut) reject(new Error(`Spawn error: ${e.message}`));
+    });
+
     child.on('close', code => {
+      clearTimeout(timer);
+      if (timedOut) return;
       emitProgressFromChunk(stdoutCarry, 'stdout-tail');
       emitProgressFromChunk(stderrCarry, 'stderr-tail');
       if (code === 0) resolve(out);
@@ -171,7 +201,8 @@ export function isUnsupportedArchiveMethodError(msg = '') {
  * @returns {Promise<{ tool: '7z' | 'unrar' }>}
  */
 export async function extractArchiveWithFallback(archivePath, extractDir, options = {}) {
-  const args7z = ['x', archivePath, `-o${extractDir}`, '-y', '-aoa'];
+  // -p- evita que 7z pregunte contraseña interactivamente
+  const args7z = ['x', archivePath, `-o${extractDir}`, '-y', '-aoa', '-p-'];
   // Si hay callback de progreso, agregar flags para que 7z emita output detallado
   if (options.onProgress) {
     args7z.push('-bb1', '-bsp1');
@@ -188,8 +219,9 @@ export async function extractArchiveWithFallback(archivePath, extractDir, option
     }
 
     // Fallback para VPS con p7zip sin soporte completo de RAR.
+    // -p- evita que unrar pregunte contraseña interactivamente
     try {
-      await runUnrar(['x', '-o+', '-y', archivePath, `${extractDir}${path.sep}`], options);
+      await runUnrar(['x', '-o+', '-y', '-p-', archivePath, `${extractDir}${path.sep}`], options);
       return { tool: 'unrar' };
     } catch (e2) {
       const secondErr = String(e2?.message || e2);
