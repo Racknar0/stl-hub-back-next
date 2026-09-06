@@ -235,6 +235,7 @@ export const searchByLocalImageHandler = async (req, res) => {
         id: db.id,
         title: db.title,
         titleEn: db.titleEn,
+        archiveName: db.archiveName,
         slug: db.slug,
         images: Array.isArray(db.images) ? db.images : [],
         categories: db.categories || [],
@@ -244,6 +245,14 @@ export const searchByLocalImageHandler = async (req, res) => {
         _score: r.score,
       };
     }).filter(Boolean);
+
+    const batchItemId = Number(req.body?.batchItemId || 0);
+    if (batchItemId > 0) {
+      await prisma.batchImportItem.update({
+        where: { id: batchItemId },
+        data: { similarResults: items },
+      }).catch((e) => console.warn('[AI MULTIMODAL] No se pudo guardar similarResults en batch item:', e?.message));
+    }
 
     return res.json({ items, total: items.length });
   } catch (error) {

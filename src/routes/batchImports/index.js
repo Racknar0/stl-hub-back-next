@@ -1,7 +1,23 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
-import { scanLocalDirectory, getScanStatus, getBatchQueue, retryBatchAiFailedItems, updateBatchItem, updateBatchItemsBulk, confirmBatchItems, stopAndResetBatchToDraft, deleteBatchItem, purgeAll, purgeCompleted, retryBatchItemWithAnotherProxy } from '../../controllers/batchImport.controller.js';
+import { 
+  scanLocalDirectory, 
+  getScanStatus, 
+  getBatchQueue, 
+  retryBatchAiFailedItems, 
+  updateBatchItem, 
+  updateBatchItemsBulk, 
+  confirmBatchItems, 
+  stopAndResetBatchToDraft, 
+  deleteBatchItem, 
+  purgeAll, 
+  purgeCompleted, 
+  retryBatchItemWithAnotherProxy,
+  precalculateBatchSimilars,
+  stopPrecalculateBatchSimilars,
+  getPrecalculateSimilarsStatus
+} from '../../controllers/batchImport.controller.js';
 import { requireAuth } from '../../middlewares/auth.js';
 
 const router = express.Router();
@@ -10,6 +26,9 @@ router.post('/scan', requireAuth, scanLocalDirectory);
 router.get('/scan-status', requireAuth, getScanStatus);
 router.post('/retry-ai', requireAuth, retryBatchAiFailedItems);
 router.post('/ai-metadata', requireAuth, retryBatchAiFailedItems);
+router.post('/precalculate-similars', requireAuth, precalculateBatchSimilars);
+router.post('/precalculate-similars/stop', requireAuth, stopPrecalculateBatchSimilars);
+router.get('/precalculate-similars/status', requireAuth, getPrecalculateSimilarsStatus);
 router.get('/', requireAuth, getBatchQueue);
 router.post('/items-bulk', requireAuth, updateBatchItemsBulk);
 router.patch('/items/:id', requireAuth, updateBatchItem);

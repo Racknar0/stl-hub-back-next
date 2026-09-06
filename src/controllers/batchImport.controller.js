@@ -6,6 +6,8 @@ import { requestBatchProxySwitch, requestBatchStop } from '../utils/batchProxySw
 import { buildBatchScanRequestData } from '../helpers/batchAi/buildBatchScanRequestData.js';
 import { callGoogleBatchScan } from '../helpers/batchAi/callGoogleBatchScan.js';
 import { extractArchiveWithFallback, isUnsupportedArchiveMethodError } from '../utils/archiveExtractor.js';
+import sharp from 'sharp';
+import qdrantMultimodalService from '../services/qdrantMultimodal.service.js';
 
 const prisma = new PrismaClient();
 const UPLOADS_DIR = path.resolve('uploads');
@@ -1895,3 +1897,222 @@ export const updateBatchItemsBulk = async (req, res) => {
     return res.status(500).json({ success: false, error: error.message });
   }
 };
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PRE-CÁLCULO DE SIMILARES EN SEGUNDO PLANO (MODALIDAD SEVERA / RATE-LIMIT SAFE)
+// ══════════════════════════════════════════════════════════════════════════════
+
+let precalculateSimilarsState = {
+  running: false,
+  total: 0,
+  processed: 0,
+  currentItemId: null,
+  currentTitle: '',
+  errors: 0,
+  stopped: false,
+  startedAt: null,
+  finishedAt: null,
+};
+
+export const precalculateBatchSimilars = async (req, res) => {
+  try {
+    if (precalculateSimilarsState.running) {
+      return res.json({
+        success: true,
+        message: 'El pre-cálculo ya está en ejecución.',
+        status: precalculateSimilarsState,
+      });
+    }
+
+    // Buscar ítems en borrador o encolados que aún no tengan similares calculados
+    const pendingItems = await prisma.batchImportItem.findMany({
+      where: {
+        status: { in: ['DRAFT', 'QUEUED', 'PENDING'] },
+        similarResults: null,
+      },
+      select: {
+        id: true,
+        title: true,
+        folderName: true,
+        images: true,
+      },
+      orderBy: { id: 'asc' },
+    });
+
+    if (!pendingItems.length) {
+      return res.json({
+        success: true,
+        message: 'No hay ítems pendientes de pre-calcular similares.',
+        total: 0,
+        processed: 0,
+      });
+    }
+
+    // Inicializar estado
+    precalculateSimilarsState = {
+      running: true,
+      total: pendingItems.length,
+      processed: 0,
+      currentItemId: null,
+      currentTitle: '',
+      errors: 0,
+      stopped: false,
+      startedAt: Date.now(),
+      finishedAt: null,
+    };
+
+    // Responder inmediatamente para no bloquear la petición HTTP
+    res.json({
+      success: true,
+      message: `Pre-cálculo de similares iniciado para ${pendingItems.length} ítems.`,
+      total: pendingItems.length,
+    });
+
+    // Ejecutar bucle en segundo plano
+    (async () => {
+      console.info(`[PRECALCULATE SIMILARS] Iniciando proceso para ${pendingItems.length} ítems en lote...`);
+
+      for (let i = 0; i < pendingItems.length; i++) {
+        if (precalculateSimilarsState.stopped) {
+          console.info('[PRECALCULATE SIMILARS] Proceso detenido por el usuario.');
+          break;
+        }
+
+        const item = pendingItems[i];
+        precalculateSimilarsState.currentItemId = item.id;
+        precalculateSimilarsState.currentTitle = item.title || item.folderName || `Ítem #${item.id}`;
+
+        try {
+          // 1. Obtener buffer de imagen principal
+          const images = Array.isArray(item.images) ? item.images : [];
+          const primaryImage = images.length > 0 ? images[0] : null;
+          let imageBuffer = null;
+          let mimeType = 'image/jpeg';
+
+          if (primaryImage) {
+            const relativePath = String(primaryImage).replace(/^(\/|\\)+/, '').replace(/^uploads(\/|\\)/i, '');
+            const absolutePath = path.resolve(UPLOADS_DIR, relativePath);
+
+            if (absolutePath.startsWith(path.resolve(UPLOADS_DIR)) && fs.existsSync(absolutePath)) {
+              const rawBuffer = fs.readFileSync(absolutePath);
+              // Redimensionar imagen a 640x640 JPEG para ser ultra ligeros en tokens de Gemini y red
+              imageBuffer = await sharp(rawBuffer)
+                .resize(640, 640, { fit: 'inside', withoutEnlargement: true })
+                .jpeg({ quality: 80 })
+                .toBuffer();
+              mimeType = 'image/jpeg';
+            }
+          }
+
+          let enrichedSimilars = [];
+
+          if (imageBuffer) {
+            const titleContext = String(item.title || item.folderName || '').trim();
+
+            // Reintentos seguros ante 429 con backoff exponencial
+            let searchResults = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              try {
+                searchResults = await qdrantMultimodalService.searchByImage(
+                  imageBuffer,
+                  mimeType,
+                  titleContext,
+                  6,
+                  0.30
+                );
+                break;
+              } catch (searchErr) {
+                const is429 = searchErr?.message?.includes('429') ||
+                              searchErr?.message?.includes('RESOURCE_EXHAUSTED') ||
+                              searchErr?.status === 429;
+                if (is429 && attempt < 3) {
+                  const waitSec = attempt * 8;
+                  console.warn(`[PRECALCULATE SIMILARS] 429 detectado para ítem ${item.id}. Esperando ${waitSec}s antes de reintentar (intento ${attempt}/3)...`);
+                  await new Promise((r) => setTimeout(r, waitSec * 1000));
+                } else {
+                  throw searchErr;
+                }
+              }
+            }
+
+            if (Array.isArray(searchResults) && searchResults.length > 0) {
+              const ids = searchResults.map((r) => Number(r.id)).filter((n) => Number.isFinite(n) && n > 0);
+              const dbAssets = await prisma.asset.findMany({
+                where: { id: { in: ids } },
+                include: {
+                  categories: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+                  tags: { select: { id: true, name: true, nameEn: true, slug: true, slugEn: true } },
+                },
+              });
+
+              const dbMap = new Map(dbAssets.map((a) => [a.id, a]));
+
+              enrichedSimilars = searchResults
+                .map((r) => {
+                  const db = dbMap.get(Number(r.id));
+                  if (!db) return null;
+                  return {
+                    id: db.id,
+                    title: db.title,
+                    titleEn: db.titleEn,
+                    archiveName: db.archiveName,
+                    slug: db.slug,
+                    images: Array.isArray(db.images) ? db.images : [],
+                    categories: db.categories || [],
+                    tags: db.tags || [],
+                    tagsEs: (db.tags || []).map((t) => t.name).filter(Boolean),
+                    tagsEn: (db.tags || []).map((t) => t.nameEn || t.name).filter(Boolean),
+                    _score: r.score,
+                  };
+                })
+                .filter(Boolean);
+            }
+          }
+
+          // 2. Guardar en base de datos ([] si no hay similares para marcarlo como analizado y único)
+          await prisma.batchImportItem.update({
+            where: { id: item.id },
+            data: { similarResults: enrichedSimilars },
+          });
+
+          precalculateSimilarsState.processed++;
+          console.info(`[PRECALCULATE SIMILARS] [${i + 1}/${pendingItems.length}] Ítem ${item.id} (${item.title || item.folderName}): ${enrichedSimilars.length} similares.`);
+        } catch (itemErr) {
+          precalculateSimilarsState.errors++;
+          console.error(`[PRECALCULATE SIMILARS] Error en ítem ${item.id}:`, itemErr?.message || itemErr);
+        }
+
+        // 3. Pausa de seguridad de 2.5s entre llamadas para mantenerse holgadamente bajo la cuota de RPM
+        if (i < pendingItems.length - 1 && !precalculateSimilarsState.stopped) {
+          await new Promise((r) => setTimeout(r, 2500));
+        }
+      }
+
+      precalculateSimilarsState.running = false;
+      precalculateSimilarsState.finishedAt = Date.now();
+      console.info(`[PRECALCULATE SIMILARS] Proceso finalizado. Total procesados: ${precalculateSimilarsState.processed}/${pendingItems.length}, Errores: ${precalculateSimilarsState.errors}`);
+    })().catch((bgErr) => {
+      console.error('[PRECALCULATE SIMILARS] Error no capturado en bucle de fondo:', bgErr);
+      precalculateSimilarsState.running = false;
+      precalculateSimilarsState.finishedAt = Date.now();
+    });
+  } catch (err) {
+    console.error('[PRECALCULATE SIMILARS] Error iniciando pre-cálculo:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+export const stopPrecalculateBatchSimilars = async (_req, res) => {
+  if (precalculateSimilarsState.running) {
+    precalculateSimilarsState.stopped = true;
+    precalculateSimilarsState.running = false;
+    precalculateSimilarsState.finishedAt = Date.now();
+    return res.json({ success: true, message: 'Pre-cálculo detenido.', status: precalculateSimilarsState });
+  }
+  return res.json({ success: true, message: 'No hay pre-cálculo en ejecución.', status: precalculateSimilarsState });
+};
+
+export const getPrecalculateSimilarsStatus = async (_req, res) => {
+  return res.json({ success: true, status: precalculateSimilarsState });
+};
+

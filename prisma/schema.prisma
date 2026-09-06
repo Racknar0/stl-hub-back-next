@@ -671,6 +671,7 @@ model BatchImportItem {
   categories    Json?                
   profiles      String?              
   similarityApproved Boolean         @default(false)
+  similarResults     Json?
   createdAssetId Int?                
 
   mainStatus    String?              @default("PENDING")
