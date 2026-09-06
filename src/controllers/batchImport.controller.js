@@ -1295,13 +1295,40 @@ export const getBatchQueue = async (req, res) => {
   }
 };
 
-// POST /api/batch-imports/retry-ai
+// ══════════════════════════════════════════════════════════════════════════════
+// GENERACIÓN DE METADATOS CON IA (ASÍNCRONO / NON-BLOCKING)
+// ══════════════════════════════════════════════════════════════════════════════
+
+let aiMetadataStatus = {
+  running: false,
+  total: 0,
+  processed: 0,
+  currentItemTitle: '',
+  errors: 0,
+  startedAt: null,
+  finishedAt: null,
+  message: 'Sin proceso de metadatos IA en ejecución.',
+};
+
+export const getAiMetadataStatus = async (_req, res) => {
+  return res.json({ success: true, status: aiMetadataStatus });
+};
+
+// POST /api/batch-imports/retry-ai  y  POST /api/batch-imports/ai-metadata
 export const retryBatchAiFailedItems = async (req, res) => {
   try {
     const rawIds = Array.isArray(req?.body?.itemIds) ? req.body.itemIds : [];
     const requestedIds = Array.from(new Set(rawIds.map(Number).filter((n) => Number.isFinite(n) && n > 0)));
     if (!requestedIds.length) {
       return res.status(400).json({ success: false, message: 'itemIds requerido' });
+    }
+
+    if (aiMetadataStatus.running) {
+      return res.json({
+        success: true,
+        message: 'La generación de metadatos IA ya está en ejecución.',
+        status: aiMetadataStatus,
+      });
     }
 
     const items = await prisma.batchImportItem.findMany({
@@ -1314,101 +1341,91 @@ export const retryBatchAiFailedItems = async (req, res) => {
     if (!targets.length) {
       return res.json({
         success: true,
-        message: 'No hay items elegibles para reintento de IA.',
+        message: 'No hay items elegibles para generación de metadatos IA.',
         requestedCount: requestedIds.length,
         targetCount: 0,
-        apply: { applied: 0, skipped: 0, failed: 0, total: 0 },
-        aiStats: null,
-        aiFailedItems: 0,
-        aiRateLimitedItems: 0,
-        aiRetryAttempts: 0,
-        aiFailedItemIds: [],
       });
     }
 
-    const aiScannedItems = targets.map(buildAiScanItemFromBatchItem);
-    const [categoriesCatalog, tagsCatalog] = await Promise.all([
-      prisma.category.findMany({
-        orderBy: { name: 'asc' },
-        select: { id: true, name: true, slug: true, nameEn: true, slugEn: true },
-      }),
-      prisma.tag.findMany({
-        orderBy: { name: 'asc' },
-        select: { id: true, name: true, slug: true, nameEn: true, slugEn: true },
-      }),
-    ]);
+    aiMetadataStatus = {
+      running: true,
+      total: targets.length,
+      processed: 0,
+      currentItemTitle: '',
+      errors: 0,
+      startedAt: Date.now(),
+      finishedAt: null,
+      message: `Iniciando metadatos IA para ${targets.length} ítems...`,
+    };
 
-    const aiPayload = buildBatchScanRequestData(req, {
-      foldersCount: 0,
-      newlyQueuedCount: 0,
-      scannedItems: aiScannedItems,
-    }, {
-      categories: categoriesCatalog,
-      tags: tagsCatalog,
+    // Responder de inmediato para evitar que Nginx corte la conexión con 504 Time-out
+    res.json({
+      success: true,
+      message: `Generación de metadatos IA iniciada en segundo plano para ${targets.length} ítems.`,
+      targetCount: targets.length,
+      status: aiMetadataStatus,
     });
 
-    const rawTimeout = Number(process.env.BATCH_RETRY_AI_TIMEOUT_MS || 0);
-    const aiTimeoutMs = Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 0;
-
-    const aiPromise = callGoogleBatchScan(aiPayload);
-    let aiTimedOut = false;
-    let aiApplyDeferred = false;
-    let aiStats = null;
-    let apply = { applied: 0, skipped: 0, failed: 0, total: 0 };
-
-    if (aiTimeoutMs > 0) {
+    // Ejecutar en segundo plano
+    (async () => {
       try {
-        const aiResultRaw = await withTimeout(aiPromise, aiTimeoutMs, 'BATCH_AI_RETRY_TIMEOUT');
-        const { suggestions, stats } = unpackAiScanResult(aiResultRaw);
-        if (stats) aiStats = stats;
-        apply = await applyAiSuggestionsToBatchItems(suggestions, { source: 'manual-retry-ai' });
-      } catch (aiErr) {
-        aiTimedOut = String(aiErr?.code || aiErr?.message || '').includes('BATCH_AI_RETRY_TIMEOUT');
-        if (aiTimedOut) {
-          aiApplyDeferred = true;
-          aiPromise
-            .then((lateRaw) => {
-              const { suggestions, stats } = unpackAiScanResult(lateRaw);
-              if (stats) {
-                console.info('[BATCH][AI][RETRY_DEFERRED][STATS]', {
-                  failedItems: Number(stats.failedItems || 0),
-                  rateLimitedItems: Number(stats.rateLimitedItems || 0),
-                  retryAttempts: Number(stats.retryAttempts || 0),
-                });
-              }
-              return applyAiSuggestionsToBatchItems(suggestions, { source: 'manual-retry-ai-deferred' });
-            })
-            .catch((lateErr) => {
-              console.error('[BATCH][AI][RETRY_DEFERRED][ERROR]', lateErr?.message || lateErr);
-            });
-        } else {
-          throw aiErr;
-        }
-      }
-    } else {
-      const aiResultRaw = await aiPromise;
-      const { suggestions, stats } = unpackAiScanResult(aiResultRaw);
-      if (stats) aiStats = stats;
-      apply = await applyAiSuggestionsToBatchItems(suggestions, { source: 'manual-retry-ai' });
-    }
+        console.info(`[BATCH][AI] Iniciando metadatos IA para ${targets.length} ítems en segundo plano...`);
+        const aiScannedItems = targets.map(buildAiScanItemFromBatchItem);
+        const [categoriesCatalog, tagsCatalog] = await Promise.all([
+          prisma.category.findMany({
+            orderBy: { name: 'asc' },
+            select: { id: true, name: true, slug: true, nameEn: true, slugEn: true },
+          }),
+          prisma.tag.findMany({
+            orderBy: { name: 'asc' },
+            select: { id: true, name: true, slug: true, nameEn: true, slugEn: true },
+          }),
+        ]);
 
-    return res.json({
-      success: true,
-      message: aiTimedOut
-        ? 'Reintento IA en progreso diferido por timeout.'
-        : `Reintento IA completado sobre ${targets.length} item(s).`,
-      requestedCount: requestedIds.length,
-      targetCount: targets.length,
-      aiTimedOut,
-      aiApplyDeferred,
-      apply,
-      aiStats,
-      aiFailedItems: Number(aiStats?.failedItems || 0),
-      aiRateLimitedItems: Number(aiStats?.rateLimitedItems || 0),
-      aiRetryAttempts: Number(aiStats?.retryAttempts || 0),
-      aiFailedItemIds: Array.isArray(aiStats?.failedItemIds) ? aiStats.failedItemIds : [],
+        const aiPayload = buildBatchScanRequestData(req, {
+          foldersCount: 0,
+          newlyQueuedCount: 0,
+          scannedItems: aiScannedItems,
+        }, {
+          categories: categoriesCatalog,
+          tags: tagsCatalog,
+        });
+
+        aiPayload.onProgress = ({ done, total, item }) => {
+          aiMetadataStatus.processed = done;
+          aiMetadataStatus.total = total;
+          if (item) {
+            aiMetadataStatus.currentItemTitle = item.sourceTitle || item.assetName || '';
+          }
+        };
+
+        const aiResultRaw = await callGoogleBatchScan(aiPayload);
+        const { suggestions, stats } = unpackAiScanResult(aiResultRaw);
+        await applyAiSuggestionsToBatchItems(suggestions, { source: 'manual-retry-ai' });
+
+        aiMetadataStatus.running = false;
+        aiMetadataStatus.finishedAt = Date.now();
+        aiMetadataStatus.message = `Metadatos IA completados sobre ${targets.length} ítems.`;
+        console.info(`[BATCH][AI] Metadatos IA completados exitosamente sobre ${targets.length} ítems.`);
+
+        // Encadenamiento automático: disparar pre-cálculo de similares
+        console.info('[BATCH][AI] Iniciando automáticamente pre-cálculo de similares tras completar metadatos...');
+        await runPrecalculateSimilarsInternal().catch((simErr) => {
+          console.error('[BATCH][AI] Error iniciando pre-cálculo automático:', simErr?.message || simErr);
+        });
+      } catch (err) {
+        console.error('[BATCH][AI] Error en proceso de metadatos IA:', err);
+        aiMetadataStatus.running = false;
+        aiMetadataStatus.finishedAt = Date.now();
+        aiMetadataStatus.message = `Error en metadatos IA: ${err.message}`;
+      }
+    })().catch((bgErr) => {
+      console.error('[BATCH][AI] Error no capturado en background de metadatos:', bgErr);
+      aiMetadataStatus.running = false;
+      aiMetadataStatus.finishedAt = Date.now();
     });
   } catch (error) {
+    console.error('[BATCH][AI] Error al iniciar metadatos:', error);
     return res.status(500).json({ success: false, error: error.message });
   }
 };
@@ -1914,62 +1931,57 @@ let precalculateSimilarsState = {
   finishedAt: null,
 };
 
-export const precalculateBatchSimilars = async (req, res) => {
+export const runPrecalculateSimilarsInternal = async () => {
   try {
     if (precalculateSimilarsState.running) {
-      return res.json({
+      console.info('[PRECALCULATE SIMILARS] Ya está en ejecución, omitiendo nuevo disparo.');
+      return {
         success: true,
         message: 'El pre-cálculo ya está en ejecución.',
         status: precalculateSimilarsState,
-      });
+      };
     }
 
-    // Buscar ítems en borrador o encolados que aún no tengan similares calculados
-    const pendingItems = await prisma.batchImportItem.findMany({
-      where: {
-        status: { in: ['DRAFT', 'QUEUED', 'PENDING'] },
-        similarResults: { equals: Prisma.AnyNull },
-      },
-      select: {
-        id: true,
-        title: true,
-        folderName: true,
-        images: true,
-      },
-      orderBy: { id: 'asc' },
-    });
+  // Buscar ítems en borrador o encolados que aún no tengan similares calculados
+  const pendingItems = await prisma.batchImportItem.findMany({
+    where: {
+      status: { in: ['DRAFT', 'QUEUED', 'PENDING'] },
+      similarResults: { equals: Prisma.AnyNull },
+    },
+    select: {
+      id: true,
+      title: true,
+      folderName: true,
+      images: true,
+    },
+    orderBy: { id: 'asc' },
+  });
 
-    if (!pendingItems.length) {
-      return res.json({
-        success: true,
-        message: 'No hay ítems pendientes de pre-calcular similares.',
-        total: 0,
-        processed: 0,
-      });
-    }
-
-    // Inicializar estado
-    precalculateSimilarsState = {
-      running: true,
-      total: pendingItems.length,
-      processed: 0,
-      currentItemId: null,
-      currentTitle: '',
-      errors: 0,
-      stopped: false,
-      startedAt: Date.now(),
-      finishedAt: null,
-    };
-
-    // Responder inmediatamente para no bloquear la petición HTTP
-    res.json({
+  if (!pendingItems.length) {
+    return {
       success: true,
-      message: `Pre-cálculo de similares iniciado para ${pendingItems.length} ítems.`,
-      total: pendingItems.length,
-    });
+      message: 'No hay ítems pendientes de pre-calcular similares.',
+      total: 0,
+      processed: 0,
+      status: precalculateSimilarsState,
+    };
+  }
 
-    // Ejecutar bucle en segundo plano
-    (async () => {
+  // Inicializar estado
+  precalculateSimilarsState = {
+    running: true,
+    total: pendingItems.length,
+    processed: 0,
+    currentItemId: null,
+    currentTitle: '',
+    errors: 0,
+    stopped: false,
+    startedAt: Date.now(),
+    finishedAt: null,
+  };
+
+  // Ejecutar bucle en segundo plano
+  (async () => {
       console.info(`[PRECALCULATE SIMILARS] Iniciando proceso para ${pendingItems.length} ítems en lote...`);
 
       for (let i = 0; i < pendingItems.length; i++) {
@@ -2096,6 +2108,23 @@ export const precalculateBatchSimilars = async (req, res) => {
       precalculateSimilarsState.running = false;
       precalculateSimilarsState.finishedAt = Date.now();
     });
+
+    return {
+      success: true,
+      message: `Pre-cálculo de similares iniciado para ${pendingItems.length} ítems.`,
+      total: pendingItems.length,
+      status: precalculateSimilarsState,
+    };
+  } catch (err) {
+    console.error('[PRECALCULATE SIMILARS] Error iniciando pre-cálculo:', err);
+    throw err;
+  }
+};
+
+export const precalculateBatchSimilars = async (req, res) => {
+  try {
+    const result = await runPrecalculateSimilarsInternal();
+    return res.json(result);
   } catch (err) {
     console.error('[PRECALCULATE SIMILARS] Error iniciando pre-cálculo:', err);
     return res.status(500).json({ success: false, error: err.message });

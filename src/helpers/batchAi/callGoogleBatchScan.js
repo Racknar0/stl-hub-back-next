@@ -947,6 +947,19 @@ export async function callGoogleBatchScan(payload) {
 
         done += 1
 
+        if (typeof payload?.onProgress === 'function') {
+          try {
+            payload.onProgress({
+              done,
+              total,
+              percent: Math.min(100, Math.round((done / total) * 100)),
+              item: value?.item || null,
+            })
+          } catch (progressErr) {
+            // Non-critical callback error
+          }
+        }
+
         if (value.status === 'ok') {
           const itemResults = Array.isArray(value.result?.results) ? value.result.results : []
           const itemRetries = Math.max(0, Number(value.result?.retriesUsed || 0))

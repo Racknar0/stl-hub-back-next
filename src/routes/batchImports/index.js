@@ -16,7 +16,8 @@ import {
   retryBatchItemWithAnotherProxy,
   precalculateBatchSimilars,
   stopPrecalculateBatchSimilars,
-  getPrecalculateSimilarsStatus
+  getPrecalculateSimilarsStatus,
+  getAiMetadataStatus
 } from '../../controllers/batchImport.controller.js';
 import { requireAuth } from '../../middlewares/auth.js';
 
@@ -26,6 +27,7 @@ router.post('/scan', requireAuth, scanLocalDirectory);
 router.get('/scan-status', requireAuth, getScanStatus);
 router.post('/retry-ai', requireAuth, retryBatchAiFailedItems);
 router.post('/ai-metadata', requireAuth, retryBatchAiFailedItems);
+router.get('/ai-metadata/status', requireAuth, getAiMetadataStatus);
 router.post('/precalculate-similars', requireAuth, precalculateBatchSimilars);
 router.post('/precalculate-similars/stop', requireAuth, stopPrecalculateBatchSimilars);
 router.get('/precalculate-similars/status', requireAuth, getPrecalculateSimilarsStatus);
