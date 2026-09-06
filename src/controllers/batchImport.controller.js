@@ -1,4 +1,4 @@
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, Prisma } from '@prisma/client';
 import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
@@ -1928,7 +1928,7 @@ export const precalculateBatchSimilars = async (req, res) => {
     const pendingItems = await prisma.batchImportItem.findMany({
       where: {
         status: { in: ['DRAFT', 'QUEUED', 'PENDING'] },
-        similarResults: null,
+        similarResults: { equals: Prisma.AnyNull },
       },
       select: {
         id: true,
