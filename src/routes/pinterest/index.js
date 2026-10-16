@@ -5,6 +5,8 @@ import { requireAuth, requireAdmin } from '../../middlewares/auth.js';
 import pinterestService from '../../services/pinterest.service.js';
 import { dispatchPinterestFailureNotification } from '../../utils/pinterestNotifications.js';
 import qdrantMultimodalService from '../../services/qdrantMultimodal.service.js';
+import { getTrendSuggestions } from '../../services/pinterestTrends.service.js';
+import { FORBIDDEN_KEYWORDS, findForbiddenKeyword, sanitizePinVariation } from '../../utils/pinterestForbiddenWords.js';
 
 const router = express.Router();
 
@@ -199,6 +201,10 @@ router.post('/ai-optimize', requireAuth, requireAdmin, async (req, res) => {
       '- Last 5: broad (Maker, DIY, Collectible, HomeDecor, GeekGifts)',
       '- Vary slightly between variations',
       '',
+      '## FORBIDDEN WORDS (Pinterest will reject the pin):',
+      `- NEVER use these words anywhere (title, description or hashtags), not even inside other words: ${FORBIDDEN_KEYWORDS.join(', ')}`,
+      '- For attractive or stylized characters use neutral words like "stylish", "elegant", "detailed", "dynamic pose"',
+      '',
       'Respond ONLY with valid JSON:',
       count === 1
         ? '{"pinTitle": "...", "pinDescription": "...", "pinHashtags": ["..."]}'
@@ -228,22 +234,18 @@ router.post('/ai-optimize', requireAuth, requireAdmin, async (req, res) => {
     }
 
     // Normalize: always return variations array
-    if (count === 1 && !parsed.variations) {
-      res.json({
-        variations: [{
-          pinTitle: parsed.pinTitle || title,
-          pinDescription: parsed.pinDescription || description,
-          pinHashtags: Array.isArray(parsed.pinHashtags) ? parsed.pinHashtags.slice(0, 20).map(h => h.replace(/\s+/g, '')) : [],
-        }]
-      });
-    } else {
-      const vars = (parsed.variations || [parsed]).map(v => ({
+    const rawVariations = (count === 1 && !parsed.variations) ? [parsed] : (parsed.variations || [parsed]);
+    // Quitar palabras prohibidas sin regenerar (evita que /schedule rechace el pin)
+    const vars = rawVariations.map(v => {
+      const { variation, removed } = sanitizePinVariation({
         pinTitle: v.pinTitle || title,
         pinDescription: v.pinDescription || description,
         pinHashtags: Array.isArray(v.pinHashtags) ? v.pinHashtags.slice(0, 20).map(h => h.replace(/\s+/g, '')) : [],
-      }));
-      res.json({ variations: vars });
-    }
+      });
+      if (removed.length > 0) console.warn(`[PINTEREST][AI] Palabras prohibidas eliminadas: ${removed.join(', ')}`);
+      return variation;
+    });
+    res.json({ variations: vars });
   } catch (error) {
     console.error('Error AI optimize:', error);
     res.status(500).json({ error: error.message });
@@ -347,17 +349,23 @@ function getOffendingKeyword(title, description) {
     { field: 'título', val: title },
     { field: 'descripción', val: description }
   ];
-  const adultKeywords = ['nsfw', 'sexy', 'hentai', 'nude', 'nudeza', 'adulto', 'adult', 'erotic', 'porn', 'sensual', '18+', '+18', 'r18', 'r-18'];
   for (const textItem of textToCheck) {
-    const cleanVal = (textItem.val || '').toLowerCase();
-    for (const kw of adultKeywords) {
-      if (cleanVal.includes(kw)) {
-        return { keyword: kw, field: textItem.field };
-      }
-    }
+    const kw = findForbiddenKeyword(textItem.val);
+    if (kw) return { keyword: kw, field: textItem.field };
   }
   return null;
 }
+
+// Tendencias del día con los assets que encajan (Pinterest Trends o Gemini + Qdrant). Caché diaria.
+router.get('/trends', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const data = await getTrendSuggestions({ refresh: req.query.refresh === '1' });
+    res.json(data);
+  } catch (error) {
+    console.error('[PINTEREST][TRENDS] Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // Stats: counts by status
 router.get('/stats', requireAuth, requireAdmin, async (req, res) => {

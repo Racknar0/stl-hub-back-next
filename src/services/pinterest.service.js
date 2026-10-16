@@ -202,6 +202,28 @@ class PinterestService {
     }));
   }
 
+  // Tendencias de búsqueda de Pinterest (Trends API). Devuelve [{ keyword, growth }]
+  async getTrendKeywords({ region = 'US', trendType = 'growing', limit = 25 } = {}) {
+    const token = await this.getValidAccessToken();
+    const interests = ['art', 'design', 'diy_and_crafts', 'entertainment', 'home_decor', 'animals', 'vehicles'];
+    const params = new URLSearchParams({ limit: String(limit) });
+    interests.forEach(i => params.append('interests', i));
+    const response = await fetch(`${this.baseUrl}/trends/keywords/${region}/top/${trendType}?${params}`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`Pinterest Trends API error (HTTP ${response.status}): ${err}`);
+    }
+
+    const data = await response.json();
+    return (data.trends || []).map(t => ({
+      keyword: t.keyword,
+      growth: t.pct_growth_wow ?? t.pct_growth_mom ?? null,
+    }));
+  }
+
   // Crear un tablero nuevo
   async createBoard(name, description = '') {
     const token = await this.getValidAccessToken();
