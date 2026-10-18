@@ -41,6 +41,7 @@ const DRIVE_RETENTION = Math.max(1, parseInt(process.env.BACKUP_DRIVE_RETENTION 
 const QDRANT_HOST       = process.env.QDRANT_HOST || '127.0.0.1';
 const QDRANT_PORT       = process.env.QDRANT_PORT || '6333';
 const QDRANT_COLLECTION = process.env.QDRANT_MULTIMODAL_COLLECTION || 'stls-multimodal';
+const QDRANT_HEADERS    = process.env.QDRANT_API_KEY ? { 'api-key': process.env.QDRANT_API_KEY } : {};
 
 const UPLOADS_DIR = path.join(ROOT, 'uploads');
 const ENV_FILE    = path.join(ROOT, '.env');
@@ -149,7 +150,7 @@ async function backupQdrant(destDir) {
   // 1. Create snapshot
   const createRes = await fetch(
     `${baseUrl}/collections/${QDRANT_COLLECTION}/snapshots`,
-    { method: 'POST' }
+    { method: 'POST', headers: QDRANT_HEADERS }
   );
 
   if (!createRes.ok) {
@@ -166,7 +167,8 @@ async function backupQdrant(destDir) {
   // 2. Download snapshot (streaming para archivos grandes)
   const outFile = path.join(destDir, `qdrant_${QDRANT_COLLECTION}_${DATE_TAG}.snapshot`);
   const dlRes = await fetch(
-    `${baseUrl}/collections/${QDRANT_COLLECTION}/snapshots/${snapshotName}`
+    `${baseUrl}/collections/${QDRANT_COLLECTION}/snapshots/${snapshotName}`,
+    { headers: QDRANT_HEADERS }
   );
   if (!dlRes.ok) throw new Error(`Snapshot download failed (${dlRes.status})`);
 
@@ -181,7 +183,7 @@ async function backupQdrant(destDir) {
   try {
     await fetch(
       `${baseUrl}/collections/${QDRANT_COLLECTION}/snapshots/${snapshotName}`,
-      { method: 'DELETE' }
+      { method: 'DELETE', headers: QDRANT_HEADERS }
     );
     log('🧠 Qdrant: snapshot temporal eliminado del servidor');
   } catch (e) {

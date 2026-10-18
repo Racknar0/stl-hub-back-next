@@ -14,7 +14,7 @@ const geminiEmbeddingModel = process.env.GEMINI_MULTIMODAL_EMBEDDING_MODEL || 'g
 const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(process.cwd(), 'uploads');
 const MULTIMODAL_DIMENSIONS = 3072;
 
-const qdrant = new QdrantClient({ host: qdrantHost, port: qdrantPort });
+const qdrant = new QdrantClient({ host: qdrantHost, port: qdrantPort, apiKey: process.env.QDRANT_API_KEY || undefined });
 let ai = null;
 if (geminiApiKey) {
   // Ajuste según versión de SDK de GoogleGenAI

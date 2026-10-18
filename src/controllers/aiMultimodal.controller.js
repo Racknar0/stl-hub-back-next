@@ -9,7 +9,7 @@ const qdrantHost = process.env.QDRANT_HOST || '127.0.0.1';
 const qdrantPort = Number(process.env.QDRANT_PORT || 6333);
 const qdrantCollection = process.env.QDRANT_MULTIMODAL_COLLECTION || 'stls-multimodal';
 
-const qdrant = new QdrantClient({ host: qdrantHost, port: qdrantPort });
+const qdrant = new QdrantClient({ host: qdrantHost, port: qdrantPort, apiKey: process.env.QDRANT_API_KEY || undefined });
 
 export const getMultimodalVectorSyncStatus = async (req, res) => {
   try {

@@ -79,6 +79,7 @@ Configurar un archivo `backend/.env` con al menos:
 - `QDRANT_HOST`
 - `QDRANT_PORT`
 - `QDRANT_COLLECTION`
+- `QDRANT_API_KEY` (opcional; obligatorio en produccion, debe coincidir con `QDRANT__SERVICE__API_KEY` del contenedor)
 - `GEMINI_EMBEDDING_MODEL`
 
 Tambien hay variables opcionales para SMTP, PayPal, MEGA y tareas operativas.
