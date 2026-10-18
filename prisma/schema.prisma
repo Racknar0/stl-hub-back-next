@@ -511,6 +511,83 @@ model Payment {
   @@map("payment")
 }
 
+// Un intento de pago (PayPal o MercadoPago): nace cuando el usuario elige el método
+// y guarda cada paso hasta que la pasarela lo aprueba, rechaza o el usuario abandona.
+model PaymentAttempt {
+  id                  Int       @id @default(autoincrement())
+  userId              Int?
+  provider            String    @db.VarChar(20) // PAYPAL | MERCADOPAGO
+  planId              String    @db.VarChar(10)
+  amount              Float?
+  currency            String?   @db.VarChar(8)
+  // STARTED, CHECKOUT_CREATED, REDIRECTED, RETURNED, CANCELLED, ERROR, REJECTED,
+  // PENDING, APPROVED, REFUNDED, CHARGED_BACK, DISPUTED
+  status              String    @default("STARTED") @db.VarChar(20)
+  statusDetail        String?   @db.VarChar(120) // status_detail de MP / issue de PayPal
+  paymentMethod       String?   @db.VarChar(80) // ej: credit_card:visa, bank_transfer:pse, paypal
+  externalCheckoutId  String?   @db.VarChar(120) // preference_id (MP) / order id (PayPal)
+  externalPaymentId   String?   @db.VarChar(120) // payment id (MP) / capture id (PayPal)
+  paymentId           Int? // payment.id cuando existe registro en la tabla payment
+  lastError           String?   @db.Text
+  marketingCampaignId Int?
+  utmSource           String?   @db.VarChar(120)
+  utmMedium           String?   @db.VarChar(120)
+  utmCampaign         String?   @db.VarChar(160)
+  anonId              String?   @db.VarChar(64)
+  sessionId           String?   @db.VarChar(64)
+  deviceType          String?   @db.VarChar(20) // mobile | desktop | tablet
+  userAgent           String?   @db.VarChar(255)
+  checkoutCreatedAt   DateTime?
+  returnedAt          DateTime?
+  paidAt              DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  events PaymentAttemptEvent[]
+
+  @@index([createdAt(sort: Desc)])
+  @@index([provider, status])
+  @@index([externalCheckoutId])
+  @@index([externalPaymentId])
+  @@index([userId])
+  @@map("paymentattempt")
+}
+
+// Línea de tiempo de un intento: cada paso del usuario o aviso de la pasarela.
+model PaymentAttemptEvent {
+  id        Int            @id @default(autoincrement())
+  attemptId Int
+  attempt   PaymentAttempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  type      String         @db.VarChar(40) // method_selected, checkout_created, returned, provider_status, ...
+  source    String         @db.VarChar(20) // client | server | callback | webhook
+  status    String?        @db.VarChar(40)
+  detail    String?        @db.VarChar(255)
+  data      Json?
+  createdAt DateTime       @default(now())
+
+  @@index([attemptId, createdAt])
+  @@index([type, createdAt])
+  @@map("paymentattemptevent")
+}
+
+// Registro crudo de cada webhook/IPN recibido de una pasarela.
+model PaymentWebhookLog {
+  id         Int      @id @default(autoincrement())
+  provider   String   @db.VarChar(20)
+  topic      String?  @db.VarChar(80)
+  externalId String?  @db.VarChar(120)
+  attemptId  Int?
+  processed  Boolean  @default(false)
+  httpStatus Int?
+  error      String?  @db.Text
+  payload    Json?
+  createdAt  DateTime @default(now())
+
+  @@index([provider, createdAt])
+  @@index([externalId])
+  @@map("paymentwebhooklog")
+}
+
 // Campañas publicitarias definidas desde el dashboard admin
 model MarketingCampaign {
   id          Int      @id @default(autoincrement())

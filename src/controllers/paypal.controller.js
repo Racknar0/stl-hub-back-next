@@ -12,8 +12,56 @@ import {
 import { dispatchSaleNotification } from '../utils/saleNotifications.js';
 import { sendTikTokEvent } from '../utils/tiktokCapi.js';
 import { sendMetaEvent } from '../utils/metaCapi.js';
+import {
+    addAttemptEvent,
+    createPaymentAttempt,
+    findAttemptBy,
+    findOwnedAttempt,
+    updateAttempt,
+} from '../utils/paymentAttempts.js';
 
 const prisma = new PrismaClient();
+
+// El SDK de PayPal lanza HttpError con el cuerpo JSON en `message`.
+const parsePayPalError = (e) => {
+    let body = null;
+    try { body = JSON.parse(e?.message || ''); } catch { body = null; }
+    const issue = body?.details?.[0]?.issue || null;
+    return {
+        httpStatus: e?.statusCode || null,
+        name: body?.name || null,
+        issue,
+        description: body?.details?.[0]?.description || body?.message || (body ? null : e?.message) || null,
+        debugId: body?.debug_id || null,
+    };
+};
+
+// Problemas del medio de pago (no son errores nuestros).
+const PAYPAL_DECLINE_ISSUES = new Set([
+    'INSTRUMENT_DECLINED',
+    'PAYER_ACTION_REQUIRED',
+    'PAYER_CANNOT_PAY',
+    'TRANSACTION_REFUSED',
+    'CARD_EXPIRED',
+    'PAYEE_BLOCKED_TRANSACTION',
+    'MAX_NUMBER_OF_PAYMENT_ATTEMPTS_EXCEEDED',
+]);
+
+const payPalMethodFromSource = (source) => {
+    if (!source || typeof source !== 'object') return null;
+    if (source.card) return `card:${String(source.card.brand || source.card.type || 'unknown').toLowerCase()}`;
+    const key = Object.keys(source)[0];
+    return key || null;
+};
+
+const mapPayPalCaptureStatus = (statusRaw) => {
+    const status = String(statusRaw || '').toUpperCase();
+    if (status === 'COMPLETED') return 'APPROVED';
+    if (status === 'PENDING') return 'PENDING';
+    if (status === 'DECLINED' || status === 'FAILED') return 'REJECTED';
+    if (status === 'REFUNDED' || status === 'PARTIALLY_REFUNDED') return 'REFUNDED';
+    return null;
+};
 
 // Funcion cliente PayPal
 function client() {
@@ -48,6 +96,23 @@ async function createPayPalOrder(req, res) {
 
     console.log('Selected plan:', selectedPlan);
 
+    // Intento de pago: usa el que creó el front al elegir el método, o crea uno nuevo.
+    let attempt = await findOwnedAttempt(prisma, { attemptId: req.body?.attemptId, userId, provider: 'PAYPAL' });
+    if (!attempt) {
+        const user = await prisma.user.findUnique({
+            where: { id: parseInt(userId) || 0 },
+            select: PAYMENT_USER_TRACKING_SELECT,
+        });
+        const attribution = user ? await resolvePaymentAttribution({ prismaLike: prisma, req, user }) : null;
+        attempt = await createPaymentAttempt(prisma, {
+            req,
+            userId: parseInt(userId) || null,
+            provider: 'PAYPAL',
+            planId,
+            attribution,
+        });
+    }
+
     const request = new paypal.orders.OrdersCreateRequest();
     request.prefer('return=representation');
     request.requestBody({
@@ -66,9 +131,33 @@ async function createPayPalOrder(req, res) {
 
     try {
         const response = await client().execute(request);
-        return res.json({ id: response.result.id });
+
+        attempt = await updateAttempt(prisma, attempt, {
+            status: 'CHECKOUT_CREATED',
+            externalCheckoutId: response.result.id,
+            amount: Number.parseFloat(selectedPlan.price) || undefined,
+            currency: String(selectedPlan.currency || 'USD').toUpperCase(),
+            checkoutCreatedAt: new Date(),
+        });
+        await addAttemptEvent(prisma, attempt?.id, {
+            type: 'checkout_created',
+            source: 'server',
+            status: 'CHECKOUT_CREATED',
+            detail: response.result.id,
+        });
+
+        return res.json({ id: response.result.id, attemptId: attempt?.id || null });
     } catch (e) {
         console.error('Error al crear la orden en PayPal:', e.message);
+        const err = parsePayPalError(e);
+        await addAttemptEvent(prisma, attempt?.id, {
+            type: 'checkout_create_failed',
+            source: 'server',
+            status: 'ERROR',
+            detail: err.issue || err.name || err.description,
+            data: err,
+        });
+        await updateAttempt(prisma, attempt, { status: 'ERROR', lastError: JSON.stringify(err).slice(0, 2000) });
         return res.status(500).json({ error: 'No se pudo crear la orden de pago en PayPal.' });
     }
 }
@@ -87,9 +176,45 @@ async function capturePayPalOrder(req, res) {
 
     request.requestBody({});
 
+    const attempt = await findAttemptBy(prisma, { provider: 'PAYPAL', externalCheckoutId: String(orderID) });
+    let capturedOk = false;
+
     try {
         const capture = await client().execute(request);
         const captureResult = capture.result;
+        const firstCapture = captureResult?.purchase_units?.[0]?.payments?.captures?.[0] || null;
+        const attemptStatus = mapPayPalCaptureStatus(firstCapture?.status)
+            || (captureResult?.status === 'COMPLETED' ? 'APPROVED' : null);
+        const captureReason = firstCapture?.status_details?.reason || null;
+        capturedOk = captureResult?.status === 'COMPLETED';
+
+        await addAttemptEvent(prisma, attempt?.id, {
+            type: 'provider_status',
+            source: 'server',
+            status: String(firstCapture?.status || captureResult?.status || '').toLowerCase() || null,
+            detail: captureReason,
+            data: {
+                orderStatus: captureResult?.status || null,
+                captureId: firstCapture?.id || null,
+                captureStatus: firstCapture?.status || null,
+                captureReason,
+                paymentSource: payPalMethodFromSource(captureResult?.payment_source),
+                payerCountry: captureResult?.payer?.address?.country_code || null,
+                processorResponse: firstCapture?.processor_response
+                    ? JSON.stringify(firstCapture.processor_response).slice(0, 300)
+                    : null,
+                amount: firstCapture?.amount?.value || null,
+                currency: firstCapture?.amount?.currency_code || null,
+            },
+        });
+        await updateAttempt(prisma, attempt, {
+            status: attemptStatus,
+            fromProvider: true,
+            statusDetail: captureReason,
+            paymentMethod: payPalMethodFromSource(captureResult?.payment_source),
+            externalPaymentId: firstCapture?.id || undefined,
+            paidAt: attemptStatus === 'APPROVED' ? new Date(firstCapture?.create_time || Date.now()) : undefined,
+        });
 
         // 2. VERIFICAR que el pago se completó
         if (captureResult.status === 'COMPLETED') {
@@ -105,6 +230,12 @@ async function capturePayPalOrder(req, res) {
             });
 
             if (!user) {
+                await addAttemptEvent(prisma, attempt?.id, {
+                    type: 'post_capture_failed',
+                    source: 'server',
+                    status: 'ERROR',
+                    detail: `Usuario ${userId} no encontrado tras cobrar`,
+                });
                 return res.status(404).json({ error: 'Usuario no encontrado.' });
             }
 
@@ -177,6 +308,7 @@ async function capturePayPalOrder(req, res) {
             });
 
             console.log(`Pago ${newPayment.id} guardado y suscripción actualizada para el usuario ${userId}.`);
+            await updateAttempt(prisma, attempt, { paymentId: newPayment.id });
 
             // --- Envío de correos ---
             try {
@@ -233,6 +365,32 @@ async function capturePayPalOrder(req, res) {
 
     } catch (e) {
         console.error('Error al capturar la orden de PayPal:', e);
+        const err = parsePayPalError(e);
+        if (capturedOk) {
+            // PayPal cobró pero falló algo nuestro (guardar pago / activar suscripción). Es lo más grave.
+            await addAttemptEvent(prisma, attempt?.id, {
+                type: 'post_capture_failed',
+                source: 'server',
+                status: 'ERROR',
+                detail: String(e?.message || e),
+            });
+            await updateAttempt(prisma, attempt, { lastError: `post_capture_failure: ${e?.message || e}`.slice(0, 2000) });
+        } else {
+            const declined = PAYPAL_DECLINE_ISSUES.has(err.issue);
+            await addAttemptEvent(prisma, attempt?.id, {
+                type: declined ? 'capture_declined' : 'capture_failed',
+                source: 'server',
+                status: declined ? 'REJECTED' : 'ERROR',
+                detail: err.issue || err.name || err.description,
+                data: err,
+            });
+            await updateAttempt(prisma, attempt, {
+                status: declined ? 'REJECTED' : 'ERROR',
+                fromProvider: declined,
+                statusDetail: declined ? err.issue : undefined,
+                lastError: JSON.stringify(err).slice(0, 2000),
+            });
+        }
         try {
             await prisma.notification.create({
                 data: {

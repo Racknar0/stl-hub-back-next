@@ -12,6 +12,16 @@ import {
 import { dispatchSaleNotification } from '../utils/saleNotifications.js';
 import { sendTikTokEvent } from '../utils/tiktokCapi.js';
 import { sendMetaEvent } from '../utils/metaCapi.js';
+import {
+  addAttemptEvent,
+  createPaymentAttempt,
+  createWebhookLog,
+  findAttemptBy,
+  findOwnedAttempt,
+  finishWebhookLog,
+  mapMercadoPagoStatusToAttempt,
+  updateAttempt,
+} from '../utils/paymentAttempts.js';
 
 const prisma = new PrismaClient();
 
@@ -65,13 +75,14 @@ const getAccessToken = () => {
 // Decodifica el external_reference para recuperar userId/planId en callbacks/webhooks.
 const parseExternalReference = (value) => {
   const raw = String(value || '').trim();
-  if (!raw) return { userId: null, planId: null };
+  if (!raw) return { userId: null, planId: null, attemptId: null };
 
-  let match = raw.match(/^uid:(\d+)\|plan:([a-z0-9]+)$/i);
+  let match = raw.match(/^uid:(\d+)\|plan:([a-z0-9]+)(?:\|att:(\d+))?$/i);
   if (match) {
     return {
       userId: parsePositiveInt(match[1]),
       planId: String(match[2] || '').trim() || null,
+      attemptId: parsePositiveInt(match[3]),
     };
   }
 
@@ -80,10 +91,11 @@ const parseExternalReference = (value) => {
     return {
       userId: parsePositiveInt(match[1]),
       planId: String(match[2] || '').trim() || null,
+      attemptId: null,
     };
   }
 
-  return { userId: null, planId: null };
+  return { userId: null, planId: null, attemptId: null };
 };
 
 const mapMpStatusToInternal = (statusRaw) => {
@@ -177,7 +189,65 @@ const getWebhookUrl = (req) => {
 // 2) Resuelve atribucion de campaña
 // 3) Crea/actualiza Payment de forma idempotente
 // 4) Activa suscripcion si status aprobado
-const processMercadoPagoPayment = async ({ paymentData, req }) => {
+// Registra en el intento lo que MercadoPago dice de este pago (estado, motivo, medio de pago).
+const trackMercadoPagoAttempt = async ({ paymentData, parsedReference, paymentRecord, source }) => {
+  const externalPaymentId = String(paymentData?.id || '').trim();
+  let attempt = null;
+  if (parsedReference?.attemptId) {
+    attempt = await findOwnedAttempt(prisma, {
+      attemptId: parsedReference.attemptId,
+      userId: parsedReference.userId,
+      provider: 'MERCADOPAGO',
+    });
+  }
+  if (!attempt && externalPaymentId) {
+    attempt = await findAttemptBy(prisma, { provider: 'MERCADOPAGO', externalPaymentId });
+  }
+  if (!attempt) return null;
+
+  const mpStatus = String(paymentData?.status || '').toLowerCase();
+  const statusDetail = String(paymentData?.status_detail || '').trim() || null;
+  const attemptStatus = mapMercadoPagoStatusToAttempt(mpStatus);
+  const paymentMethod = [paymentData?.payment_type_id, paymentData?.payment_method_id].filter(Boolean).join(':') || null;
+
+  await addAttemptEvent(prisma, attempt.id, {
+    type: 'provider_status',
+    source,
+    status: mpStatus || null,
+    detail: statusDetail,
+    dedupe: true,
+    data: {
+      paymentId: externalPaymentId || null,
+      status: mpStatus || null,
+      statusDetail,
+      paymentTypeId: paymentData?.payment_type_id || null,
+      paymentMethodId: paymentData?.payment_method_id || null,
+      installments: paymentData?.installments ?? null,
+      amount: paymentData?.transaction_amount ?? null,
+      currency: paymentData?.currency_id || null,
+      merchantOrderId: paymentData?.order?.id || null,
+      dateCreated: paymentData?.date_created || null,
+      dateApproved: paymentData?.date_approved || null,
+      dateLastUpdated: paymentData?.date_last_updated || null,
+    },
+  });
+
+  return updateAttempt(prisma, attempt, {
+    status: attemptStatus,
+    fromProvider: true,
+    statusDetail,
+    paymentMethod,
+    externalPaymentId: externalPaymentId || undefined,
+    paymentId: paymentRecord?.id || undefined,
+    amount: Number(paymentData?.transaction_amount) || undefined,
+    currency: paymentData?.currency_id ? String(paymentData.currency_id).toUpperCase() : undefined,
+    paidAt: attemptStatus === 'APPROVED' && !attempt.paidAt
+      ? new Date(paymentData?.date_approved || Date.now())
+      : undefined,
+  });
+};
+
+const processMercadoPagoPayment = async ({ paymentData, req, source = 'server' }) => {
   const externalOrderId = String(paymentData?.id || '').trim();
   if (!externalOrderId) {
     return { ok: false, statusCode: 400, message: 'paymentId inválido en respuesta de MercadoPago' };
@@ -265,6 +335,8 @@ const processMercadoPagoPayment = async ({ paymentData, req }) => {
       })
     : await prisma.payment.create({ data: dbData });
 
+  const trackedAttempt = await trackMercadoPagoAttempt({ paymentData, parsedReference, paymentRecord, source });
+
   const shouldActivateSubscription = mappedStatus === 'COMPLETED' && !wasCompleted;
   const activated = await applySubscriptionIfNeeded(userId, selectedPlan, shouldActivateSubscription);
 
@@ -311,6 +383,7 @@ const processMercadoPagoPayment = async ({ paymentData, req }) => {
     status: mappedStatus,
     paymentRecord,
     activated,
+    attemptId: trackedAttempt?.id || null,
     rawStatus: String(paymentData?.status || '').toLowerCase(),
   };
 };
@@ -348,12 +421,20 @@ async function createMercadoPagoPreference(req, res) {
     process.env.MERCADOPAGO_FRONT_RETURN_URL || process.env.FRONT_URL || 'http://localhost:3000'
   );
   const callbackUrl = `${frontBase}/payment/mercadopago/callback`;
-  const externalReference = `uid:${userId}|plan:${planId}`;
   const attribution = await resolvePaymentAttribution({
     prismaLike: prisma,
     req,
     user,
   });
+
+  // Intento de pago: usa el que creó el front al elegir el método, o crea uno nuevo.
+  let attempt = await findOwnedAttempt(prisma, { attemptId: req.body?.attemptId, userId, provider: 'MERCADOPAGO' });
+  if (!attempt) {
+    attempt = await createPaymentAttempt(prisma, { req, userId, provider: 'MERCADOPAGO', planId, attribution });
+  }
+  const externalReference = attempt?.id
+    ? `uid:${userId}|plan:${planId}|att:${attempt.id}`
+    : `uid:${userId}|plan:${planId}`;
   const trackingMeta = attribution.mergedTracking || {};
 
   const payload = {
@@ -409,20 +490,67 @@ async function createMercadoPagoPreference(req, res) {
       },
     });
 
+    attempt = await updateAttempt(prisma, attempt, {
+      status: 'CHECKOUT_CREATED',
+      externalCheckoutId: preference?.id || undefined,
+      amount: Number(selectedPlan.price),
+      currency: String(selectedPlan.currency || 'USD').toUpperCase(),
+      checkoutCreatedAt: new Date(),
+    });
+    await addAttemptEvent(prisma, attempt?.id, {
+      type: 'checkout_created',
+      source: 'server',
+      status: 'CHECKOUT_CREATED',
+      detail: preference?.id || null,
+    });
+
     return res.json({
       success: true,
       preferenceId: preference?.id || null,
+      attemptId: attempt?.id || null,
       initPoint: preference?.init_point || preference?.sandbox_init_point || null,
       sandboxInitPoint: preference?.sandbox_init_point || null,
     });
   } catch (error) {
     console.error('Error creando preferencia de MercadoPago:', error?.details || error);
+    const errorText = `${error?.message || error} ${JSON.stringify(error?.details ?? '')}`;
+    await addAttemptEvent(prisma, attempt?.id, {
+      type: 'checkout_create_failed',
+      source: 'server',
+      status: 'ERROR',
+      detail: errorText,
+      data: { httpStatus: error?.status || null },
+    });
+    await updateAttempt(prisma, attempt, { status: 'ERROR', lastError: errorText.slice(0, 2000) });
     return res.status(500).json({
       error: 'No se pudo crear la preferencia en MercadoPago',
       details: error?.details || null,
     });
   }
 }
+
+// Error nuestro al confirmar el pago desde el callback: lo deja en el intento (si lo encontramos).
+const recordCaptureFailure = async (req, paymentId, message) => {
+  // /capture no exige sesión: solo enlazamos por ids de MercadoPago (no por attemptId del body).
+  const preferenceId = String(req.body?.preferenceId || '').trim();
+  let attempt = null;
+  if (paymentId) {
+    attempt = await findAttemptBy(prisma, { provider: 'MERCADOPAGO', externalPaymentId: String(paymentId) });
+  }
+  if (!attempt && preferenceId) {
+    attempt = await findAttemptBy(prisma, { provider: 'MERCADOPAGO', externalCheckoutId: preferenceId });
+  }
+  if (!attempt) return;
+  const text = String(message || '');
+  await addAttemptEvent(prisma, attempt.id, {
+    type: 'confirm_failed',
+    source: 'callback',
+    status: 'ERROR',
+    detail: text,
+    data: { paymentId: paymentId || null },
+  });
+  await updateAttempt(prisma, attempt, { status: 'ERROR', lastError: text.slice(0, 2000) });
+};
 
 // Endpoint llamado por el frontend al volver del checkout de MercadoPago.
 // Consulta el payment_id real y delega el guardado/activacion al procesador comun.
@@ -445,8 +573,9 @@ async function captureMercadoPagoPayment(req, res) {
       accessToken: token,
     });
 
-    const processed = await processMercadoPagoPayment({ paymentData, req });
+    const processed = await processMercadoPagoPayment({ paymentData, req, source: 'callback' });
     if (!processed.ok) {
+      await recordCaptureFailure(req, paymentId, processed.message);
       return res.status(processed.statusCode || 400).json({
         success: false,
         error: processed.message,
@@ -464,6 +593,7 @@ async function captureMercadoPagoPayment(req, res) {
     });
   } catch (error) {
     console.error('Error confirmando pago de MercadoPago:', error?.details || error);
+    await recordCaptureFailure(req, paymentId, `${error?.message || error} ${JSON.stringify(error?.details ?? '')}`);
     try {
       await prisma.notification.create({
         data: {
@@ -502,7 +632,15 @@ async function mercadoPagoWebhook(req, res) {
   const bodyDataId = req.body?.data?.id;
   const paymentId = String(queryDataId || bodyDataId || req.query?.id || req.body?.id || '').trim();
 
+  const webhookLog = await createWebhookLog(prisma, {
+    provider: 'MERCADOPAGO',
+    topic: topic || null,
+    externalId: paymentId || null,
+    payload: { query: req.query || null, body: req.body || null },
+  });
+
   if (!paymentId || (topic && !topic.includes('payment'))) {
+    await finishWebhookLog(prisma, webhookLog, { processed: false, httpStatus: 200, error: 'ignored' });
     return res.status(200).json({ received: true, ignored: true });
   }
 
@@ -512,8 +650,13 @@ async function mercadoPagoWebhook(req, res) {
       accessToken: token,
     });
 
-    const processed = await processMercadoPagoPayment({ paymentData, req });
+    const processed = await processMercadoPagoPayment({ paymentData, req, source: 'webhook' });
     if (!processed.ok) {
+      await finishWebhookLog(prisma, webhookLog, {
+        processed: false,
+        httpStatus: processed.statusCode || 400,
+        error: processed.message,
+      });
       return res.status(processed.statusCode || 400).json({
         received: true,
         processed: false,
@@ -521,6 +664,11 @@ async function mercadoPagoWebhook(req, res) {
       });
     }
 
+    await finishWebhookLog(prisma, webhookLog, {
+      processed: true,
+      httpStatus: 200,
+      attemptId: processed.attemptId,
+    });
     return res.status(200).json({
       received: true,
       processed: true,
@@ -529,6 +677,11 @@ async function mercadoPagoWebhook(req, res) {
     });
   } catch (error) {
     console.error('Error procesando webhook de MercadoPago:', error?.details || error);
+    await finishWebhookLog(prisma, webhookLog, {
+      processed: false,
+      httpStatus: 500,
+      error: `${error?.message || error} ${JSON.stringify(error?.details ?? '')}`,
+    });
     try {
       await prisma.notification.create({
         data: {
