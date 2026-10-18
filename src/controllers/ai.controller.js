@@ -7,7 +7,7 @@ const qdrantHost = process.env.QDRANT_HOST || '127.0.0.1';
 const qdrantPort = Number(process.env.QDRANT_PORT || 6333);
 const qdrantCollection = process.env.QDRANT_COLLECTION || 'stls';
 
-const qdrant = new QdrantClient({ host: qdrantHost, port: qdrantPort, apiKey: process.env.QDRANT_API_KEY || undefined });
+const qdrant = new QdrantClient({ host: qdrantHost, port: qdrantPort, apiKey: process.env.QDRANT_API_KEY || undefined, https: process.env.QDRANT_HTTPS === 'true' });
 
 export const getVectorSyncStatus = async (req, res) => {
   try {
