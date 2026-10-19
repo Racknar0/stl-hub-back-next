@@ -3,6 +3,7 @@ import http from 'http';
 import app from './app.js';
 import { startBatchWorker } from './src/workers/batchWorker.js';
 import pinterestWorker from './src/services/pinterestWorker.service.js';
+import { startAutopilotScheduler } from './src/services/pinterestAutopilot.service.js';
 import telegramCheckerService from './src/services/telegramChecker.service.js';
 
 const PORT = process.env.PORT || 3001; // usa 3001 si NGINX proxy_pass -> 3001
@@ -24,6 +25,7 @@ server.listen(PORT, () => {
   // Iniciar worker de Pinterest
   setTimeout(() => {
     pinterestWorker.start(60000); // Revisa la cola cada 1 minuto
+    startAutopilotScheduler(); // Piloto automático: prepara los pines de mañana una vez al día (si está activado)
   }, 5000);
 
   // Iniciar worker de Telegram Auto-Checker

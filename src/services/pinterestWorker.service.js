@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import pinterestPublisherService from './pinterestPublisher.service.js';
 import { dispatchPinterestFailureNotification } from '../utils/pinterestNotifications.js';
+import { isPublishingPaused } from './pinterestAutopilot.service.js';
 
 const prisma = new PrismaClient();
 let isProcessing = false;
@@ -33,6 +34,9 @@ class PinterestWorkerService {
     isProcessing = true;
 
     try {
+      // Freno de emergencia del panel: no se publica nada mientras esté pausado
+      if (await isPublishingPaused()) return;
+
       const now = new Date();
       
       // Buscar pines PENDING que ya deberían publicarse (scheduledAt <= ahora)

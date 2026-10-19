@@ -6,7 +6,7 @@ import pinterestService from '../../services/pinterest.service.js';
 import { dispatchPinterestFailureNotification } from '../../utils/pinterestNotifications.js';
 import qdrantMultimodalService from '../../services/qdrantMultimodal.service.js';
 import { getTrendSuggestions } from '../../services/pinterestTrends.service.js';
-import { FORBIDDEN_KEYWORDS, findForbiddenKeyword, sanitizePinVariation } from '../../utils/pinterestForbiddenWords.js';
+import { findForbiddenKeyword } from '../../utils/pinterestForbiddenWords.js';
 
 const router = express.Router();
 
@@ -116,18 +116,12 @@ router.post('/boards', requireAuth, requireAdmin, async (req, res) => {
 });
 
 // 7. AI Pinterest SEO Optimizer
-import { GoogleGenAI } from '@google/genai';
+import { generatePinVariations } from '../../services/pinterestAi.service.js';
 
 router.post('/ai-optimize', requireAuth, requireAdmin, async (req, res) => {
   try {
     const { title, description, tags, category, imageUrl, variationCount = 1, trendKeyword } = req.body;
     if (!title) return res.status(400).json({ error: 'Title is required' });
-
-    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: 'GEMINI_API_KEY not configured' });
-
-    const ai = new GoogleGenAI({ apiKey });
-    const count = Math.min(Math.max(1, parseInt(variationCount) || 1), 15);
 
     // Build image part if imageUrl is provided
     const imageParts = [];
@@ -144,108 +138,8 @@ router.post('/ai-optimize', requireAuth, requireAdmin, async (req, res) => {
       }
     }
 
-    let trendInstruction = '';
-    if (trendKeyword && String(trendKeyword).trim()) {
-      const cleanTrend = String(trendKeyword).trim();
-      trendInstruction = [
-        '',
-        '## CRITICAL PIN REGULATION - PINTEREST TREND MATCHING:',
-        `- Pinterest is currently experiencing high search volume for: "${cleanTrend}".`,
-        '- You MUST intelligently and creatively adapt the title and description to align this 3D model with this trend keyword, making a logical connection.',
-        `- The phrase "${cleanTrend}" MUST appear naturally within the pinTitle and within the pinDescription (without forcing it or looking like spam).`,
-        `- Add the hashtag "${cleanTrend.replace(/\s+/g, '')}" as one of the first elements in pinHashtags.`,
-        '',
-      ].join('\n');
-    }
-
-    const prompt = [
-      'You are a Pinterest SEO expert for "STL HUB", a store selling 3D printable STL files.',
-      `Generate EXACTLY ${count} UNIQUE variation(s). Each MUST have different wording and keyword order.`,
-      trendInstruction,
-      '',
-      '## RULES FOR pinTitle (max 100 chars):',
-      '- ALWAYS identify the CHARACTER/SUBJECT name from the title — this is the STAR of the pin',
-      '- Pattern: "[Character Name] [Pose/Style] 3D Print STL | [Franchise/Use]"',
-      '- Put the recognizable name FIRST — people search by character, not by "3D Print"',
-      '- If it\'s from a franchise (Marvel, Anime, DC, etc.), include the franchise name',
-      '- NEVER start with "3D Print STL File:" — that\'s boring and wastes title space',
-      '- NEVER use "Download Now!" or clickbait CTAs in the title',
-      '- Each variation should emphasize a different angle (character, franchise, use case)',
-      '',
-      'GOOD title examples:',
-      '  "Venom Marvel Figure STL File | 3D Printable Collectible"',
-      '  "Goku Ultra Instinct 3D Print STL | Dragon Ball Z Figure"',
-      '  "Batman Arkham Knight Bust STL | DC Comics 3D Model"',
-      '  "Mandalorian Helmet 3D Print File | Star Wars Cosplay STL"',
-      '  "Pikachu Planter STL File | Pokémon 3D Print Desk Decor"',
-      '',
-      'BAD titles (DO NOT generate these):',
-      '  "3D Print STL File: Cool Character - Download Now!"',
-      '  "Amazing STL Download | 3D Printable Model Free"',
-      '  "Best 3D Print Figure STL File For Your Collection"',
-      '',
-      '## RULES FOR pinDescription (250-400 chars):',
-      '- Start with what the model IS, not generic filler',
-      '- Write like a collector recommending to a friend, not a robot',
-      '- Mention specific details: pose, size potential, print type (resin/FDM)',
-      '- Include ONE soft CTA at the end: "Perfect for...", "Add it to your collection"',
-      '- NEVER use hashtags in the description',
-      '- NEVER repeat the exact title in the description',
-      '',
-      '## RULES FOR pinHashtags (exactly 20):',
-      '- Array of 20 strings WITHOUT # symbol',
-      '- NEVER use spaces in hashtags — use CamelCase: "CasualAthlete" NOT "Casual Athlete"',
-      '- First 5: ultra-specific (character name, franchise, pose)',
-      '- Next 5: niche (AnimeFigure, MarvelCollectible, etc.)',
-      '- Next 5: medium (3Dprinting, STLfile, ResinPrint, FDM)',
-      '- Last 5: broad (Maker, DIY, Collectible, HomeDecor, GeekGifts)',
-      '- Vary slightly between variations',
-      '',
-      '## FORBIDDEN WORDS (Pinterest will reject the pin):',
-      `- NEVER use these words anywhere (title, description or hashtags), not even inside other words: ${FORBIDDEN_KEYWORDS.join(', ')}`,
-      '- For attractive or stylized characters use neutral words like "stylish", "elegant", "detailed", "dynamic pose"',
-      '',
-      'Respond ONLY with valid JSON:',
-      count === 1
-        ? '{"pinTitle": "...", "pinDescription": "...", "pinHashtags": ["..."]}'
-        : '{"variations": [{"pinTitle": "...", "pinDescription": "...", "pinHashtags": ["..."]}, ...]}',
-      '',
-      'ASSET DATA:',
-      `- Title: ${title}`,
-      `- Description: ${description || 'N/A'}`,
-      `- Tags: ${Array.isArray(tags) ? tags.join(', ') : 'N/A'}`,
-      `- Category: ${category || 'General'}`,
-    ].join('\n');
-
-    const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
-    const response = await ai.models.generateContent({
-      model: modelName,
-      contents: [prompt, ...imageParts],
-      config: { responseMimeType: 'application/json' },
-    });
-
-    const rawText = String(response?.text || '').trim();
-    let parsed;
-    try { parsed = JSON.parse(rawText); }
-    catch {
-      const match = rawText.match(/\{[\s\S]*\}/);
-      if (match) parsed = JSON.parse(match[0]);
-      else throw new Error('Could not parse AI response');
-    }
-
-    // Normalize: always return variations array
-    const rawVariations = (count === 1 && !parsed.variations) ? [parsed] : (parsed.variations || [parsed]);
-    // Quitar palabras prohibidas sin regenerar (evita que /schedule rechace el pin)
-    const vars = rawVariations.map(v => {
-      const { variation, removed } = sanitizePinVariation({
-        pinTitle: v.pinTitle || title,
-        pinDescription: v.pinDescription || description,
-        pinHashtags: Array.isArray(v.pinHashtags) ? v.pinHashtags.slice(0, 20).map(h => h.replace(/\s+/g, '')) : [],
-      });
-      if (removed.length > 0) console.warn(`[PINTEREST][AI] Palabras prohibidas eliminadas: ${removed.join(', ')}`);
-      return variation;
-    });
-    res.json({ variations: vars });
+    const { variations } = await generatePinVariations({ title, description, tags, category, imageParts, count: variationCount, trendKeyword });
+    res.json({ variations });
   } catch (error) {
     console.error('Error AI optimize:', error);
     res.status(500).json({ error: error.message });
@@ -620,6 +514,7 @@ router.post('/schedule', requireAuth, requireAdmin, async (req, res) => {
           title: title,
           description: description,
           link: link,
+          origin: 'manual',
           filters: { ...filters, imageUrl: fullImageUrl, imagePath: permanentRelPath }
         }
       });
@@ -947,6 +842,73 @@ router.post('/queue/retry/:id', requireAuth, requireAdmin, async (req, res) => {
 
       res.status(500).json({ error: pubError.message });
     }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== Piloto automático =====
+import pinterestAutopilot, { isAutopilotRunning } from '../../services/pinterestAutopilot.service.js';
+
+// Estado, configuración, últimas ejecuciones y pines programados para mañana
+router.get('/autopilot', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const [config, state, runs] = await Promise.all([
+      pinterestAutopilot.getConfig(),
+      pinterestAutopilot.getState(),
+      prisma.pinterestAutopilotRun.findMany({ orderBy: { startedAt: 'desc' }, take: 5 }),
+    ]);
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 2);
+    const tomorrowCount = await prisma.pinterestPinQueue.count({ where: { scheduledAt: { gte: start, lt: end }, status: { in: ['PENDING', 'PUBLISHED'] } } });
+    const rejectedCount = await prisma.pinterestAssetReview.count({ where: { verdict: 'REJECTED' } });
+    res.json({ config, state, runs, tomorrowCount, rejectedCount, running: isAutopilotRunning() });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Cambiar interruptor, pausa de publicación, hora o mezcla
+router.put('/autopilot/config', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const config = await pinterestAutopilot.updateConfig(req.body || {});
+    res.json({ config });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+// Ejecutar ahora en segundo plano (tarda 1-2 min). Con dryRun=true calcula la propuesta sin programar nada.
+// El panel consulta GET /autopilot hasta que running=false y lee el resultado en la última ejecución.
+router.post('/autopilot/run', requireAuth, requireAdmin, async (req, res) => {
+  if (isAutopilotRunning()) return res.status(409).json({ error: 'El piloto automático ya se está ejecutando.' });
+  pinterestAutopilot.runAutopilot({ dryRun: req.body?.dryRun === true, trigger: 'manual' })
+    .catch(e => console.error('[PINTEREST][AUTOPILOT] Ejecución manual fallida:', e.message));
+  res.status(202).json({ started: true });
+});
+
+// Imágenes descartadas por la revisión (para comprobar si el criterio es demasiado estricto)
+router.get('/autopilot/rejections', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+    const reviews = await prisma.pinterestAssetReview.findMany({ where: { verdict: 'REJECTED' }, orderBy: { reviewedAt: 'desc' }, take: limit });
+    const assets = await prisma.asset.findMany({ where: { id: { in: reviews.map(r => r.assetId) } }, select: { id: true, title: true, titleEn: true, slug: true } });
+    const byId = new Map(assets.map(a => [a.id, a]));
+    res.json({
+      rejections: reviews.map(r => ({ ...r, title: byId.get(r.assetId)?.titleEn || byId.get(r.assetId)?.title || null, slug: byId.get(r.assetId)?.slug || null })),
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Marcar una imagen descartada como apta (si la IA se equivocó): vuelve a poder salir
+router.delete('/autopilot/rejections/:assetId', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const assetId = parseInt(req.params.assetId, 10);
+    await prisma.pinterestAssetReview.update({ where: { assetId }, data: { verdict: 'OK', reason: 'Aprobada manualmente' } });
+    res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

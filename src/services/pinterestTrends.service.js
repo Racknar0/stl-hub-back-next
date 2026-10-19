@@ -51,7 +51,7 @@ async function getPrintableTrendKeywords(pinterestTrends) {
 }
 
 // Busca en Qdrant los assets publicables que encajan con una tendencia
-async function matchAssetsForKeyword(keyword, excludedIds) {
+export async function matchAssetsForKeyword(keyword, excludedIds) {
   const results = await qdrantMultimodalService.searchByImage(null, null, keyword, 80, MIN_SCORE);
   const ids = (results || []).map(r => Number(r.id)).filter(id => id && !excludedIds.has(id));
   if (ids.length === 0) return [];
