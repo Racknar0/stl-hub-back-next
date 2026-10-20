@@ -26,6 +26,8 @@ src/utils/proxies.txt
 data/telegram.session
 data/telegram_channels.json
 data/last_downloads.json
+# Notas rápidas del dashboard: cada entorno (local / prod) tiene las suyas
+data/sticky-notes.json
 
 # Test prod credentials and scripts
 test_prod/
