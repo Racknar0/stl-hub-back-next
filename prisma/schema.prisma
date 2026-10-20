@@ -873,6 +873,53 @@ model PinterestAutopilotRun {
   @@map("pinterestautopilotrun")
 }
 
+// --- REELS PUBLISHER (Instagram Reels, Facebook Reels, YouTube Shorts) ---
+enum ReelPostStatus {
+  PENDING
+  PUBLISHED
+  FAILED
+}
+
+model ReelPost {
+  id            Int            @id @default(autoincrement())
+  videoPath     String         @db.VarChar(512) // relativo a /uploads (reels/...)
+  originalName  String?        @db.VarChar(255)
+  fileSizeB     Int?
+  durationSec   Float?
+  width         Int?
+  height        Int?
+  assetId       Int?           // asset de STL HUB relacionado (opcional, sin FK)
+  assetTitle    String?        @db.VarChar(255)
+  link          String?        @db.VarChar(512) // link base al asset (los UTM se añaden al publicar)
+  subject       String?        @db.VarChar(255) // qué detectó la IA en el video
+  title         String?        @db.VarChar(150) // título para YouTube Shorts
+  youtubeDescription String?   @db.Text
+  caption       String?        @db.Text         // texto para Instagram (CTA: link en la bio)
+  facebookCaption String?      @db.Text         // texto para Facebook (el link va en el primer comentario)
+  onScreenText  String?        @db.VarChar(120) // sugerencia de texto sobre el video (IA)
+  hashtags      Json?          // ["tag", ...] sin #
+  platforms     Json           // ["instagram", "facebook", "youtube"]
+  language      String         @default("es") @db.VarChar(5)
+  aiGenerated   Boolean        @default(false)
+  aiStatus      String         @default("PROCESSING") @db.VarChar(12) // NONE | PROCESSING | READY | ERROR
+  aiError       String?        @db.Text
+  approved      Boolean        @default(false) // solo se publica lo aprobado
+  scheduledAt   DateTime?      // null = en la bandeja, sin día asignado
+  status        ReelPostStatus @default(PENDING)
+  publishing    Boolean        @default(false) // true mientras se está subiendo a las redes
+  simulated     Boolean        @default(true) // true si se publicó en modo simulación
+  results       Json?          // { instagram: { id, url, publishedAt }, ... }
+  errorMessage  String?        @db.Text
+  publishedAt   DateTime?
+
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@index([status])
+  @@index([scheduledAt])
+  @@map("reelpost")
+}
+
 model TelegramChannel {
   id              Int       @id @default(autoincrement())
   name            String    @unique

@@ -21,6 +21,7 @@ import fileExplorerRoutes from './fileExplorer/fileExplorer.routes.js';
 import settingsRoutes from './settings/index.js';
 import notesRoutes from './notes/index.js';
 import pinterestRoutes from './pinterest/index.js';
+import reelsRoutes from './reels/index.js';
 import { requireAuth, requireAdmin } from '../middlewares/auth.js';
 import {
   createGiftCode, listGiftCodes, updateGiftCode, deleteGiftCode,
@@ -54,6 +55,7 @@ router.use('/batch-imports', batchImportsRoutes);
 router.use('/ai', aiRoutes);
 router.use('/file-explorer', fileExplorerRoutes);
 router.use('/pinterest', pinterestRoutes);
+router.use('/reels', reelsRoutes);
 router.use('/', telegramRoutes);
 
 // ─── Gift Codes ────────────────────────────────────────

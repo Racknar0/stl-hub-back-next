@@ -1,0 +1,30 @@
+-- CreateTable
+CREATE TABLE `reelpost` (
+    `id` INTEGER NOT NULL AUTO_INCREMENT,
+    `videoPath` VARCHAR(512) NOT NULL,
+    `originalName` VARCHAR(255) NULL,
+    `fileSizeB` INTEGER NULL,
+    `durationSec` DOUBLE NULL,
+    `width` INTEGER NULL,
+    `height` INTEGER NULL,
+    `assetId` INTEGER NULL,
+    `link` VARCHAR(512) NULL,
+    `title` VARCHAR(150) NULL,
+    `caption` TEXT NULL,
+    `hashtags` JSON NULL,
+    `platforms` JSON NOT NULL,
+    `language` VARCHAR(5) NOT NULL DEFAULT 'es',
+    `aiGenerated` BOOLEAN NOT NULL DEFAULT false,
+    `scheduledAt` DATETIME(3) NOT NULL,
+    `status` ENUM('PENDING', 'PUBLISHED', 'FAILED') NOT NULL DEFAULT 'PENDING',
+    `simulated` BOOLEAN NOT NULL DEFAULT true,
+    `results` JSON NULL,
+    `errorMessage` TEXT NULL,
+    `publishedAt` DATETIME(3) NULL,
+    `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    `updatedAt` DATETIME(3) NOT NULL,
+
+    INDEX `reelpost_status_idx`(`status`),
+    INDEX `reelpost_scheduledAt_idx`(`scheduledAt`),
+    PRIMARY KEY (`id`)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
