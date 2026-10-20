@@ -1,3 +1,5 @@
+import fs from 'fs';
+
 // Publicación real de Reels en Instagram y Facebook (Graph API de Meta).
 // Usa el token del usuario del sistema "stlhub-publisher" (META_SYSTEM_USER_TOKEN), la Página (META_PAGE_ID)
 // y la cuenta de Instagram vinculada (META_IG_USER_ID). Meta descarga el video desde una URL pública.
@@ -57,17 +59,26 @@ export async function publishInstagramReel({ videoUrl, caption }) {
 }
 
 /** Facebook Reel: iniciar subida → Meta descarga el video de la URL → publicar → primer comentario con el link. */
-export async function publishFacebookReel({ videoUrl, caption, firstComment }) {
+export async function publishFacebookReel({ videoAbsPath, videoUrl, caption, firstComment }) {
   const pageId = process.env.META_PAGE_ID;
   const token = await pageToken();
 
   const { video_id: videoId } = await graph('POST', `${pageId}/video_reels`, { upload_phase: 'start' }, token);
+  // Se sube el archivo directamente: el descargador de Facebook recibe 403 de la web (protección antibots),
+  // así que la URL pública solo se usa si el archivo no está en este servidor
+  const fileBuffer = videoAbsPath && fs.existsSync(videoAbsPath) ? await fs.promises.readFile(videoAbsPath) : null;
   const upload = await fetch(`https://rupload.facebook.com/video-upload/${version()}/${videoId}`, {
     method: 'POST',
-    headers: { Authorization: `OAuth ${token}`, file_url: videoUrl },
+    headers: fileBuffer
+      ? { Authorization: `OAuth ${token}`, offset: '0', file_size: String(fileBuffer.length), 'Content-Type': 'application/octet-stream' }
+      : { Authorization: `OAuth ${token}`, file_url: videoUrl },
+    body: fileBuffer || undefined,
   });
   const uploadData = await upload.json().catch(() => ({}));
-  if (!upload.ok || uploadData.error) throw new Error(`Facebook no pudo descargar el video: ${uploadData.error?.message || `HTTP ${upload.status}`}`);
+  if (!upload.ok || uploadData.error || uploadData.success === false) {
+    const reason = uploadData.debug_info?.message || uploadData.error?.message || `HTTP ${upload.status}`;
+    throw new Error(`Facebook no pudo recibir el video: ${reason}`);
+  }
 
   await graph('POST', `${pageId}/video_reels`, {
     upload_phase: 'finish', video_id: videoId, video_state: 'PUBLISHED', description: caption,

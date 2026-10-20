@@ -237,7 +237,7 @@ async function publishToPlatform(platform, post) {
     return publishInstagramReel({ videoUrl: publicVideoUrl(post.videoPath), caption: withHashtags(post.caption, post) });
   }
   if (platform === 'facebook') {
-    return publishFacebookReel({ videoUrl: publicVideoUrl(post.videoPath), caption: withHashtags(post.facebookCaption || post.caption, post), firstComment: link ? `🔗 ${link}` : null });
+    return publishFacebookReel({ videoAbsPath: toAbsVideoPath(post.videoPath), videoUrl: publicVideoUrl(post.videoPath), caption: withHashtags(post.facebookCaption || post.caption, post), firstComment: link ? `🔗 ${link}` : null });
   }
   throw new Error(`${platform}: publicación no disponible todavía`);
 }
