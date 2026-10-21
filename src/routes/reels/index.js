@@ -34,6 +34,7 @@ const sendError = (res, error) => res.status(error.status || 500).json({ error: 
 const normalizePlatforms = (value) => PLATFORMS.filter(p => (Array.isArray(value) ? value : []).includes(p));
 // Opciones de TikTok tal como las eligió el usuario (sin valores por defecto: privacidad null = sin elegir)
 const normalizeTiktokOptions = (o) => ({
+  mode: o?.mode === 'inbox' ? 'inbox' : 'direct',
   privacyLevel: PRIVACY_LEVELS.includes(o?.privacyLevel) ? o.privacyLevel : null,
   allowComment: !!o?.allowComment,
   allowDuet: !!o?.allowDuet,

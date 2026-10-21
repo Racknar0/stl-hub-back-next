@@ -7,7 +7,8 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 const API = 'https://open.tiktokapis.com/v2';
 const KEYS = { refreshToken: 'TIKTOK_REFRESH_TOKEN', account: 'TIKTOK_ACCOUNT' };
-const SCOPES = ['user.info.basic', 'video.publish'];
+// video.upload: enviar a borradores (bandeja de la app) mientras la publicación directa no esté aprobada
+const SCOPES = ['user.info.basic', 'video.publish', 'video.upload'];
 export const PRIVACY_LEVELS = ['PUBLIC_TO_EVERYONE', 'MUTUAL_FOLLOW_FRIENDS', 'FOLLOWER_OF_CREATOR', 'SELF_ONLY'];
 
 export const tiktokConfigured = () => !!(process.env.TIKTOK_CLIENT_KEY && process.env.TIKTOK_CLIENT_SECRET && process.env.TIKTOK_REDIRECT_URI);
@@ -150,6 +151,8 @@ export async function creatorInfo() {
 /** Comprueba las opciones que el usuario eligió para TikTok (TikTok no permite valores por defecto). */
 export function tiktokOptionsProblem(options) {
   const o = options || {};
+  // En borradores la privacidad y el resto se eligen en la app de TikTok al publicar
+  if (o.mode === 'inbox') return null;
   if (!PRIVACY_LEVELS.includes(o.privacyLevel)) return 'privacidad de TikTok';
   if (o.commercial && !o.yourBrand && !o.brandedContent) return 'tipo de contenido comercial de TikTok';
   if (o.brandedContent && o.privacyLevel === 'SELF_ONLY') return 'privacidad de TikTok compatible con contenido de marca (no puede ser "Solo yo")';
@@ -159,8 +162,54 @@ export function tiktokOptionsProblem(options) {
 const CHUNK = 10 * 1024 * 1024;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+// Sube el archivo a la URL que da TikTok (un solo trozo si cabe en 64 MB; si no, trozos de 10 MB)
+async function uploadFile(uploadUrl, file, chunkSize, totalChunks) {
+  const size = file.length;
+  for (let i = 0; i < totalChunks; i++) {
+    const start = i * chunkSize;
+    const end = i === totalChunks - 1 ? size - 1 : start + chunkSize - 1;
+    const put = await fetch(uploadUrl, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'video/mp4', 'Content-Length': String(end - start + 1), 'Content-Range': `bytes ${start}-${end}/${size}` },
+      body: file.subarray(start, end + 1),
+    });
+    if (![200, 201, 206].includes(put.status)) throw new Error(`TikTok rechazó la subida del video (HTTP ${put.status})`);
+  }
+}
+
+async function readVideo(videoAbsPath) {
+  if (!videoAbsPath || !fs.existsSync(videoAbsPath)) throw new Error('El archivo de video no está en el servidor');
+  const file = await fs.promises.readFile(videoAbsPath);
+  const chunkSize = file.length <= 64 * 1024 * 1024 ? file.length : CHUNK;
+  return { file, chunkSize, totalChunks: Math.max(1, Math.floor(file.length / chunkSize)) };
+}
+
+/**
+ * Envía el video a la bandeja (borradores) de la app de TikTok: el usuario lo publica desde el móvil y allí elige
+ * privacidad y texto. No requiere que la app esté aprobada para publicar en público.
+ */
+async function sendToInbox({ videoAbsPath }) {
+  const { file, chunkSize, totalChunks } = await readVideo(videoAbsPath);
+  const init = await api('/post/publish/inbox/video/init/', {
+    method: 'POST',
+    body: { source_info: { source: 'FILE_UPLOAD', video_size: file.length, chunk_size: chunkSize, total_chunk_count: totalChunks } },
+  });
+  await uploadFile(init.upload_url, file, chunkSize, totalChunks);
+  const creator = await creatorInfo().catch(() => null);
+  for (let i = 0; i < 60; i++) {
+    await sleep(10000);
+    const s = await api('/post/publish/status/fetch/', { method: 'POST', body: { publish_id: init.publish_id } });
+    if (s.status === 'FAILED') throw new Error(`TikTok no recibió el video: ${s.fail_reason || 'error desconocido'}`);
+    if (s.status === 'SEND_TO_USER_INBOX' || s.status === 'PUBLISH_COMPLETE') {
+      return { id: init.publish_id, url: creator?.username ? `https://www.tiktok.com/@${creator.username}` : null, privacy: 'INBOX' };
+    }
+  }
+  throw new Error('TikTok sigue procesando el video tras 10 minutos: revisa la bandeja de la app de TikTok antes de reintentar');
+}
+
 /** Publica un video directamente en la cuenta conectada (subida por archivo) y espera a que TikTok lo procese. */
 export async function publishVideo({ videoAbsPath, caption, options }) {
+  if (options?.mode === 'inbox') return sendToInbox({ videoAbsPath });
   if (!videoAbsPath || !fs.existsSync(videoAbsPath)) throw new Error('El archivo de video no está en el servidor');
   const problem = tiktokOptionsProblem(options);
   if (problem) throw new Error(`Falta elegir: ${problem}`);
@@ -169,11 +218,8 @@ export async function publishVideo({ videoAbsPath, caption, options }) {
     throw new Error(`La cuenta de TikTok no permite la privacidad "${options.privacyLevel}" (permite: ${creator.privacyLevelOptions.join(', ')})`);
   }
 
-  const file = await fs.promises.readFile(videoAbsPath);
+  const { file, chunkSize, totalChunks } = await readVideo(videoAbsPath);
   const size = file.length;
-  // Un solo trozo si cabe (hasta 64 MB); si no, trozos de 10 MB y el último se queda con el resto
-  const chunkSize = size <= 64 * 1024 * 1024 ? size : CHUNK;
-  const totalChunks = Math.max(1, Math.floor(size / chunkSize));
 
   const init = await api('/post/publish/video/init/', {
     method: 'POST',
@@ -191,16 +237,7 @@ export async function publishVideo({ videoAbsPath, caption, options }) {
     },
   });
 
-  for (let i = 0; i < totalChunks; i++) {
-    const start = i * chunkSize;
-    const end = i === totalChunks - 1 ? size - 1 : start + chunkSize - 1;
-    const put = await fetch(init.upload_url, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'video/mp4', 'Content-Length': String(end - start + 1), 'Content-Range': `bytes ${start}-${end}/${size}` },
-      body: file.subarray(start, end + 1),
-    });
-    if (![200, 201, 206].includes(put.status)) throw new Error(`TikTok rechazó la subida del video (HTTP ${put.status})`);
-  }
+  await uploadFile(init.upload_url, file, chunkSize, totalChunks);
 
   // TikTok procesa el video en segundo plano: se consulta el estado hasta 10 minutos
   for (let i = 0; i < 60; i++) {
