@@ -3,6 +3,7 @@ import path from 'path';
 import { PrismaClient } from '@prisma/client';
 import { generateReelTexts, mockReelTexts, isMockAi, captionBody } from './reelsAi.service.js';
 import { metaConfigured, publishInstagramReel, publishFacebookReel } from './metaReels.service.js';
+import { dispatchReelNotification } from '../utils/reelsNotifications.js';
 
 const prisma = new PrismaClient();
 
@@ -291,6 +292,26 @@ export async function publishReel(post) {
     }
 
     const allDone = platforms.every(p => results[p]?.id && !results[p].simulated);
+    const published = platforms.filter(p => results[p]?.id && !results[p].simulated);
+    const publishedLinks = published.map(p => ({ label: `Publicado en ${p}`, url: results[p].url }));
+    if (errors.length) {
+      dispatchReelNotification({
+        post,
+        title: published.length ? 'Publicado solo en parte' : 'No se pudo publicar',
+        detail: `${errors.join('\n')}\n\n${published.length ? `Sí se publicó en: ${published.join(', ')}. ` : ''}Usa "Reintentar publicación": solo se reintentan las redes que fallaron.`,
+        links: publishedLinks,
+      });
+    }
+    const fbComment = results.facebook?.commentError;
+    if (fbComment && !post.results?.facebook?.commentError) {
+      dispatchReelNotification({
+        post,
+        level: 'WARNING',
+        title: 'Facebook: reel sin comentario con el link',
+        detail: `El reel se publicó, pero no se pudo poner el primer comentario con el link.\n\nError: ${fbComment}\n\nPuedes añadir el comentario a mano en Facebook.`,
+        links: [{ label: 'Reel de Facebook', url: results.facebook.url }, { label: 'Link a comentar', url: platformLink(post.link, 'facebook', post.id) }],
+      });
+    }
     return await prisma.reelPost.update({
       where: { id: post.id },
       data: {
@@ -302,6 +323,7 @@ export async function publishReel(post) {
     });
   } catch (e) {
     await prisma.reelPost.update({ where: { id: post.id }, data: { publishing: false, status: 'FAILED', errorMessage: e.message } }).catch(() => {});
+    if (e.status !== 409) dispatchReelNotification({ post, title: 'No se pudo publicar', detail: e.message });
     throw e;
   } finally {
     inFlight.delete(post.id);
@@ -325,9 +347,25 @@ export async function publishDueReels() {
     const missing = missingFields(post);
     if (missing.length) {
       await prisma.reelPost.update({ where: { id: post.id }, data: { status: 'FAILED', errorMessage: `Falta: ${missing.join(', ')}` } });
+      dispatchReelNotification({ post, title: 'No se publicó: faltan textos', detail: `Llegó su hora pero le falta: ${missing.join(', ')}.\n\nCompleta los textos y pulsa "Reintentar publicación".` });
       continue;
     }
     await publishReel(post).catch(e => console.error(`[REELS] Reel ${post.id}:`, e.message));
+  }
+
+  // Reels que llegaron a su hora sin aprobar: se avisa una vez por fecha (si se reprograma, vuelve a avisar)
+  const overdue = await prisma.reelPost.findMany({
+    where: { status: 'PENDING', approved: false, publishing: false, scheduledAt: { lte: new Date() } },
+  });
+  for (const post of overdue) {
+    if (post.overdueNotifiedAt && post.overdueNotifiedAt >= post.scheduledAt) continue;
+    await prisma.reelPost.update({ where: { id: post.id }, data: { overdueNotifiedAt: new Date() } });
+    dispatchReelNotification({
+      post,
+      level: 'WARNING',
+      title: 'Reel sin aprobar a su hora',
+      detail: 'Llegó la hora de publicación pero el reel no estaba aprobado, así que no se publicó.\n\nApruébalo (se publicará en el siguiente minuto) o muévelo a otro día.',
+    });
   }
 }
 
@@ -335,10 +373,15 @@ let workerTimer = null;
 export function startReelsWorker(intervalMs = 60000) {
   if (workerTimer) return;
   // Si el servidor se reinició a mitad de una subida, el reel queda en error para revisarlo (no se re-publica solo)
-  prisma.reelPost.updateMany({
-    where: { publishing: true },
-    data: { publishing: false, status: 'FAILED', errorMessage: 'El servidor se reinició durante la publicación: revisa las redes antes de reintentar' },
-  }).catch(e => console.error('[REELS] Worker:', e.message));
+  const interruptedMsg = 'El servidor se reinició durante la publicación: revisa las redes antes de reintentar';
+  prisma.reelPost.findMany({ where: { publishing: true } })
+    .then(async (interrupted) => {
+      for (const post of interrupted) {
+        await prisma.reelPost.update({ where: { id: post.id }, data: { publishing: false, status: 'FAILED', errorMessage: interruptedMsg } });
+        dispatchReelNotification({ post, title: 'Publicación interrumpida', detail: `${interruptedMsg}. Comprueba en Instagram y Facebook si llegó a publicarse antes de pulsar "Reintentar".` });
+      }
+    })
+    .catch(e => console.error('[REELS] Worker:', e.message));
   workerTimer = setInterval(() => publishDueReels().catch(e => console.error('[REELS] Worker:', e.message)), intervalMs);
 }
 

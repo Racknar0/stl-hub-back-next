@@ -907,6 +907,7 @@ model ReelPost {
   scheduledAt   DateTime?      // null = en la bandeja, sin día asignado
   status        ReelPostStatus @default(PENDING)
   publishing    Boolean        @default(false) // true mientras se está subiendo a las redes
+  overdueNotifiedAt DateTime?  // último aviso de "llegó su hora sin aprobar"
   simulated     Boolean        @default(true) // true si se publicó en modo simulación
   results       Json?          // { instagram: { id, url, publishedAt }, ... }
   errorMessage  String?        @db.Text

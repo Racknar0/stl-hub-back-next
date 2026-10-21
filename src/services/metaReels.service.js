@@ -97,13 +97,22 @@ export async function publishFacebookReel({ videoAbsPath, videoUrl, caption, fir
 
   const { permalink_url: permalink } = await graph('GET', videoId, { fields: 'permalink_url' }, token).catch(() => ({}));
   let commentId = null;
+  let commentError = null;
   if (firstComment) {
-    // Si el comentario falla, el reel ya está publicado: se registra pero no se marca como error
-    commentId = await graph('POST', `${videoId}/comments`, { message: firstComment }, token)
-      .then(r => r.id)
-      .catch(e => { console.warn('[REELS][FB] No se pudo publicar el primer comentario:', e.message); return null; });
+    // Si el comentario falla, el reel ya está publicado: se registra (y se avisa) pero no se marca como error
+    try {
+      commentId = (await graph('POST', `${videoId}/comments`, { message: firstComment }, token)).id;
+    } catch (e) {
+      commentError = e.message;
+      console.warn('[REELS][FB] No se pudo publicar el primer comentario:', e.message);
+    }
   }
-  return { id: videoId, url: permalink ? (permalink.startsWith('http') ? permalink : `https://www.facebook.com${permalink}`) : null, commentId };
+  return {
+    id: videoId,
+    url: permalink ? (permalink.startsWith('http') ? permalink : `https://www.facebook.com${permalink}`) : null,
+    commentId,
+    ...(commentError && { commentError }),
+  };
 }
 
 export default { metaConfigured, publishInstagramReel, publishFacebookReel };
