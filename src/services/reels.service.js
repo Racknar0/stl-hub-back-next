@@ -428,8 +428,12 @@ export async function autoFill() {
 }
 
 /** Redes por defecto de un reel nuevo: YouTube solo si el canal está conectado. */
+// Temporal (video de la auditoría de YouTube): los reels nuevos solo marcan YouTube
+const DEFAULT_ONLY_YOUTUBE = true;
+
 export async function defaultPlatforms() {
   const yt = await youtubeStatus().catch(() => ({ connected: false }));
+  if (yt.connected && DEFAULT_ONLY_YOUTUBE) return ['youtube'];
   return yt.connected ? PLATFORMS : PLATFORMS.filter(p => p !== 'youtube');
 }
 
