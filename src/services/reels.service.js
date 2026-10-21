@@ -4,13 +4,14 @@ import { PrismaClient } from '@prisma/client';
 import { generateReelTexts, mockReelTexts, isMockAi, captionBody } from './reelsAi.service.js';
 import { metaConfigured, publishInstagramReel, publishFacebookReel } from './metaReels.service.js';
 import { dispatchReelNotification } from '../utils/reelsNotifications.js';
+import { uploadShort, connectionStatus as youtubeStatus } from './youtube.service.js';
 
 const prisma = new PrismaClient();
 
-// YouTube Shorts queda para más adelante: mientras tanto no se puede elegir
-export const PLATFORMS = ['instagram', 'facebook'];
-const SETTINGS = { defaultTime: 'REELS_DEFAULT_TIME', timeSpread: 'REELS_TIME_SPREAD', language: 'REELS_LANGUAGE', publishMode: 'REELS_PUBLISH_MODE' };
-const DEFAULTS = { defaultTime: '18:00', timeSpread: 60, language: 'es', publishMode: 'simulated' };
+export const PLATFORMS = ['instagram', 'facebook', 'youtube'];
+const SETTINGS = { defaultTime: 'REELS_DEFAULT_TIME', timeSpread: 'REELS_TIME_SPREAD', language: 'REELS_LANGUAGE', publishMode: 'REELS_PUBLISH_MODE', youtubePrivacy: 'REELS_YOUTUBE_PRIVACY' };
+const DEFAULTS = { defaultTime: '18:00', timeSpread: 60, language: 'es', publishMode: 'simulated', youtubePrivacy: 'private' };
+const YOUTUBE_PRIVACY = ['private', 'unlisted', 'public'];
 export const SPREAD_OPTIONS = [0, 30, 60, 90, 120];
 
 export const toAbsVideoPath = (videoPath) => path.join(path.resolve('uploads'), String(videoPath || '').replace(/^\/+/, ''));
@@ -35,11 +36,12 @@ export async function getSettings() {
     timeSpread: SPREAD_OPTIONS.includes(Number(byKey[SETTINGS.timeSpread])) ? Number(byKey[SETTINGS.timeSpread]) : DEFAULTS.timeSpread,
     // "real" publica de verdad en Instagram/Facebook; cualquier otro valor simula
     publishMode: byKey[SETTINGS.publishMode] === 'real' ? 'real' : DEFAULTS.publishMode,
+    youtubePrivacy: YOUTUBE_PRIVACY.includes(byKey[SETTINGS.youtubePrivacy]) ? byKey[SETTINGS.youtubePrivacy] : DEFAULTS.youtubePrivacy,
     language: ['es', 'en'].includes(byKey[SETTINGS.language]) ? byKey[SETTINGS.language] : DEFAULTS.language,
   };
 }
 
-export async function saveSettings({ defaultTime, timeSpread, language, publishMode }) {
+export async function saveSettings({ defaultTime, timeSpread, language, publishMode, youtubePrivacy }) {
   const updates = [];
   if (defaultTime !== undefined) {
     if (!/^\d{2}:\d{2}$/.test(defaultTime)) throw new Error('Hora inválida (usa HH:MM)');
@@ -48,6 +50,10 @@ export async function saveSettings({ defaultTime, timeSpread, language, publishM
   if (timeSpread !== undefined) {
     if (!SPREAD_OPTIONS.includes(Number(timeSpread))) throw new Error('Margen inválido');
     updates.push([SETTINGS.timeSpread, String(Number(timeSpread)), 'Margen aleatorio (± minutos) alrededor de la hora por defecto']);
+  }
+  if (youtubePrivacy !== undefined) {
+    if (!YOUTUBE_PRIVACY.includes(youtubePrivacy)) throw new Error('Privacidad de YouTube inválida');
+    updates.push([SETTINGS.youtubePrivacy, youtubePrivacy, 'Privacidad con la que se suben los Shorts: private, unlisted o public']);
   }
   if (publishMode !== undefined) {
     if (!['real', 'simulated'].includes(publishMode)) throw new Error('Modo de publicación inválido');
@@ -239,6 +245,11 @@ async function publishToPlatform(platform, post) {
   }
   if (platform === 'facebook') {
     return publishFacebookReel({ videoAbsPath: toAbsVideoPath(post.videoPath), videoUrl: publicVideoUrl(post.videoPath), caption: withHashtags(post.facebookCaption || post.caption, post), firstComment: link ? `🔗 ${link}` : null });
+  }
+  if (platform === 'youtube') {
+    const { youtubePrivacy } = await getSettings();
+    const description = [String(post.youtubeDescription || '').trim(), link].filter(Boolean).join(' ');
+    return uploadShort({ videoAbsPath: toAbsVideoPath(post.videoPath), title: post.title, description, tags: Array.isArray(post.hashtags) ? post.hashtags : [], privacyStatus: youtubePrivacy });
   }
   throw new Error(`${platform}: publicación no disponible todavía`);
 }
@@ -439,6 +450,12 @@ export async function autoFill() {
     assigned++;
   }
   return { assigned };
+}
+
+/** Redes por defecto de un reel nuevo: YouTube solo si el canal está conectado. */
+export async function defaultPlatforms() {
+  const yt = await youtubeStatus().catch(() => ({ connected: false }));
+  return yt.connected ? PLATFORMS : PLATFORMS.filter(p => p !== 'youtube');
 }
 
 export async function deleteReel(postId) {

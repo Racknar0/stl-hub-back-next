@@ -4,7 +4,8 @@ import path from 'path';
 import multer from 'multer';
 import { PrismaClient } from '@prisma/client';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js';
-import reels, { PLATFORMS, assetLink, dayKey } from '../../services/reels.service.js';
+import reels, { PLATFORMS, assetLink, dayKey, defaultPlatforms } from '../../services/reels.service.js';
+import youtube from '../../services/youtube.service.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -49,6 +50,7 @@ router.post('/upload', requireAuth, requireAdmin, (req, res) => {
       let meta = [];
       try { meta = JSON.parse(req.body.meta || '[]'); } catch { /* sin metadatos */ }
       const { language } = await reels.getSettings();
+      const platforms = await defaultPlatforms();
       const posts = [];
       for (const [i, file] of req.files.entries()) {
         const m = meta[i] || {};
@@ -67,7 +69,7 @@ router.post('/upload', requireAuth, requireAdmin, (req, res) => {
             durationSec: Number(m.durationSec) || null,
             width: parseInt(m.width, 10) || null,
             height: parseInt(m.height, 10) || null,
-            platforms: PLATFORMS,
+            platforms,
             language,
             aiStatus: 'NONE', // los textos se generan cuando se pulse "Generar metadata IA"
           },
@@ -152,14 +154,41 @@ router.put('/settings', requireAuth, requireAdmin, async (req, res) => {
 });
 
 // 6. Estado de las cuentas (por ahora solo comprueba que haya credenciales configuradas)
-router.get('/connection-status', requireAuth, requireAdmin, (req, res) => {
+router.get('/connection-status', requireAuth, requireAdmin, async (req, res) => {
   const meta = !!(process.env.META_SYSTEM_USER_TOKEN && process.env.META_PAGE_ID && process.env.META_IG_USER_ID);
+  const yt = await youtube.connectionStatus().catch(() => ({ configured: false, connected: false }));
   res.json({
-    simulated: true,
     instagram: { configured: meta },
     facebook: { configured: meta },
-    youtube: { configured: !!process.env.YOUTUBE_REFRESH_TOKEN },
+    youtube: { ...yt, appConfigured: youtube.youtubeConfigured() },
   });
+});
+
+// 6b. YouTube: URL para autorizar el canal (el frontend la abre en una ventana nueva)
+router.get('/youtube/auth', requireAuth, requireAdmin, (req, res) => {
+  try { res.json({ url: youtube.getAuthUrl() }); } catch (error) { res.status(400).json({ error: error.message }); }
+});
+
+// 6c. YouTube: Google redirige aquí tras autorizar (ruta pública, protegida por el parámetro state)
+router.get('/youtube/callback', async (req, res) => {
+  const page = (title, text, ok) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head>
+    <body style="background:#09090b;color:#fff;font-family:sans-serif;text-align:center;padding-top:60px;">
+      <h2 style="color:${ok ? '#22c55e' : '#f87171'}">${title}</h2><p>${text}</p>
+      ${ok ? '<script>setTimeout(() => window.close(), 3000)</script>' : ''}
+    </body></html>`;
+  try {
+    if (req.query.error) return res.status(400).send(page('YouTube no se conectó', `Google respondió: ${String(req.query.error).replace(/[<>]/g, '')}`, false));
+    const channel = await youtube.handleCallback({ code: req.query.code, state: req.query.state });
+    res.send(page('¡YouTube conectado!', `Canal: <b>${String(channel.title || '').replace(/[<>]/g, '')}</b>. Ya puedes cerrar esta ventana y volver al Reels Publisher.`, true));
+  } catch (error) {
+    console.error('[REELS][YOUTUBE] Callback:', error.message);
+    res.status(400).send(page('YouTube no se conectó', String(error.message).replace(/[<>]/g, ''), false));
+  }
+});
+
+// 6d. YouTube: desconectar el canal
+router.post('/youtube/disconnect', requireAuth, requireAdmin, async (req, res) => {
+  try { await youtube.disconnect(); res.json({ success: true }); } catch (error) { sendError(res, error); }
 });
 
 // 7. Rellenar los próximos días libres con la bandeja
