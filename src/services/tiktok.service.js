@@ -76,6 +76,16 @@ async function accessToken() {
   return accessCache.token;
 }
 
+// Errores de TikTok con una explicación clara de qué hacer
+const ERROR_HINTS = {
+  unaudited_client_can_only_post_to_private_accounts: 'Mientras TikTok no apruebe la app, solo se puede publicar en una cuenta privada: activa "Cuenta privada" en la app de TikTok (Ajustes y privacidad → Privacidad) y reintenta',
+  spam_risk_too_many_posts: 'TikTok limita cuántos videos se pueden publicar al día por API: inténtalo más tarde',
+  spam_risk_user_banned_from_posting: 'TikTok no permite publicar desde esta cuenta ahora mismo',
+  privacy_level_option_mismatch: 'La privacidad elegida no está permitida para esta cuenta de TikTok',
+  access_token_invalid: 'La conexión con TikTok caducó: desconecta y vuelve a conectar TikTok',
+  scope_not_authorized: 'Falta el permiso de publicar: desconecta y vuelve a conectar TikTok aceptando todos los permisos',
+};
+
 async function api(pathname, { method = 'GET', body } = {}) {
   const res = await fetch(`${API}${pathname}`, {
     method,
@@ -84,7 +94,8 @@ async function api(pathname, { method = 'GET', body } = {}) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || (data.error?.code && data.error.code !== 'ok')) {
-    throw new Error(`TikTok: ${data.error?.message || data.error?.code || `HTTP ${res.status}`}`);
+    const code = data.error?.code;
+    throw new Error(ERROR_HINTS[code] || data.error?.message || code || `HTTP ${res.status}`);
   }
   return data.data || {};
 }
