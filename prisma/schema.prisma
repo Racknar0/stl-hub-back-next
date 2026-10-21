@@ -896,9 +896,11 @@ model ReelPost {
   youtubeDescription String?   @db.Text
   caption       String?        @db.Text         // texto para Instagram (CTA: link en la bio)
   facebookCaption String?      @db.Text         // texto para Facebook (el link va en el primer comentario)
+  tiktokCaption String?        @db.Text         // texto para TikTok (vacío = se usa el de Instagram)
+  tiktokOptions Json?          // { privacyLevel, allowComment, allowDuet, allowStitch, commercial, yourBrand, brandedContent }
   onScreenText  String?        @db.VarChar(120) // sugerencia de texto sobre el video (IA)
   hashtags      Json?          // ["tag", ...] sin #
-  platforms     Json           // ["instagram", "facebook", "youtube"]
+  platforms     Json           // ["instagram", "facebook", "youtube", "tiktok"]
   language      String         @default("es") @db.VarChar(5)
   aiGenerated   Boolean        @default(false)
   aiStatus      String         @default("PROCESSING") @db.VarChar(12) // NONE | PROCESSING | READY | ERROR

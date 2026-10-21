@@ -125,7 +125,7 @@ export async function generateReelTexts({ asset, imageParts = [], notes, languag
   try { parsed = JSON.parse(rawText); }
   catch {
     const match = rawText.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error('Could not parse AI response');
+    if (!match) throw new Error('No se pudo leer el resultado de la revisión');
     parsed = JSON.parse(match[0]);
   }
 

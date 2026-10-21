@@ -5,10 +5,11 @@ import { generateReelTexts, mockReelTexts, isMockAi, captionBody } from './reels
 import { metaConfigured, publishInstagramReel, publishFacebookReel } from './metaReels.service.js';
 import { dispatchReelNotification } from '../utils/reelsNotifications.js';
 import { uploadShort, connectionStatus as youtubeStatus } from './youtube.service.js';
+import { publishVideo as publishTiktokVideo, connectionStatus as tiktokStatus, tiktokOptionsProblem } from './tiktok.service.js';
 
 const prisma = new PrismaClient();
 
-export const PLATFORMS = ['instagram', 'facebook', 'youtube'];
+export const PLATFORMS = ['instagram', 'facebook', 'youtube', 'tiktok'];
 const SETTINGS = { defaultTime: 'REELS_DEFAULT_TIME', timeSpread: 'REELS_TIME_SPREAD', language: 'REELS_LANGUAGE', youtubePrivacy: 'REELS_YOUTUBE_PRIVACY' };
 const DEFAULTS = { defaultTime: '18:00', timeSpread: 60, language: 'es', youtubePrivacy: 'private' };
 const YOUTUBE_PRIVACY = ['private', 'unlisted', 'public'];
@@ -161,6 +162,8 @@ export async function processReelAi(postId, { notes, language } = {}) {
         subject: texts.subject || null,
         caption: texts.instagramCaption || null,
         facebookCaption: texts.facebookCaption || null,
+        // TikTok usa el mismo texto que Instagram (el link también va en la bio)
+        tiktokCaption: texts.instagramCaption || null,
         hashtags: texts.hashtags,
         title: texts.youtubeTitle || null,
         youtubeDescription: texts.youtubeDescription || null,
@@ -196,7 +199,7 @@ async function generateWithoutRepeats(post, asset, { notes, language }) {
     if (!PROMISES_FREE.test(bodies)) return texts;
     console.warn(`[REELS][AI] Reel ${post.id}: la descripción decía "gratis", se regenera (intento ${attempt})`);
   }
-  throw new Error('La IA insistió en decir "gratis"; vuelve a generar o escríbelo a mano');
+  throw new Error('El texto insistía en decir "gratis"; vuelve a revisar o escríbelo a mano');
 }
 
 // Cola sencilla: procesa los reels de uno en uno para no saturar la API de Gemini
@@ -220,6 +223,11 @@ export function missingFields(post) {
   if (platforms.includes('instagram') && !post.caption?.trim()) missing.push('caption de Instagram');
   if (platforms.includes('facebook') && !(post.facebookCaption || post.caption)?.trim()) missing.push('caption de Facebook');
   if (platforms.includes('youtube') && !post.title?.trim()) missing.push('título de YouTube');
+  if (platforms.includes('tiktok')) {
+    if (!(post.tiktokCaption || post.caption)?.trim()) missing.push('texto de TikTok');
+    const problem = tiktokOptionsProblem(post.tiktokOptions);
+    if (problem) missing.push(problem);
+  }
   return missing;
 }
 
@@ -227,6 +235,8 @@ export function missingFields(post) {
 const hashtagLine = (post) => (Array.isArray(post.hashtags) && post.hashtags.length ? post.hashtags.map(h => `#${h}`).join(' ') : '');
 const withHashtags = (text, post) => [String(text || '').trim(), hashtagLine(post)].filter(Boolean).join('\n\n');
 const publicVideoUrl = (videoPath) => `${PUBLIC_UPLOADS_BASE}/${String(videoPath).split('/').map(encodeURIComponent).join('/')}`;
+
+const PLATFORM_NAMES = { instagram: 'Instagram', facebook: 'Facebook', youtube: 'YouTube', tiktok: 'TikTok' };
 
 // Reels que se están subiendo ahora mismo (evita publicar dos veces el mismo si coinciden el worker y "Publicar ahora")
 const inFlight = new Set();
@@ -244,11 +254,14 @@ async function publishToPlatform(platform, post) {
     const description = [String(post.youtubeDescription || '').trim(), link].filter(Boolean).join(' ');
     return uploadShort({ videoAbsPath: toAbsVideoPath(post.videoPath), title: post.title, description, tags: Array.isArray(post.hashtags) ? post.hashtags : [], privacyStatus: youtubePrivacy });
   }
+  if (platform === 'tiktok') {
+    return publishTiktokVideo({ videoAbsPath: toAbsVideoPath(post.videoPath), caption: withHashtags(post.tiktokCaption || post.caption, post), options: post.tiktokOptions });
+  }
   throw new Error(`${platform}: publicación no disponible todavía`);
 }
 
 /**
- * Publica un reel en sus redes (Instagram, Facebook y YouTube). Si una red falla, el reel queda en error
+ * Publica un reel en sus redes (Instagram, Facebook, YouTube y TikTok). Si una red falla, el reel queda en error
  * y al reintentar solo se vuelven a intentar las redes que fallaron.
  */
 export async function publishReel(post) {
@@ -257,7 +270,7 @@ export async function publishReel(post) {
   try {
     const platforms = Array.isArray(post.platforms) ? post.platforms : [];
 
-    if (platforms.some(p => p !== 'youtube') && !metaConfigured()) {
+    if (platforms.some(p => p === 'instagram' || p === 'facebook') && !metaConfigured()) {
       throw new Error('Faltan las credenciales de Meta (META_SYSTEM_USER_TOKEN, META_PAGE_ID, META_IG_USER_ID)');
     }
     await prisma.reelPost.update({ where: { id: post.id }, data: { publishing: true, errorMessage: null } });
@@ -272,19 +285,19 @@ export async function publishReel(post) {
         console.log(`[REELS] Reel ${post.id} publicado en ${p}: ${results[p].url || results[p].id}`);
       } catch (e) {
         delete results[p];
-        errors.push(`${p}: ${e.message}`);
+        errors.push(`${PLATFORM_NAMES[p] || p}: ${e.message}`);
         console.error(`[REELS] Reel ${post.id} falló en ${p}:`, e.message);
       }
     }
 
     const allDone = platforms.every(p => results[p]?.id && !results[p].simulated);
     const published = platforms.filter(p => results[p]?.id && !results[p].simulated);
-    const publishedLinks = published.map(p => ({ label: `Publicado en ${p}`, url: results[p].url }));
+    const publishedLinks = published.map(p => ({ label: `Publicado en ${PLATFORM_NAMES[p] || p}`, url: results[p].url }));
     if (errors.length) {
       dispatchReelNotification({
         post,
         title: published.length ? 'Publicado solo en parte' : 'No se pudo publicar',
-        detail: `${errors.join('\n')}\n\n${published.length ? `Sí se publicó en: ${published.join(', ')}. ` : ''}Usa "Reintentar publicación": solo se reintentan las redes que fallaron.`,
+        detail: `${errors.join('\n')}\n\n${published.length ? `Sí se publicó en: ${published.map(p => PLATFORM_NAMES[p] || p).join(', ')}. ` : ''}Usa "Reintentar publicación": solo se reintentan las redes que fallaron.`,
         links: publishedLinks,
       });
     }
@@ -364,7 +377,7 @@ export function startReelsWorker(intervalMs = 60000) {
     .then(async (interrupted) => {
       for (const post of interrupted) {
         await prisma.reelPost.update({ where: { id: post.id }, data: { publishing: false, status: 'FAILED', errorMessage: interruptedMsg } });
-        dispatchReelNotification({ post, title: 'Publicación interrumpida', detail: `${interruptedMsg}. Comprueba en Instagram y Facebook si llegó a publicarse antes de pulsar "Reintentar".` });
+        dispatchReelNotification({ post, title: 'Publicación interrumpida', detail: `${interruptedMsg}. Comprueba en cada red si llegó a publicarse antes de pulsar "Reintentar".` });
       }
     })
     .catch(e => console.error('[REELS] Worker:', e.message));
@@ -427,10 +440,13 @@ export async function autoFill() {
   return { assigned };
 }
 
-/** Redes por defecto de un reel nuevo: YouTube solo si el canal está conectado. */
+/** Redes por defecto de un reel nuevo: YouTube y TikTok solo si su cuenta está conectada. */
 export async function defaultPlatforms() {
-  const yt = await youtubeStatus().catch(() => ({ connected: false }));
-  return yt.connected ? PLATFORMS : PLATFORMS.filter(p => p !== 'youtube');
+  const [yt, tt] = await Promise.all([
+    youtubeStatus().catch(() => ({ connected: false })),
+    tiktokStatus().catch(() => ({ connected: false })),
+  ]);
+  return PLATFORMS.filter(p => (p !== 'youtube' || yt.connected) && (p !== 'tiktok' || tt.connected));
 }
 
 export async function deleteReel(postId) {

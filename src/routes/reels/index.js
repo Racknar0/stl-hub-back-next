@@ -6,6 +6,7 @@ import { PrismaClient } from '@prisma/client';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js';
 import reels, { PLATFORMS, assetLink, dayKey, defaultPlatforms } from '../../services/reels.service.js';
 import youtube from '../../services/youtube.service.js';
+import tiktok, { PRIVACY_LEVELS } from '../../services/tiktok.service.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -31,6 +32,16 @@ const uploadVideos = multer({
 
 const sendError = (res, error) => res.status(error.status || 500).json({ error: error.message });
 const normalizePlatforms = (value) => PLATFORMS.filter(p => (Array.isArray(value) ? value : []).includes(p));
+// Opciones de TikTok tal como las eligió el usuario (sin valores por defecto: privacidad null = sin elegir)
+const normalizeTiktokOptions = (o) => ({
+  privacyLevel: PRIVACY_LEVELS.includes(o?.privacyLevel) ? o.privacyLevel : null,
+  allowComment: !!o?.allowComment,
+  allowDuet: !!o?.allowDuet,
+  allowStitch: !!o?.allowStitch,
+  commercial: !!o?.commercial,
+  yourBrand: !!(o?.commercial && o?.yourBrand),
+  brandedContent: !!(o?.commercial && o?.brandedContent),
+});
 const normalizeHashtags = (value) => (Array.isArray(value) ? value : String(value || '').split(/[\s,]+/))
   .map(h => String(h).replace(/[#\s]+/g, '')).filter(Boolean).slice(0, 5);
 
@@ -50,7 +61,10 @@ router.post('/upload', requireAuth, requireAdmin, (req, res) => {
       let meta = [];
       try { meta = JSON.parse(req.body.meta || '[]'); } catch { /* sin metadatos */ }
       const { language } = await reels.getSettings();
-      const platforms = await defaultPlatforms();
+      // La interfaz puede pedir redes concretas (p. ej. el modo enfocado en una sola red)
+      let requested = [];
+      try { requested = normalizePlatforms(JSON.parse(req.body.platforms || '[]')); } catch { /* las de por defecto */ }
+      const platforms = requested.length ? requested : await defaultPlatforms();
       const posts = [];
       for (const [i, file] of req.files.entries()) {
         const m = meta[i] || {};
@@ -157,11 +171,15 @@ router.put('/settings', requireAuth, requireAdmin, async (req, res) => {
 // 6. Estado de las cuentas (por ahora solo comprueba que haya credenciales configuradas)
 router.get('/connection-status', requireAuth, requireAdmin, async (req, res) => {
   const meta = !!(process.env.META_SYSTEM_USER_TOKEN && process.env.META_PAGE_ID && process.env.META_IG_USER_ID);
-  const yt = await youtube.connectionStatus().catch(() => ({ configured: false, connected: false }));
+  const [yt, tt] = await Promise.all([
+    youtube.connectionStatus().catch(() => ({ configured: false, connected: false })),
+    tiktok.connectionStatus().catch(() => ({ configured: false, connected: false })),
+  ]);
   res.json({
     instagram: { configured: meta },
     facebook: { configured: meta },
     youtube: { ...yt, appConfigured: youtube.youtubeConfigured() },
+    tiktok: { ...tt, appConfigured: tiktok.tiktokConfigured() },
   });
 });
 
@@ -190,6 +208,38 @@ router.get('/youtube/callback', async (req, res) => {
 // 6d. YouTube: desconectar el canal
 router.post('/youtube/disconnect', requireAuth, requireAdmin, async (req, res) => {
   try { await youtube.disconnect(); res.json({ success: true }); } catch (error) { sendError(res, error); }
+});
+
+// 6e. TikTok: URL para autorizar la cuenta (el frontend la abre en una ventana nueva)
+router.get('/tiktok/auth', requireAuth, requireAdmin, (req, res) => {
+  try { res.json({ url: tiktok.getAuthUrl() }); } catch (error) { res.status(400).json({ error: error.message }); }
+});
+
+// 6f. TikTok: redirige aquí tras autorizar (ruta pública, protegida por el parámetro state)
+router.get('/tiktok/callback', async (req, res) => {
+  const page = (title, text, ok) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head>
+    <body style="background:#09090b;color:#fff;font-family:sans-serif;text-align:center;padding-top:60px;">
+      <h2 style="color:${ok ? '#22c55e' : '#f87171'}">${title}</h2><p>${text}</p>
+      ${ok ? '<script>setTimeout(() => window.close(), 3000)</script>' : ''}
+    </body></html>`;
+  try {
+    if (req.query.error) return res.status(400).send(page('TikTok no se conectó', `TikTok respondió: ${String(req.query.error_description || req.query.error).replace(/[<>]/g, '')}`, false));
+    const account = await tiktok.handleCallback({ code: req.query.code, state: req.query.state });
+    res.send(page('¡TikTok conectado!', `Cuenta: <b>${String(account.displayName || '').replace(/[<>]/g, '')}</b>. Ya puedes cerrar esta ventana y volver al Reels Publisher.`, true));
+  } catch (error) {
+    console.error('[REELS][TIKTOK] Callback:', error.message);
+    res.status(400).send(page('TikTok no se conectó', String(error.message).replace(/[<>]/g, ''), false));
+  }
+});
+
+// 6g. TikTok: desconectar la cuenta (revoca el token y lo borra)
+router.post('/tiktok/disconnect', requireAuth, requireAdmin, async (req, res) => {
+  try { await tiktok.disconnect(); res.json({ success: true }); } catch (error) { sendError(res, error); }
+});
+
+// 6h. TikTok: datos del creador que hay que mostrar antes de publicar (cuenta, privacidades permitidas…)
+router.get('/tiktok/creator-info', requireAuth, requireAdmin, async (req, res) => {
+  try { res.json(await tiktok.creatorInfo()); } catch (error) { res.status(400).json({ error: error.message }); }
 });
 
 // 7. Rellenar los próximos días libres con la bandeja
@@ -241,6 +291,8 @@ router.put('/:id', requireAuth, requireAdmin, async (req, res) => {
     const data = {
       ...(b.caption !== undefined && { caption: text(b.caption) }),
       ...(b.facebookCaption !== undefined && { facebookCaption: text(b.facebookCaption) }),
+      ...(b.tiktokCaption !== undefined && { tiktokCaption: text(b.tiktokCaption)?.slice(0, 2200) ?? null }),
+      ...(b.tiktokOptions !== undefined && { tiktokOptions: normalizeTiktokOptions(b.tiktokOptions) }),
       ...(b.title !== undefined && { title: text(b.title) }),
       ...(b.youtubeDescription !== undefined && { youtubeDescription: text(b.youtubeDescription) }),
       ...(b.onScreenText !== undefined && { onScreenText: text(b.onScreenText)?.slice(0, 120) ?? null }),
