@@ -5,7 +5,7 @@ import { generateReelTexts, mockReelTexts, isMockAi, captionBody } from './reels
 import { metaConfigured, publishInstagramReel, publishFacebookReel } from './metaReels.service.js';
 import { dispatchReelNotification } from '../utils/reelsNotifications.js';
 import { uploadShort, connectionStatus as youtubeStatus } from './youtube.service.js';
-import { publishVideo as publishTiktokVideo, connectionStatus as tiktokStatus, tiktokOptionsProblem } from './tiktok.service.js';
+import { publishVideo as publishTiktokVideo, tiktokOptionsProblem } from './tiktok.service.js';
 
 const prisma = new PrismaClient();
 
@@ -440,13 +440,10 @@ export async function autoFill() {
   return { assigned };
 }
 
-/** Redes por defecto de un reel nuevo: YouTube y TikTok solo si su cuenta está conectada. */
+/** Redes por defecto de un reel nuevo: YouTube si el canal está conectado; TikTok nunca (se marca a mano en cada reel). */
 export async function defaultPlatforms() {
-  const [yt, tt] = await Promise.all([
-    youtubeStatus().catch(() => ({ connected: false })),
-    tiktokStatus().catch(() => ({ connected: false })),
-  ]);
-  return PLATFORMS.filter(p => (p !== 'youtube' || yt.connected) && (p !== 'tiktok' || tt.connected));
+  const yt = await youtubeStatus().catch(() => ({ connected: false }));
+  return PLATFORMS.filter(p => p !== 'tiktok' && (p !== 'youtube' || yt.connected));
 }
 
 export async function deleteReel(postId) {
