@@ -9,8 +9,8 @@ import { uploadShort, connectionStatus as youtubeStatus } from './youtube.servic
 const prisma = new PrismaClient();
 
 export const PLATFORMS = ['instagram', 'facebook', 'youtube'];
-const SETTINGS = { defaultTime: 'REELS_DEFAULT_TIME', timeSpread: 'REELS_TIME_SPREAD', language: 'REELS_LANGUAGE', publishMode: 'REELS_PUBLISH_MODE', youtubePrivacy: 'REELS_YOUTUBE_PRIVACY' };
-const DEFAULTS = { defaultTime: '18:00', timeSpread: 60, language: 'es', publishMode: 'simulated', youtubePrivacy: 'private' };
+const SETTINGS = { defaultTime: 'REELS_DEFAULT_TIME', timeSpread: 'REELS_TIME_SPREAD', language: 'REELS_LANGUAGE', youtubePrivacy: 'REELS_YOUTUBE_PRIVACY' };
+const DEFAULTS = { defaultTime: '18:00', timeSpread: 60, language: 'es', youtubePrivacy: 'private' };
 const YOUTUBE_PRIVACY = ['private', 'unlisted', 'public'];
 export const SPREAD_OPTIONS = [0, 30, 60, 90, 120];
 
@@ -34,14 +34,12 @@ export async function getSettings() {
   return {
     defaultTime: /^\d{2}:\d{2}$/.test(byKey[SETTINGS.defaultTime] || '') ? byKey[SETTINGS.defaultTime] : DEFAULTS.defaultTime,
     timeSpread: SPREAD_OPTIONS.includes(Number(byKey[SETTINGS.timeSpread])) ? Number(byKey[SETTINGS.timeSpread]) : DEFAULTS.timeSpread,
-    // "real" publica de verdad en Instagram/Facebook; cualquier otro valor simula
-    publishMode: byKey[SETTINGS.publishMode] === 'real' ? 'real' : DEFAULTS.publishMode,
     youtubePrivacy: YOUTUBE_PRIVACY.includes(byKey[SETTINGS.youtubePrivacy]) ? byKey[SETTINGS.youtubePrivacy] : DEFAULTS.youtubePrivacy,
     language: ['es', 'en'].includes(byKey[SETTINGS.language]) ? byKey[SETTINGS.language] : DEFAULTS.language,
   };
 }
 
-export async function saveSettings({ defaultTime, timeSpread, language, publishMode, youtubePrivacy }) {
+export async function saveSettings({ defaultTime, timeSpread, language, youtubePrivacy }) {
   const updates = [];
   if (defaultTime !== undefined) {
     if (!/^\d{2}:\d{2}$/.test(defaultTime)) throw new Error('Hora inválida (usa HH:MM)');
@@ -54,11 +52,6 @@ export async function saveSettings({ defaultTime, timeSpread, language, publishM
   if (youtubePrivacy !== undefined) {
     if (!YOUTUBE_PRIVACY.includes(youtubePrivacy)) throw new Error('Privacidad de YouTube inválida');
     updates.push([SETTINGS.youtubePrivacy, youtubePrivacy, 'Privacidad con la que se suben los Shorts: private, unlisted o public']);
-  }
-  if (publishMode !== undefined) {
-    if (!['real', 'simulated'].includes(publishMode)) throw new Error('Modo de publicación inválido');
-    if (publishMode === 'real' && !metaConfigured()) throw new Error('No se puede activar: faltan las credenciales de Meta en el .env');
-    updates.push([SETTINGS.publishMode, publishMode, 'Publicación de reels: real (Instagram/Facebook) o simulated']);
   }
   if (language !== undefined) {
     if (!['es', 'en'].includes(language)) throw new Error('Idioma inválido');
@@ -255,36 +248,18 @@ async function publishToPlatform(platform, post) {
 }
 
 /**
- * Publica un reel en sus redes. En modo simulación solo genera resultados de ejemplo.
- * En modo real sube a Instagram y Facebook; si una red falla, el reel queda en error y al reintentar
- * solo se vuelven a intentar las redes que fallaron.
+ * Publica un reel en sus redes (Instagram, Facebook y YouTube). Si una red falla, el reel queda en error
+ * y al reintentar solo se vuelven a intentar las redes que fallaron.
  */
 export async function publishReel(post) {
   if (inFlight.has(post.id)) throw Object.assign(new Error('Este reel ya se está publicando'), { status: 409 });
   inFlight.add(post.id);
   try {
-    const { publishMode } = await getSettings();
     const platforms = Array.isArray(post.platforms) ? post.platforms : [];
-    const now = new Date();
 
-    if (publishMode !== 'real') {
-      const results = {};
-      for (const p of platforms) {
-        const link = platformLink(post.link, p, post.id);
-        results[p] = {
-          id: `sim_${p}_${post.id}_${now.getTime().toString(36)}`,
-          publishedAt: now.toISOString(),
-          simulated: true,
-          ...(p === 'facebook' && link && { firstComment: link }),
-        };
-      }
-      return await prisma.reelPost.update({
-        where: { id: post.id },
-        data: { status: 'PUBLISHED', approved: true, publishedAt: now, errorMessage: null, results, simulated: true, publishing: false },
-      });
+    if (platforms.some(p => p !== 'youtube') && !metaConfigured()) {
+      throw new Error('Faltan las credenciales de Meta (META_SYSTEM_USER_TOKEN, META_PAGE_ID, META_IG_USER_ID)');
     }
-
-    if (!metaConfigured()) throw new Error('Faltan las credenciales de Meta (META_SYSTEM_USER_TOKEN, META_PAGE_ID, META_IG_USER_ID)');
     await prisma.reelPost.update({ where: { id: post.id }, data: { publishing: true, errorMessage: null } });
 
     // Las redes ya publicadas de verdad en un intento anterior no se repiten

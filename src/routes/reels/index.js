@@ -120,7 +120,8 @@ router.get('/month', requireAuth, requireAdmin, async (req, res) => {
       orderBy: { scheduledAt: 'asc' },
     });
     const postsByDay = {};
-    for (const post of posts) postsByDay[new Date(post.scheduledAt).getDate()] ??= post;
+    // Normalmente 1 por día, pero "Publicar ahora" puede sumar otro al día de hoy
+    for (const post of posts) (postsByDay[new Date(post.scheduledAt).getDate()] ??= []).push(post);
     res.json({ postsByDay });
   } catch (error) { sendError(res, error); }
 });
@@ -294,13 +295,10 @@ router.post('/:id/publish', requireAuth, requireAdmin, async (req, res) => {
     });
     const dated = await prisma.reelPost.update({ where: { id: post.id }, data: { scheduledAt: now, approved: true } });
 
-    const { publishMode } = await reels.getSettings();
-    if (publishMode !== 'real') return res.json({ post: await reels.publishReel(dated), mode: publishMode });
-
     // En real la subida tarda (Instagram procesa el video): se lanza en segundo plano y la interfaz consulta el estado
     await prisma.reelPost.update({ where: { id: post.id }, data: { publishing: true, errorMessage: null } });
     reels.publishInBackground({ ...dated, publishing: true });
-    res.json({ post: { ...dated, publishing: true }, mode: publishMode });
+    res.json({ post: { ...dated, publishing: true } });
   } catch (error) { sendError(res, error); }
 });
 
