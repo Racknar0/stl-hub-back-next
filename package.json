@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server.js --env-file=.env",
     "dev": "nodemon --env-file=.env server.js",
+    "postinstall": "node ./scripts/patch-gramjs.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "seed": "node ./seed/seed.js",
     "validate:last": "node ./src/utils/validateLastMeAccount.js",
