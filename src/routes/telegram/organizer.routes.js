@@ -265,6 +265,10 @@ router.post('/undo', (req, res) => {
 
 // Purge SOURCE_DIR (remove all orphan files)
 router.delete('/purge', (req, res) => {
+    // Confirmación explícita: evita que una llamada accidental vacíe la carpeta (y la papelera de Deshacer)
+    if (req.query.confirm !== 'PURGAR') {
+        return res.status(400).json({ success: false, message: 'Falta confirmación (confirm=PURGAR)' });
+    }
     try {
         if (!fs.existsSync(SOURCE_DIR)) {
             return res.json({ success: true, message: 'La carpeta ya está vacía.' });
