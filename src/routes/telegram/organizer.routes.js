@@ -1,6 +1,7 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
+import sharp from 'sharp';
 
 const router = express.Router();
 
@@ -22,8 +23,55 @@ const resolvePackageFolder = (folder) => {
     return path.dirname(resolved) === TARGET_DIR ? resolved : null;
 };
 
+// Orden total (desempate exacto) para que el cursor `after` sea estable
+const compareNames = (a, b) =>
+    a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }) || (a < b ? -1 : a > b ? 1 : 0);
+
+// Listado en caché unos segundos: antes se releía y ordenaba toda la carpeta (con un stat por archivo)
+// en cada petición. Las rutas que cambian archivos llaman a invalidateListing(); el TTL cubre lo que
+// añade el downloader de Telegram por su cuenta.
+const LISTING_TTL_MS = 5000;
+let listingCache = null; // { at, result }
+let listingInFlight = null;
+let listingGeneration = 0; // si se invalida durante una lectura, ese resultado no se guarda
+const invalidateListing = () => { listingCache = null; listingGeneration++; };
+
+const readListing = async () => {
+    const entries = await fs.promises.readdir(SOURCE_DIR, { withFileTypes: true });
+    const result = [];
+    for (const entry of entries) {
+        if (!entry.isFile() || entry.name === '.gitkeep') continue;
+        const f = entry.name;
+        const lower = f.toLowerCase();
+        if (IMAGE_REGEX.test(lower)) {
+            result.push({ name: f, type: 'image' });
+        } else if (ARCHIVE_REGEX.test(lower)) {
+            const isCompressed = /\.(rar|zip|7z)($|\.\d+$)/i.test(lower);
+            result.push({ name: f, type: 'anchor', isCompressed });
+        }
+    }
+    result.sort((a, b) => compareNames(a.name, b.name));
+    return result;
+};
+
+const getListing = async () => {
+    if (listingCache && Date.now() - listingCache.at < LISTING_TTL_MS) return listingCache.result;
+    const generation = listingGeneration;
+    if (!listingInFlight || listingInFlight.generation !== generation) {
+        const promise = readListing()
+            .then(result => {
+                if (generation === listingGeneration) listingCache = { at: Date.now(), result };
+                return result;
+            })
+            .finally(() => { if (listingInFlight === promise) listingInFlight = null; });
+        promise.generation = generation;
+        listingInFlight = promise;
+    }
+    return listingInFlight;
+};
+
 // List files paginated
-router.get('/files', (req, res) => {
+router.get('/files', async (req, res) => {
     const offset = parseInt(req.query.offset) || 0;
     const limit = parseInt(req.query.limit) || 200;
 
@@ -32,27 +80,7 @@ router.get('/files', (req, res) => {
     }
 
     try {
-        const allEntries = fs.readdirSync(SOURCE_DIR);
-        const result = [];
-
-        for (const f of allEntries) {
-            const fullPath = path.join(SOURCE_DIR, f);
-            if (fs.statSync(fullPath).isDirectory()) continue;
-            if (f === '.gitkeep') continue;
-
-            const lower = f.toLowerCase();
-            if (IMAGE_REGEX.test(lower)) {
-                result.push({ name: f, type: 'image' });
-            } else if (ARCHIVE_REGEX.test(lower)) {
-                const isCompressed = /\.(rar|zip|7z)($|\.\d+$)/i.test(lower);
-                result.push({ name: f, type: 'anchor', isCompressed });
-            }
-        }
-
-        // Orden total (desempate exacto) para que el cursor `after` sea estable
-        const compareNames = (a, b) =>
-            a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }) || (a < b ? -1 : a > b ? 1 : 0);
-        result.sort((a, b) => compareNames(a.name, b.name));
+        const result = await getListing();
 
         const totalAssets = result.filter(f => f.type === 'anchor').length;
         const totalImages = result.length - totalAssets;
@@ -70,6 +98,50 @@ router.get('/files', (req, res) => {
         res.json({ files: page, total: result.length, totalAssets, totalImages });
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+// Miniaturas webp (~320px) generadas con sharp y guardadas en SOURCE_DIR/.thumbs (Purgar las borra).
+// Antes cada tarjeta descargaba la imagen original (~240KB); la miniatura pesa ~10-20KB.
+const THUMB_DIR = path.join(SOURCE_DIR, '.thumbs');
+const THUMB_WIDTH = 320;
+const thumbJobs = new Map(); // evita generar dos veces la misma miniatura en paralelo
+const thumbPath = (name) => path.join(THUMB_DIR, `${name}.webp`);
+const removeThumb = (name) => { try { fs.rmSync(thumbPath(name), { force: true }); } catch {} };
+
+router.get('/thumb', async (req, res) => {
+    const { name } = req.query;
+    if (!isSafeName(name) || !IMAGE_REGEX.test(name.toLowerCase())) return res.sendStatus(400);
+
+    const src = path.join(SOURCE_DIR, name);
+    const thumb = thumbPath(name);
+    const srcStat = await fs.promises.stat(src).catch(() => null);
+    if (!srcStat) return res.sendStatus(404);
+
+    try {
+        const thumbStat = await fs.promises.stat(thumb).catch(() => null);
+        if (!thumbStat || thumbStat.mtimeMs < srcStat.mtimeMs) {
+            if (!thumbJobs.has(thumb)) {
+                thumbJobs.set(thumb, (async () => {
+                    await fs.promises.mkdir(THUMB_DIR, { recursive: true });
+                    const tmp = `${thumb}.${process.pid}.${Date.now()}.tmp`;
+                    await sharp(src, { failOn: 'none' })
+                        .rotate()
+                        .resize({ width: THUMB_WIDTH, withoutEnlargement: true })
+                        .webp({ quality: 72 })
+                        .toFile(tmp);
+                    await fs.promises.rename(tmp, thumb);
+                })().finally(() => thumbJobs.delete(thumb)));
+            }
+            await thumbJobs.get(thumb);
+        }
+        res.set('Cache-Control', 'private, max-age=604800');
+        res.type('image/webp');
+        return res.sendFile(thumb);
+    } catch (err) {
+        // Imagen rara o corrupta: servir el original para no dejar la tarjeta vacía
+        console.warn(`[ORGANIZER][THUMB] ${name}: ${err.message}`);
+        return res.sendFile(src);
     }
 });
 
@@ -150,11 +222,13 @@ router.post('/package', (req, res) => {
             const destFile = path.join(destFolder, destFilename);
             if (fs.existsSync(srcFile)) {
                 fs.renameSync(srcFile, destFile);
+                removeThumb(file);
                 mappings.push({ original: file, current: destFilename });
                 movedCount++;
             }
         }
 
+        invalidateListing();
         res.json({ success: true, moved: movedCount, folder: folderName, destFolder, mappings });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -175,6 +249,8 @@ router.post('/delete-file', (req, res) => {
         if (fs.existsSync(filePath)) {
             if (!fs.existsSync(trashDir)) fs.mkdirSync(trashDir);
             fs.renameSync(filePath, trashPath);
+            removeThumb(fileName);
+            invalidateListing();
             return res.json({ success: true });
         }
         return res.status(404).json({ error: 'Archivo no encontrado' });
@@ -212,12 +288,14 @@ router.post('/delete-files', (req, res) => {
                 continue;
             }
             fs.renameSync(filePath, path.join(trashDir, fileName));
+            removeThumb(fileName);
             deleted.push(fileName);
         } catch (err) {
             failed.push({ name: fileName, error: err.message });
         }
     }
 
+    invalidateListing();
     res.json({ success: failed.length === 0, deleted, failed, missing });
 });
 
@@ -257,6 +335,7 @@ router.post('/undo', (req, res) => {
                 }
             }
         }
+        invalidateListing();
         res.json({ success: true, restored });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -279,6 +358,7 @@ router.delete('/purge', (req, res) => {
             const entryPath = path.join(SOURCE_DIR, entry);
             fs.rmSync(entryPath, { recursive: true, force: true });
         }
+        invalidateListing();
 
         res.json({ success: true, message: 'Carpeta purgada correctamente.' });
     } catch (error) {
