@@ -1410,7 +1410,8 @@ export const retryBatchAiFailedItems = async (req, res) => {
 
         // Encadenamiento automático: disparar pre-cálculo de similares
         console.info('[BATCH][AI] Iniciando automáticamente pre-cálculo de similares tras completar metadatos...');
-        await runPrecalculateSimilarsInternal().catch((simErr) => {
+        // Solo los ítems que acaba de procesar la IA, no toda la tanda pendiente.
+        await runPrecalculateSimilarsInternal({ itemIds: targets.map((t) => t.id) }).catch((simErr) => {
           console.error('[BATCH][AI] Error iniciando pre-cálculo automático:', simErr?.message || simErr);
         });
       } catch (err) {
@@ -1931,7 +1932,8 @@ let precalculateSimilarsState = {
   finishedAt: null,
 };
 
-export const runPrecalculateSimilarsInternal = async () => {
+// itemIds opcional: limita el pre-cálculo a esos ítems; sin él, procesa toda la tanda pendiente.
+export const runPrecalculateSimilarsInternal = async ({ itemIds } = {}) => {
   try {
     if (precalculateSimilarsState.running) {
       console.info('[PRECALCULATE SIMILARS] Ya está en ejecución, omitiendo nuevo disparo.');
@@ -1947,6 +1949,7 @@ export const runPrecalculateSimilarsInternal = async () => {
     where: {
       status: { in: ['DRAFT', 'QUEUED', 'PENDING'] },
       similarResults: { equals: Prisma.AnyNull },
+      ...(Array.isArray(itemIds) ? { id: { in: itemIds } } : {}),
     },
     select: {
       id: true,
