@@ -15,7 +15,16 @@ export const requireAuth = (req, res, next) => {
   }
 }
 
-export const requireAdmin = (req, res, next) => {
+// Igual que requireAuth pero acepta también ?token= (para <img src> y EventSource, que no pueden mandar cabeceras)
+export const requireAuthOrQueryToken = (req, res, next) => {
+  const auth = req.headers.authorization || ''
+  if (!auth.startsWith('Bearer ') && typeof req.query.token === 'string' && req.query.token) {
+    req.headers.authorization = `Bearer ${req.query.token}`
+  }
+  return requireAuth(req, res, next)
+}
+
+export const requireAdmin =(req, res, next) => {
   if (!req.user) return res.status(401).json({ message: 'Unauthorized' })
   // roleId === 2 => Admin
   if (Number(req.user.roleId) !== 2) return res.status(403).json({ message: 'Forbidden' })
