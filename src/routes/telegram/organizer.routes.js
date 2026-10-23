@@ -49,11 +49,23 @@ router.get('/files', (req, res) => {
             }
         }
 
-        result.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+        // Orden total (desempate exacto) para que el cursor `after` sea estable
+        const compareNames = (a, b) =>
+            a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }) || (a < b ? -1 : a > b ? 1 : 0);
+        result.sort((a, b) => compareNames(a.name, b.name));
 
         const totalAssets = result.filter(f => f.type === 'anchor').length;
         const totalImages = result.length - totalAssets;
-        const page = result.slice(offset, offset + limit);
+
+        // `after` = último nombre que ya tiene el cliente. A diferencia de `offset`, no se descuadra
+        // cuando se empaquetan o borran archivos entre una página y la siguiente.
+        const after = typeof req.query.after === 'string' ? req.query.after : null;
+        let start = offset;
+        if (after) {
+            start = result.findIndex(f => compareNames(f.name, after) > 0);
+            if (start === -1) start = result.length;
+        }
+        const page = result.slice(start, start + limit);
 
         res.json({ files: page, total: result.length, totalAssets, totalImages });
     } catch (err) {
