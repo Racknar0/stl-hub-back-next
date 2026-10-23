@@ -10,6 +10,18 @@ const TARGET_DIR = path.join(process.cwd(), 'uploads', 'telegram_downloads_organ
 const ARCHIVE_REGEX = /\.(rar|zip|7z|stl|obj)($|\.\d+$)/i;
 const IMAGE_REGEX = /\.(png|jpg|jpeg|gif|webp)$/i;
 
+// Solo nombres de archivo planos (sin '/', '\\' ni '..'): evita salir de la carpeta (path traversal)
+const isSafeName = (name) =>
+    typeof name === 'string' && name !== '' && name !== '.' && name !== '..'
+    && !name.includes('\0') && !name.includes('\\') && path.basename(name) === name;
+
+// La carpeta de un paquete debe ser hija directa de TARGET_DIR
+const resolvePackageFolder = (folder) => {
+    if (typeof folder !== 'string' || !folder) return null;
+    const resolved = path.resolve(TARGET_DIR, folder);
+    return path.dirname(resolved) === TARGET_DIR ? resolved : null;
+};
+
 // List files paginated
 router.get('/files', (req, res) => {
     const offset = parseInt(req.query.offset) || 0;
@@ -63,6 +75,9 @@ router.post('/package', (req, res) => {
     const { anchorName, filesToMove } = req.body;
     if (!anchorName || !filesToMove || !Array.isArray(filesToMove)) {
         return res.status(400).json({ error: 'Faltan parámetros' });
+    }
+    if (!isSafeName(anchorName) || !filesToMove.every(isSafeName)) {
+        return res.status(400).json({ error: 'Nombre de archivo inválido' });
     }
 
     try {
@@ -138,6 +153,7 @@ router.post('/package', (req, res) => {
 router.post('/delete-file', (req, res) => {
     const { fileName } = req.body;
     if (!fileName) return res.status(400).json({ error: 'Falta fileName' });
+    if (!isSafeName(fileName)) return res.status(400).json({ error: 'Nombre de archivo inválido' });
 
     const filePath = path.join(SOURCE_DIR, fileName);
     const trashDir = path.join(SOURCE_DIR, '.trash');
@@ -157,10 +173,15 @@ router.post('/delete-file', (req, res) => {
 
 // Undo
 router.post('/undo', (req, res) => {
-    const { type, destFolder, mappings, files } = req.body;
+    const { type, destFolder: rawDestFolder, mappings, files } = req.body;
     try {
         if (type === 'package') {
-            for (const m of (mappings || [])) {
+            const destFolder = resolvePackageFolder(rawDestFolder);
+            const validMappings = Array.isArray(mappings) && mappings.every(m => isSafeName(m?.current) && isSafeName(m?.original));
+            if (!destFolder || !validMappings) {
+                return res.status(400).json({ error: 'Datos de deshacer inválidos' });
+            }
+            for (const m of mappings) {
                 const currentPath = path.join(destFolder, m.current);
                 const originalPath = path.join(SOURCE_DIR, m.original);
                 if (fs.existsSync(currentPath)) fs.renameSync(currentPath, originalPath);
@@ -169,6 +190,9 @@ router.post('/undo', (req, res) => {
                 fs.rmdirSync(destFolder);
             }
         } else if (type === 'delete') {
+            if (!Array.isArray(files) || !files.every(isSafeName)) {
+                return res.status(400).json({ error: 'Datos de deshacer inválidos' });
+            }
             const trashDir = path.join(SOURCE_DIR, '.trash');
             for (const f of (files || [])) {
                 const trashPath = path.join(trashDir, f);
