@@ -165,11 +165,40 @@ async function createPayPalOrder(req, res) {
 
 // Capturar orden de pago
 async function capturePayPalOrder(req, res) {
-    // 1. Recibir TODOS los datos necesarios del frontend
-    const { orderID, planId, userId, } = req.body;
+    // 1. El frontend solo aporta el orderID; plan y usuario salen del propio pedido de PayPal
+    const { orderID } = req.body;
+    let { planId, userId } = req.body;
 
-    if (!orderID || !planId || !userId) {
-        return res.status(400).json({ error: 'Faltan datos para capturar la orden (orderID, planId, userId)' });
+    if (!orderID) {
+        return res.status(400).json({ error: 'Faltan datos para capturar la orden (orderID)' });
+    }
+
+    // Idempotencia: si este pedido ya se registró, no volver a extender la suscripción
+    const existingPayment = await prisma.payment.findFirst({
+        where: { provider: 'PAYPAL', externalOrderId: String(orderID) },
+        select: { id: true },
+    });
+    if (existingPayment) {
+        return res.json({ success: true, alreadyProcessed: true });
+    }
+
+    // custom_id lo fija createPayPalOrder: `user-<id>_plan-<planId>`. No confiar en planId/userId del body
+    // (si no, se puede pagar el plan barato y activar el caro).
+    try {
+        const order = await client().execute(new paypal.orders.OrdersGetRequest(orderID));
+        const customId = order.result?.purchase_units?.[0]?.custom_id || '';
+        const match = customId.match(/^user-(\d+)_plan-(.+)$/);
+        if (!match) {
+            return res.status(400).json({ error: 'Orden de PayPal sin datos de plan válidos.' });
+        }
+        if (String(userId) !== match[1] || String(planId) !== match[2]) {
+            console.warn(`[PAYPAL] capture con datos distintos a la orden ${orderID}: body user=${userId} plan=${planId}, orden user=${match[1]} plan=${match[2]}`);
+        }
+        userId = match[1];
+        planId = match[2];
+    } catch (e) {
+        console.error('Error al leer la orden de PayPal antes de capturar:', e.message);
+        return res.status(400).json({ error: 'No se pudo verificar la orden de PayPal.' });
     }
 
     const request = new paypal.orders.OrdersCaptureRequest(orderID);
