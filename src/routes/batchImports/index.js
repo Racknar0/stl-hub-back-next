@@ -19,30 +19,30 @@ import {
   getPrecalculateSimilarsStatus,
   getAiMetadataStatus
 } from '../../controllers/batchImport.controller.js';
-import { requireAuth } from '../../middlewares/auth.js';
+import { requireAuth, requireAdmin } from '../../middlewares/auth.js';
 
 const router = express.Router();
 
-router.post('/scan', requireAuth, scanLocalDirectory);
-router.get('/scan-status', requireAuth, getScanStatus);
-router.post('/retry-ai', requireAuth, retryBatchAiFailedItems);
-router.post('/ai-metadata', requireAuth, retryBatchAiFailedItems);
-router.get('/ai-metadata/status', requireAuth, getAiMetadataStatus);
-router.post('/precalculate-similars', requireAuth, precalculateBatchSimilars);
-router.post('/precalculate-similars/stop', requireAuth, stopPrecalculateBatchSimilars);
-router.get('/precalculate-similars/status', requireAuth, getPrecalculateSimilarsStatus);
-router.get('/', requireAuth, getBatchQueue);
-router.post('/items-bulk', requireAuth, updateBatchItemsBulk);
-router.patch('/items/:id', requireAuth, updateBatchItem);
-router.post('/confirm', requireAuth, confirmBatchItems);
-router.post('/stop-and-draft', requireAuth, stopAndResetBatchToDraft);
-router.post('/items/:id/retry-proxy', requireAuth, retryBatchItemWithAnotherProxy);
-router.delete('/items/:id', requireAuth, deleteBatchItem);
-router.delete('/completed', requireAuth, purgeCompleted);
-router.delete('/purge-all', requireAuth, purgeAll);
+router.post('/scan', requireAuth, requireAdmin, scanLocalDirectory);
+router.get('/scan-status', requireAuth, requireAdmin, getScanStatus);
+router.post('/retry-ai', requireAuth, requireAdmin, retryBatchAiFailedItems);
+router.post('/ai-metadata', requireAuth, requireAdmin, retryBatchAiFailedItems);
+router.get('/ai-metadata/status', requireAuth, requireAdmin, getAiMetadataStatus);
+router.post('/precalculate-similars', requireAuth, requireAdmin, precalculateBatchSimilars);
+router.post('/precalculate-similars/stop', requireAuth, requireAdmin, stopPrecalculateBatchSimilars);
+router.get('/precalculate-similars/status', requireAuth, requireAdmin, getPrecalculateSimilarsStatus);
+router.get('/', requireAuth, requireAdmin, getBatchQueue);
+router.post('/items-bulk', requireAuth, requireAdmin, updateBatchItemsBulk);
+router.patch('/items/:id', requireAuth, requireAdmin, updateBatchItem);
+router.post('/confirm', requireAuth, requireAdmin, confirmBatchItems);
+router.post('/stop-and-draft', requireAuth, requireAdmin, stopAndResetBatchToDraft);
+router.post('/items/:id/retry-proxy', requireAuth, requireAdmin, retryBatchItemWithAnotherProxy);
+router.delete('/items/:id', requireAuth, requireAdmin, deleteBatchItem);
+router.delete('/completed', requireAuth, requireAdmin, purgeCompleted);
+router.delete('/purge-all', requireAuth, requireAdmin, purgeAll);
 
 // Purge telegram_downloads_organized folder
-router.delete('/purge-organized', requireAuth, async (req, res) => {
+router.delete('/purge-organized', requireAuth, requireAdmin, async (req, res) => {
   const organizedDir = path.join(process.cwd(), 'uploads', 'telegram_downloads_organized');
   try {
     if (!fs.existsSync(organizedDir)) {

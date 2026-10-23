@@ -32,17 +32,6 @@ router.get('/auth', requireAuth, requireAdmin, (req, res) => {
   }
 });
 
-// TEMPORAL: Ruta pública para que puedas enlazar tu cuenta AHORA MISMO
-router.get('/auth-test', (req, res) => {
-  try {
-    const authUrl = pinterestService.getAuthUrl();
-    // Redirige directamente al login de Pinterest
-    res.redirect(authUrl);
-  } catch (error) {
-    res.status(500).send(error.message);
-  }
-});
-
 // 2. Callback de Pinterest (A donde nos redirige después de dar permisos)
 // IMPORTANTE: Esto debe coincidir con PINTEREST_REDIRECT_URI.
 router.get('/callback', async (req, res) => {
@@ -55,6 +44,10 @@ router.get('/callback', async (req, res) => {
 
     if (!code) {
       return res.status(400).send('No se proporcionó un código de autorización.');
+    }
+
+    if (!pinterestService.consumeState(String(state || ''))) {
+      return res.status(400).send('Enlace de autorización caducado o inválido. Vuelve a pulsar "Conectar Pinterest".');
     }
 
     // Intercambiar código por tokens

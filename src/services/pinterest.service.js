@@ -1,4 +1,8 @@
 import { PrismaClient } from '@prisma/client';
+import crypto from 'crypto';
+
+// state OAuth emitidos (CSRF): solo se aceptan callbacks con un state que hayamos generado
+const pendingStates = new Map();
 
 const prisma = new PrismaClient();
 
@@ -14,9 +18,16 @@ class PinterestService {
   getAuthUrl() {
     const scopes = 'boards:read,boards:write,pins:read,pins:write,user_accounts:read';
     // Generar un state aleatorio para seguridad (CSRF)
-    const state = Math.random().toString(36).substring(7);
+    const state = crypto.randomBytes(16).toString('hex');
+    pendingStates.set(state, Date.now() + 10 * 60000);
     
     return `https://www.pinterest.com/oauth/?client_id=${this.clientId}&redirect_uri=${encodeURIComponent(this.redirectUri)}&response_type=code&scope=${scopes}&state=${state}`;
+  }
+
+  consumeState(state) {
+    const expires = pendingStates.get(state);
+    pendingStates.delete(state);
+    return Boolean(expires && expires > Date.now());
   }
 
   // 2. Intercambiar el código devuelto por Pinterest por los tokens

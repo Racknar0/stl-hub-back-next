@@ -7,6 +7,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { log } from './src/utils/logger.js';
+import { requireAuthOrQueryToken, requireAdmin } from './src/middlewares/auth.js';
 
 const app = express();
 
@@ -65,7 +66,7 @@ app.use('/api', routes);
 installConsoleHook();
 
 // Endpoint SSE para logs
-app.get('/api/logs/stream', logsSSEHandler);
+app.get('/api/logs/stream', requireAuthOrQueryToken, requireAdmin, logsSSEHandler);
 
 console.log('CWD---------:', process.cwd());
 

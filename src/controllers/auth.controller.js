@@ -1010,7 +1010,7 @@ export const register = async (req, res) => {
 // Activar cuenta con activationToken
 export const activateAccount = async (req, res) => {
     const { token, language, giftCode } = req.body;
-    console.log('Activation request - token:', token, 'language:', language, 'giftCode:', giftCode || 'none');
+    console.log('Activation request - language:', language, 'giftCode:', giftCode || 'none');
     if (!token) {
         return res
             .status(401)
