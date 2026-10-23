@@ -321,4 +321,39 @@ router.delete('/purge', (req, res) => {
     }
 });
 
+// Papelera (.trash, de donde sale "Deshacer" de los borrados): se vacía sola lo que lleve más de 2 días.
+// Se usa ctime porque mover el archivo a .trash (rename) actualiza el ctime pero conserva el mtime original.
+const TRASH_MAX_AGE_MS = 2 * 24 * 60 * 60 * 1000;
+const TRASH_CLEAN_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+export const cleanOldTrash = async () => {
+    const trashDir = path.join(SOURCE_DIR, '.trash');
+    let entries;
+    try {
+        entries = await fs.promises.readdir(trashDir, { withFileTypes: true });
+    } catch {
+        return 0; // no hay papelera
+    }
+    const limit = Date.now() - TRASH_MAX_AGE_MS;
+    let removed = 0;
+    for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        const filePath = path.join(trashDir, entry.name);
+        try {
+            const stat = await fs.promises.stat(filePath);
+            if (stat.ctimeMs < limit) {
+                await fs.promises.rm(filePath, { force: true });
+                removed++;
+            }
+        } catch (err) {
+            console.warn(`[ORGANIZER][TRASH] No se pudo limpiar ${entry.name}: ${err.message}`);
+        }
+    }
+    if (removed > 0) console.log(`[ORGANIZER][TRASH] ${removed} archivos de más de 2 días eliminados de la papelera`);
+    return removed;
+};
+
+setTimeout(() => cleanOldTrash().catch(() => {}), 60 * 1000).unref();
+setInterval(() => cleanOldTrash().catch(() => {}), TRASH_CLEAN_INTERVAL_MS).unref();
+
 export default router;
