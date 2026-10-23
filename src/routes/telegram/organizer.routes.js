@@ -224,6 +224,7 @@ router.post('/delete-files', (req, res) => {
 // Undo
 router.post('/undo', (req, res) => {
     const { type, destFolder: rawDestFolder, mappings, files } = req.body;
+    const restored = []; // nombres originales que han vuelto a SOURCE_DIR (el front los reinserta sin recargar)
     try {
         if (type === 'package') {
             const destFolder = resolvePackageFolder(rawDestFolder);
@@ -234,7 +235,10 @@ router.post('/undo', (req, res) => {
             for (const m of mappings) {
                 const currentPath = path.join(destFolder, m.current);
                 const originalPath = path.join(SOURCE_DIR, m.original);
-                if (fs.existsSync(currentPath)) fs.renameSync(currentPath, originalPath);
+                if (fs.existsSync(currentPath)) {
+                    fs.renameSync(currentPath, originalPath);
+                    restored.push(m.original);
+                }
             }
             if (fs.existsSync(destFolder) && fs.readdirSync(destFolder).length === 0) {
                 fs.rmdirSync(destFolder);
@@ -247,10 +251,13 @@ router.post('/undo', (req, res) => {
             for (const f of (files || [])) {
                 const trashPath = path.join(trashDir, f);
                 const originalPath = path.join(SOURCE_DIR, f);
-                if (fs.existsSync(trashPath)) fs.renameSync(trashPath, originalPath);
+                if (fs.existsSync(trashPath)) {
+                    fs.renameSync(trashPath, originalPath);
+                    restored.push(f);
+                }
             }
         }
-        res.json({ success: true });
+        res.json({ success: true, restored });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
