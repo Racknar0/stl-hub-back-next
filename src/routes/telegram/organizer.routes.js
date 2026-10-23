@@ -1,7 +1,6 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
-import sharp from 'sharp';
 
 const router = express.Router();
 
@@ -101,56 +100,14 @@ router.get('/files', async (req, res) => {
     }
 });
 
-// Miniaturas webp (~320px) generadas con sharp y guardadas en SOURCE_DIR/.thumbs (Purgar las borra).
-// Antes cada tarjeta descargaba la imagen original (~240KB); la miniatura pesa ~10-20KB.
-const THUMB_DIR = path.join(SOURCE_DIR, '.thumbs');
-const THUMB_WIDTH = 320;
-const thumbJobs = new Map(); // evita generar dos veces la misma miniatura en paralelo
-const thumbPath = (name) => path.join(THUMB_DIR, `${name}.webp`);
-const removeThumb = (name) => { try { fs.rmSync(thumbPath(name), { force: true }); } catch {} };
-
-router.get('/thumb', async (req, res) => {
-    const { name } = req.query;
-    if (!isSafeName(name) || !IMAGE_REGEX.test(name.toLowerCase())) return res.sendStatus(400);
-
-    const src = path.join(SOURCE_DIR, name);
-    const thumb = thumbPath(name);
-    const srcStat = await fs.promises.stat(src).catch(() => null);
-    if (!srcStat) return res.sendStatus(404);
-
-    try {
-        const thumbStat = await fs.promises.stat(thumb).catch(() => null);
-        if (!thumbStat || thumbStat.mtimeMs < srcStat.mtimeMs) {
-            if (!thumbJobs.has(thumb)) {
-                thumbJobs.set(thumb, (async () => {
-                    await fs.promises.mkdir(THUMB_DIR, { recursive: true });
-                    const tmp = `${thumb}.${process.pid}.${Date.now()}.tmp`;
-                    await sharp(src, { failOn: 'none' })
-                        .rotate()
-                        .resize({ width: THUMB_WIDTH, withoutEnlargement: true })
-                        .webp({ quality: 72 })
-                        .toFile(tmp);
-                    await fs.promises.rename(tmp, thumb);
-                })().finally(() => thumbJobs.delete(thumb)));
-            }
-            await thumbJobs.get(thumb);
-        }
-        res.set('Cache-Control', 'private, max-age=604800');
-        res.type('image/webp');
-        return res.sendFile(thumb);
-    } catch (err) {
-        // Imagen rara o corrupta: servir el original para no dejar la tarjeta vacía
-        console.warn(`[ORGANIZER][THUMB] ${name}: ${err.message}`);
-        return res.sendFile(src);
-    }
-});
-
 // Serve image
 router.get('/image', (req, res) => {
     const { name } = req.query;
     if (!name) return res.sendStatus(400);
     const filePath = path.join(SOURCE_DIR, path.basename(name));
     if (!fs.existsSync(filePath)) return res.sendStatus(404);
+    // La grilla virtualizada desmonta/monta las fotos al hacer scroll: que el navegador las tenga en caché
+    res.set('Cache-Control', 'private, max-age=86400');
     res.sendFile(filePath);
 });
 
@@ -222,7 +179,6 @@ router.post('/package', (req, res) => {
             const destFile = path.join(destFolder, destFilename);
             if (fs.existsSync(srcFile)) {
                 fs.renameSync(srcFile, destFile);
-                removeThumb(file);
                 mappings.push({ original: file, current: destFilename });
                 movedCount++;
             }
@@ -249,7 +205,6 @@ router.post('/delete-file', (req, res) => {
         if (fs.existsSync(filePath)) {
             if (!fs.existsSync(trashDir)) fs.mkdirSync(trashDir);
             fs.renameSync(filePath, trashPath);
-            removeThumb(fileName);
             invalidateListing();
             return res.json({ success: true });
         }
@@ -288,7 +243,6 @@ router.post('/delete-files', (req, res) => {
                 continue;
             }
             fs.renameSync(filePath, path.join(trashDir, fileName));
-            removeThumb(fileName);
             deleted.push(fileName);
         } catch (err) {
             failed.push({ name: fileName, error: err.message });
