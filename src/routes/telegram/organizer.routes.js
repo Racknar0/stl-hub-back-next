@@ -183,6 +183,44 @@ router.post('/delete-file', (req, res) => {
     }
 });
 
+// Delete files por lotes (move to .trash): una sola petición; informa cuáles fallaron
+router.post('/delete-files', (req, res) => {
+    const { fileNames } = req.body;
+    if (!Array.isArray(fileNames) || fileNames.length === 0) {
+        return res.status(400).json({ error: 'Falta fileNames' });
+    }
+
+    const trashDir = path.join(SOURCE_DIR, '.trash');
+    const deleted = [];
+    const failed = [];
+    const missing = []; // ya no estaban (otro borrado/empaquetado): no hay que devolverlos a la grilla
+    try {
+        if (!fs.existsSync(trashDir)) fs.mkdirSync(trashDir, { recursive: true });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+
+    for (const fileName of fileNames) {
+        if (!isSafeName(fileName)) {
+            failed.push({ name: String(fileName), error: 'Nombre de archivo inválido' });
+            continue;
+        }
+        try {
+            const filePath = path.join(SOURCE_DIR, fileName);
+            if (!fs.existsSync(filePath)) {
+                missing.push(fileName);
+                continue;
+            }
+            fs.renameSync(filePath, path.join(trashDir, fileName));
+            deleted.push(fileName);
+        } catch (err) {
+            failed.push({ name: fileName, error: err.message });
+        }
+    }
+
+    res.json({ success: failed.length === 0, deleted, failed, missing });
+});
+
 // Undo
 router.post('/undo', (req, res) => {
     const { type, destFolder: rawDestFolder, mappings, files } = req.body;
