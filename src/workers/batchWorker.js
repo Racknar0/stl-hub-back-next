@@ -153,6 +153,87 @@ function deleteLocalArchiveBestEffort(archiveAbsPath, ctx = '') {
   }
 }
 
+// Borra un comprimido temporal de batch_staging (solo dentro de esa carpeta)
+function deleteStagingArchiveBestEffort(stagingAbsPath, ctx = '') {
+  try {
+    if (!stagingAbsPath) return
+    const abs = path.resolve(stagingAbsPath)
+    if (!abs.startsWith(path.resolve(STAGING_DIR) + path.sep)) return
+    if (!fs.existsSync(abs)) return
+    fs.unlinkSync(abs)
+    console.log(`[BATCH][CLEANUP] deleted staging ${path.basename(abs)} ${ctx}`)
+  } catch (e) {
+    console.warn(`[BATCH][CLEANUP] staging delete warn ${ctx}: ${e.message}`)
+  }
+}
+
+// Limpia lo generado por una fase MAIN que no terminó (staging + copia en archives)
+function cleanupMainArtifacts(artifacts, ctx = '') {
+  deleteStagingArchiveBestEffort(artifacts?.stagingPath, ctx)
+  if (artifacts?.finalPath) deleteLocalArchiveBestEffort(artifacts.finalPath, ctx)
+}
+
+// Marcador con los temporales del item que está en fase MAIN. Si el proceso se reinicia a mitad,
+// al arrancar se borran SOLO esos (el item queda FAILED con su carpeta origen intacta). No se vacía
+// batch_staging entero: ahí puede haber restos antiguos que sean la única copia de un modelo.
+const IN_PROGRESS_MARKER = path.join(STAGING_DIR, '.in-progress.json')
+function writeInProgressMarker(itemId, artifacts) {
+  try { fs.writeFileSync(IN_PROGRESS_MARKER, JSON.stringify({ itemId, ...artifacts })) } catch {}
+}
+function clearInProgressMarker() {
+  try { fs.rmSync(IN_PROGRESS_MARKER, { force: true }) } catch {}
+}
+
+// Al arrancar el worker no hay nada procesándose (corre en este mismo proceso), así que:
+//  - un MAIN que quedó a medias por un reinicio pasa a FAILED para que se revise y se vuelva a confirmar
+//    (no se reencola solo: si un item tumbara el proceso entraría en bucle con cada reinicio);
+//  - un BACKUP a medias vuelve a PENDING (la copia local se conserva, reintentarlo es seguro).
+async function recoverInterruptedWork() {
+  try {
+    if (fs.existsSync(IN_PROGRESS_MARKER)) {
+      const marker = JSON.parse(fs.readFileSync(IN_PROGRESS_MARKER, 'utf8') || '{}')
+      const interrupted = marker.itemId
+        ? await prisma.batchImportItem.findUnique({ where: { id: Number(marker.itemId) }, select: { status: true } })
+        : null
+      if (interrupted?.status === 'PROCESSING') {
+        cleanupMainArtifacts(marker, `item=${marker.itemId} recovery`)
+      }
+      clearInProgressMarker()
+    }
+  } catch (e) {
+    console.warn('[BatchWorker][RECOVERY] Marcador de temporales:', e.message)
+  }
+
+  try {
+    const mainInterrupted = await prisma.batchImportItem.updateMany({
+      where: { status: 'PROCESSING' },
+      data: {
+        status: 'FAILED',
+        mainStatus: 'ERROR',
+        backupStatus: 'ERROR',
+        mainProgress: 0,
+        error: 'Interrumpido por un reinicio del servidor durante la subida. Revisa el item y vuelve a confirmarlo.',
+      },
+    })
+    const backupInterrupted = await prisma.batchImportItem.updateMany({
+      where: { status: 'COMPLETED', backupStatus: 'UPLOADING' },
+      data: { backupStatus: 'PENDING', error: 'Backup reanudado tras reinicio del servidor.' },
+    })
+    if (mainInterrupted.count || backupInterrupted.count) {
+      console.warn(`[BatchWorker][RECOVERY] MAIN interrumpidos -> FAILED: ${mainInterrupted.count} · BACKUP interrumpidos -> PENDING: ${backupInterrupted.count}`)
+    }
+    if (mainInterrupted.count > 0) {
+      await notifyAutomation({
+        title: `Batch: ${mainInterrupted.count} item(s) interrumpidos por reinicio`,
+        body: 'La subida a MEGA se cortó por un reinicio del servidor. Están en FAILED: revísalos y vuelve a confirmarlos.',
+        typeStatus: 'WARNING',
+      })
+    }
+  } catch (e) {
+    console.error('[BatchWorker][RECOVERY] Error recuperando items:', e.message)
+  }
+}
+
 function toSafeNumber(value, fallback = 0) {
   const n = Number(value)
   return Number.isFinite(n) ? n : fallback
@@ -1033,7 +1114,7 @@ async function createAssetRecord({ slug, title, titleEn, description, descriptio
 
 // ──────────────────── MAIN PHASE (PREPARAR + SUBIR MAIN + CREAR ASSET) ────────────────────
 
-async function prepareItemForMain(item, updateItem) {
+async function prepareItemForMain(item, updateItem, artifacts = {}) {
   const batchFolder = await prisma.batchImport.findUnique({ where: { id: item.batchId } })
   // Resolver ruta: buscar primero en batch_imports (SCP), luego en telegram_downloads_organized
   let folderPath = path.join(BATCH_DIR, batchFolder?.folderName || '', item.folderName)
@@ -1075,6 +1156,8 @@ async function prepareItemForMain(item, updateItem) {
   await updateItem({ error: 'Comprimiendo archivo final...', mainStatus: 'COMPRESSING' })
   const packed = await recompressFolder(folderPath, slug)
   const stagingArchivePath = packed.outputPath
+  artifacts.stagingPath = stagingArchivePath
+  writeInProgressMarker(item.id, artifacts)
   const archiveSizeBytes = fs.statSync(stagingArchivePath).size
 
   // -- SMART AUTO DISTRIBUTION: reasignación en bloque con validación de backups --
@@ -1192,7 +1275,15 @@ async function prepareItemForMain(item, updateItem) {
   const archDir = path.join(ARCHIVES_DIR, slug)
   fs.mkdirSync(archDir, { recursive: true })
   const finalArchivePath = path.join(archDir, `${slug}.${packed.ext}`)
-  fs.copyFileSync(stagingArchivePath, finalArchivePath)
+  try {
+    fs.renameSync(stagingArchivePath, finalArchivePath)
+  } catch (e) {
+    if (e.code !== 'EXDEV') throw e
+    fs.copyFileSync(stagingArchivePath, finalArchivePath) // otra partición: copiar y borrar
+    fs.unlinkSync(stagingArchivePath)
+  }
+  artifacts.finalPath = finalArchivePath
+  writeInProgressMarker(item.id, artifacts)
   const archiveName = path.relative(ARCHIVES_DIR, finalArchivePath).replace(/\\/g, '/')
 
   return {
@@ -1223,9 +1314,10 @@ async function processMainQueueItem(item) {
   })
 
   let ctx = null
+  const artifacts = {} // staging/archives creados por esta fase (para limpiarlos si falla)
 
   try {
-    ctx = await prepareItemForMain(item, updateItem)
+    ctx = await prepareItemForMain(item, updateItem, artifacts)
 
     await updateItem({ error: 'Subiendo a MEGA (Main)...', mainStatus: 'UPLOADING', mainProgress: 0 })
     const logMainProgress = createProgressLogger(`item=${item.id} role=MAIN acc=${ctx.mainAccount.id}`)
@@ -1323,9 +1415,7 @@ async function processMainQueueItem(item) {
         error: 'Detenido manualmente. Devuelto a borrador.',
       })
       clearBatchStopRequest(item.id)
-      if (ctx?.finalArchivePath) {
-        deleteLocalArchiveBestEffort(ctx.finalArchivePath, `item=${item.id} phase=main manual-stop`)
-      }
+      cleanupMainArtifacts(artifacts, `item=${item.id} phase=main manual-stop`)
       return
     }
 
@@ -1375,9 +1465,7 @@ async function processMainQueueItem(item) {
         typeStatus: 'ERROR',
       })
 
-      if (ctx?.finalArchivePath) {
-        deleteLocalArchiveBestEffort(ctx.finalArchivePath, `item=${item.id} phase=main storage-full`)
-      }
+      cleanupMainArtifacts(artifacts, `item=${item.id} phase=main storage-full`)
       return
     }
 
@@ -1397,10 +1485,10 @@ async function processMainQueueItem(item) {
       typeStatus: 'ERROR',
     })
 
-    // Evita acumulación de archivos huérfanos si el MAIN falla tras copiar a /archives.
-    if (ctx?.finalArchivePath) {
-      deleteLocalArchiveBestEffort(ctx.finalArchivePath, `item=${item.id} phase=main failed`)
-    }
+    // Evita acumulación de archivos huérfanos (staging y /archives) si el MAIN falla.
+    cleanupMainArtifacts(artifacts, `item=${item.id} phase=main failed`)
+  } finally {
+    clearInProgressMarker()
   }
 }
 
@@ -1613,6 +1701,7 @@ export async function startBatchWorker() {
   for (const dir of [BATCH_DIR, STAGING_DIR, ARCHIVES_DIR, IMAGES_DIR]) {
     fs.mkdirSync(dir, { recursive: true })
   }
+  await recoverInterruptedWork()
 
   while (true) {
     try {

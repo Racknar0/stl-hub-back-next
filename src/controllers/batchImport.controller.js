@@ -13,6 +13,7 @@ const prisma = new PrismaClient();
 const UPLOADS_DIR = path.resolve('uploads');
 const BATCH_DIR = path.join(UPLOADS_DIR, 'batch_imports');
 const TELEGRAM_DIR = path.join(UPLOADS_DIR, 'telegram_downloads_organized');
+const ARCHIVES_DIR = path.join(UPLOADS_DIR, 'archives');
 const ARCHIVE_EXTS = ['.rar', '.zip', '.7z', '.tar', '.gz', '.tgz'];
 const TITLE_PREFIX_RE = /^\s*STL\s*-\s*/i;
 const MAX_ACCOUNT_UPLOAD_MB = 18 * 1024;
@@ -395,6 +396,26 @@ function removeDirIfEmpty(absDir) {
     const entries = fs.readdirSync(absDir);
     if (entries.length === 0) fs.rmSync(absDir, { recursive: true, force: true });
   } catch {}
+}
+
+// Copia local del comprimido (uploads/archives/<slug>/...) que el worker guarda para reintentar backups.
+// Al borrar el item ya no se reintentará, así que la copia sobra.
+async function deleteLocalArchiveForItem(item) {
+  try {
+    if (!item?.createdAssetId) return false;
+    const asset = await prisma.asset.findUnique({ where: { id: Number(item.createdAssetId) }, select: { archiveName: true } });
+    const rel = String(asset?.archiveName || '').replace(/^\/+/, '');
+    if (!rel) return false;
+    const abs = path.resolve(ARCHIVES_DIR, rel);
+    if (!abs.startsWith(path.resolve(ARCHIVES_DIR) + path.sep) || !fs.existsSync(abs)) return false;
+    fs.rmSync(abs, { force: true });
+    removeDirIfEmpty(path.dirname(abs));
+    console.log(`[BATCH DELETE] Copia local borrada: ${rel}`);
+    return true;
+  } catch (e) {
+    console.warn(`[BATCH DELETE] Warn al borrar copia local del item ${item?.id}: ${e.message}`);
+    return false;
+  }
 }
 
 function unpackAiScanResult(rawValue) {
@@ -1703,6 +1724,8 @@ export const deleteBatchItem = async (req, res) => {
       }
     }
 
+    await deleteLocalArchiveForItem(item);
+
     // Borrar de BD
     await prisma.batchImportItem.delete({ where: { id: Number(id) } });
 
@@ -1757,7 +1780,7 @@ export const purgeCompleted = async (req, res) => {
   try {
     const completedItems = await prisma.batchImportItem.findMany({
       where: { status: 'COMPLETED' },
-      select: { id: true, batchId: true, folderName: true, batch: { select: { folderName: true } } },
+      select: { id: true, batchId: true, folderName: true, createdAssetId: true, batch: { select: { folderName: true } } },
     });
 
     if (!completedItems.length) {
@@ -1787,6 +1810,8 @@ export const purgeCompleted = async (req, res) => {
         }
       }
     }
+
+    for (const item of completedItems) await deleteLocalArchiveForItem(item);
 
     const touchedBatchIds = Array.from(new Set(completedItems.map((i) => Number(i.batchId)).filter((n) => Number.isFinite(n) && n > 0)));
 
