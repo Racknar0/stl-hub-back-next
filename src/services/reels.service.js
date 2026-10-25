@@ -6,10 +6,11 @@ import { metaConfigured, publishInstagramReel, publishFacebookReel } from './met
 import { dispatchReelNotification } from '../utils/reelsNotifications.js';
 import { uploadShort, connectionStatus as youtubeStatus } from './youtube.service.js';
 import { publishVideo as publishTiktokVideo, connectionStatus as tiktokStatus, tiktokOptionsProblem } from './tiktok.service.js';
+import { publishVideo as publishThreadsVideo, connectionStatus as threadsStatus, threadsText } from './threads.service.js';
 
 const prisma = new PrismaClient();
 
-export const PLATFORMS = ['instagram', 'facebook', 'youtube', 'tiktok'];
+export const PLATFORMS = ['instagram', 'facebook', 'youtube', 'tiktok', 'threads'];
 const SETTINGS = { defaultTime: 'REELS_DEFAULT_TIME', timeSpread: 'REELS_TIME_SPREAD', language: 'REELS_LANGUAGE', youtubePrivacy: 'REELS_YOUTUBE_PRIVACY' };
 const DEFAULTS = { defaultTime: '18:00', timeSpread: 60, language: 'es', youtubePrivacy: 'private' };
 const YOUTUBE_PRIVACY = ['private', 'unlisted', 'public'];
@@ -228,6 +229,8 @@ export function missingFields(post) {
     const problem = tiktokOptionsProblem(post.tiktokOptions);
     if (problem) missing.push(problem);
   }
+  // Threads usa el caption de Instagram (sin su pie) + el link del modelo
+  if (platforms.includes('threads') && !post.caption?.trim()) missing.push('caption (se usa también en Threads)');
   return missing;
 }
 
@@ -236,7 +239,7 @@ const hashtagLine = (post) => (Array.isArray(post.hashtags) && post.hashtags.len
 const withHashtags = (text, post) => [String(text || '').trim(), hashtagLine(post)].filter(Boolean).join('\n\n');
 const publicVideoUrl = (videoPath) => `${PUBLIC_UPLOADS_BASE}/${String(videoPath).split('/').map(encodeURIComponent).join('/')}`;
 
-const PLATFORM_NAMES = { instagram: 'Instagram', facebook: 'Facebook', youtube: 'YouTube', tiktok: 'TikTok' };
+const PLATFORM_NAMES = { instagram: 'Instagram', facebook: 'Facebook', youtube: 'YouTube', tiktok: 'TikTok', threads: 'Threads' };
 
 // Reels que se están subiendo ahora mismo (evita publicar dos veces el mismo si coinciden el worker y "Publicar ahora")
 const inFlight = new Set();
@@ -253,6 +256,9 @@ async function publishToPlatform(platform, post) {
     const { youtubePrivacy } = await getSettings();
     const description = [String(post.youtubeDescription || '').trim(), link].filter(Boolean).join(' ');
     return uploadShort({ videoAbsPath: toAbsVideoPath(post.videoPath), title: post.title, description, tags: Array.isArray(post.hashtags) ? post.hashtags : [], privacyStatus: youtubePrivacy });
+  }
+  if (platform === 'threads') {
+    return publishThreadsVideo({ videoUrl: publicVideoUrl(post.videoPath), text: threadsText(captionBody(post.caption), link) });
   }
   if (platform === 'tiktok') {
     return publishTiktokVideo({ videoAbsPath: toAbsVideoPath(post.videoPath), caption: withHashtags(post.tiktokCaption || post.caption, post), options: post.tiktokOptions });
@@ -440,13 +446,15 @@ export async function autoFill() {
   return { assigned };
 }
 
-/** Redes por defecto de un reel nuevo: YouTube y TikTok si su cuenta está conectada (TikTok va a borradores por defecto). */
+/** Redes por defecto de un reel nuevo: YouTube, TikTok y Threads si su cuenta está conectada (TikTok va a borradores). */
 export async function defaultPlatforms() {
-  const [yt, tt] = await Promise.all([
+  const [yt, tt, th] = await Promise.all([
     youtubeStatus().catch(() => ({ connected: false })),
     tiktokStatus().catch(() => ({ connected: false })),
+    threadsStatus().catch(() => ({ connected: false })),
   ]);
-  return PLATFORMS.filter(p => (p !== 'youtube' || yt.connected) && (p !== 'tiktok' || tt.connected));
+  const connected = { youtube: yt.connected, tiktok: tt.connected, threads: th.connected };
+  return PLATFORMS.filter(p => !(p in connected) || connected[p]);
 }
 
 export async function deleteReel(postId) {

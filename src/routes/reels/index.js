@@ -7,6 +7,7 @@ import { requireAuth, requireAdmin } from '../../middlewares/auth.js';
 import reels, { PLATFORMS, assetLink, dayKey, defaultPlatforms } from '../../services/reels.service.js';
 import youtube from '../../services/youtube.service.js';
 import tiktok, { PRIVACY_LEVELS } from '../../services/tiktok.service.js';
+import threads from '../../services/threads.service.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -172,15 +173,17 @@ router.put('/settings', requireAuth, requireAdmin, async (req, res) => {
 // 6. Estado de las cuentas (por ahora solo comprueba que haya credenciales configuradas)
 router.get('/connection-status', requireAuth, requireAdmin, async (req, res) => {
   const meta = !!(process.env.META_SYSTEM_USER_TOKEN && process.env.META_PAGE_ID && process.env.META_IG_USER_ID);
-  const [yt, tt] = await Promise.all([
+  const [yt, tt, th] = await Promise.all([
     youtube.connectionStatus().catch(() => ({ configured: false, connected: false })),
     tiktok.connectionStatus().catch(() => ({ configured: false, connected: false })),
+    threads.connectionStatus().catch(() => ({ configured: false, connected: false })),
   ]);
   res.json({
     instagram: { configured: meta },
     facebook: { configured: meta },
     youtube: { ...yt, appConfigured: youtube.youtubeConfigured() },
     tiktok: { ...tt, appConfigured: tiktok.tiktokConfigured() },
+    threads: { ...th, appConfigured: threads.threadsConfigured() },
   });
 });
 
@@ -241,6 +244,35 @@ router.post('/tiktok/disconnect', requireAuth, requireAdmin, async (req, res) =>
 // 6h. TikTok: datos del creador que hay que mostrar antes de publicar (cuenta, privacidades permitidas…)
 router.get('/tiktok/creator-info', requireAuth, requireAdmin, async (req, res) => {
   try { res.json(await tiktok.creatorInfo()); } catch (error) { res.status(400).json({ error: error.message }); }
+});
+
+// 6i. Threads: URL para autorizar la cuenta
+router.get('/threads/auth', requireAuth, requireAdmin, (req, res) => {
+  try { res.json({ url: threads.getAuthUrl() }); } catch (error) { res.status(400).json({ error: error.message }); }
+});
+
+// 6j. Threads: redirige aquí tras autorizar (ruta pública, protegida por el parámetro state).
+// Meta también llama a esta URL al desinstalar o pedir borrar datos (POST con signed_request): se responde OK.
+router.post('/threads/callback', (req, res) => res.json({ success: true }));
+router.get('/threads/callback', async (req, res) => {
+  const page = (title, text, ok) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head>
+    <body style="background:#09090b;color:#fff;font-family:sans-serif;text-align:center;padding-top:60px;">
+      <h2 style="color:${ok ? '#22c55e' : '#f87171'}">${title}</h2><p>${text}</p>
+      ${ok ? '<script>setTimeout(() => window.close(), 3000)</script>' : ''}
+    </body></html>`;
+  try {
+    if (req.query.error) return res.status(400).send(page('Threads no se conectó', `Threads respondió: ${String(req.query.error_description || req.query.error).replace(/[<>]/g, '')}`, false));
+    const account = await threads.handleCallback({ code: req.query.code, state: req.query.state });
+    res.send(page('¡Threads conectado!', `Cuenta: <b>@${String(account.username || '').replace(/[<>]/g, '')}</b>. Ya puedes cerrar esta ventana y volver al Reels Publisher.`, true));
+  } catch (error) {
+    console.error('[REELS][THREADS] Callback:', error.message);
+    res.status(400).send(page('Threads no se conectó', String(error.message).replace(/[<>]/g, ''), false));
+  }
+});
+
+// 6k. Threads: desconectar la cuenta
+router.post('/threads/disconnect', requireAuth, requireAdmin, async (req, res) => {
+  try { await threads.disconnect(); res.json({ success: true }); } catch (error) { sendError(res, error); }
 });
 
 // 7. Rellenar los próximos días libres con la bandeja
