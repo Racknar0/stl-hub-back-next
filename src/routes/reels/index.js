@@ -24,7 +24,7 @@ const uploadVideos = multer({
       cb(null, `reel_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`);
     },
   }),
-  limits: { fileSize: 300 * 1024 * 1024, files: 20 },
+  limits: { fileSize: 300 * 1024 * 1024, files: 200 },
   fileFilter: (req, file, cb) => {
     if (/^video\/(mp4|quicktime)$/.test(file.mimetype)) cb(null, true);
     else cb(new Error(`"${file.originalname}" no es MP4 ni MOV`));
@@ -55,7 +55,7 @@ const assetIdFromName = (name) => {
 
 // 1. Subir uno o varios videos: cada uno se convierte en un borrador de la bandeja (sin textos todavía)
 router.post('/upload', requireAuth, requireAdmin, (req, res) => {
-  uploadVideos.array('videos', 20)(req, res, async (err) => {
+  uploadVideos.array('videos', 200)(req, res, async (err) => {
     if (err) return res.status(400).json({ error: err.message });
     if (!req.files?.length) return res.status(400).json({ error: 'No se recibió ningún video' });
     try {
