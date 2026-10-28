@@ -149,7 +149,7 @@ export async function creatorInfo() {
 }
 
 // Opciones por defecto de un reel: publicación directa, pública y con comentarios, dúo y stitch permitidos
-export const DEFAULT_OPTIONS = { mode: 'direct', privacyLevel: 'PUBLIC_TO_EVERYONE', allowComment: true, allowDuet: true, allowStitch: true, commercial: false, yourBrand: false, brandedContent: false };
+export const DEFAULT_OPTIONS = { mode: 'inbox', privacyLevel: 'PUBLIC_TO_EVERYONE', allowComment: true, allowDuet: true, allowStitch: true, commercial: false, yourBrand: false, brandedContent: false };
 export const withDefaults = (options) => ({ ...DEFAULT_OPTIONS, ...(options && typeof options === 'object' ? options : {}) });
 
 /** Comprueba las opciones de TikTok del reel. */
