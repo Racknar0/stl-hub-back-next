@@ -148,11 +148,15 @@ export async function creatorInfo() {
   };
 }
 
-/** Comprueba las opciones que el usuario eligió para TikTok (TikTok no permite valores por defecto). */
+// Opciones por defecto de un reel: publicación directa, pública y con comentarios, dúo y stitch permitidos
+export const DEFAULT_OPTIONS = { mode: 'direct', privacyLevel: 'PUBLIC_TO_EVERYONE', allowComment: true, allowDuet: true, allowStitch: true, commercial: false, yourBrand: false, brandedContent: false };
+export const withDefaults = (options) => ({ ...DEFAULT_OPTIONS, ...(options && typeof options === 'object' ? options : {}) });
+
+/** Comprueba las opciones de TikTok del reel. */
 export function tiktokOptionsProblem(options) {
-  const o = options || {};
-  // En borradores (el modo por defecto mientras la app no esté aprobada) la privacidad se elige en la app de TikTok
-  if (!o.mode || o.mode === 'inbox') return null;
+  const o = withDefaults(options);
+  // En borradores la privacidad se elige en la app de TikTok
+  if (o.mode === 'inbox') return null;
   if (!PRIVACY_LEVELS.includes(o.privacyLevel)) return 'privacidad de TikTok';
   if (o.commercial && !o.yourBrand && !o.brandedContent) return 'tipo de contenido comercial de TikTok';
   if (o.brandedContent && o.privacyLevel === 'SELF_ONLY') return 'privacidad de TikTok compatible con contenido de marca (no puede ser "Solo yo")';
@@ -208,8 +212,9 @@ async function sendToInbox({ videoAbsPath }) {
 }
 
 /** Publica un video directamente en la cuenta conectada (subida por archivo) y espera a que TikTok lo procese. */
-export async function publishVideo({ videoAbsPath, caption, options }) {
-  if (!options?.mode || options.mode === 'inbox') return sendToInbox({ videoAbsPath });
+export async function publishVideo({ videoAbsPath, caption, options: rawOptions }) {
+  const options = withDefaults(rawOptions);
+  if (options.mode === 'inbox') return sendToInbox({ videoAbsPath });
   if (!videoAbsPath || !fs.existsSync(videoAbsPath)) throw new Error('El archivo de video no está en el servidor');
   const problem = tiktokOptionsProblem(options);
   if (problem) throw new Error(`Falta elegir: ${problem}`);
