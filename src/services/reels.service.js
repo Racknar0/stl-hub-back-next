@@ -12,7 +12,7 @@ const prisma = new PrismaClient();
 
 export const PLATFORMS = ['instagram', 'facebook', 'youtube', 'tiktok', 'threads'];
 const SETTINGS = { defaultTime: 'REELS_DEFAULT_TIME', timeSpread: 'REELS_TIME_SPREAD', language: 'REELS_LANGUAGE', youtubePrivacy: 'REELS_YOUTUBE_PRIVACY' };
-const DEFAULTS = { defaultTime: '18:00', timeSpread: 60, language: 'es', youtubePrivacy: 'private' };
+const DEFAULTS = { defaultTime: '18:00', timeSpread: 60, language: 'es', youtubePrivacy: 'public' };
 const YOUTUBE_PRIVACY = ['private', 'unlisted', 'public'];
 export const SPREAD_OPTIONS = [0, 30, 60, 90, 120];
 
