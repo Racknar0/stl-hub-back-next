@@ -6,6 +6,7 @@ import {
   getAsset,
   getAssetBySlug,
   listPublishedSlugs,
+  countPublishedSlugs,
   listAssets,
   uploadImages,
   updateAsset,
@@ -66,6 +67,7 @@ router.get('/latest', optionalAuth, latestAssets);
 router.get('/top', optionalAuth, mostDownloadedAssets);
 router.get('/menu/mega', optionalAuth, getMegaMenuData);
 router.get('/search', optionalAuth, searchAssets);
+router.get('/slugs/count', optionalAuth, countPublishedSlugs);
 router.get('/slugs', optionalAuth, listPublishedSlugs);
 router.get('/slug/:slug', optionalAuth, getAssetBySlug);
 router.get('/:id(\\d+)', optionalAuth, getAsset);

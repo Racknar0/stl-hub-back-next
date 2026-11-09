@@ -3531,16 +3531,34 @@ export const listPublishedSlugs = async (req, res) => {
         const sortByParam = String(req.query.sortBy || '').toLowerCase();
         const sortField = sortByParam === 'id' ? 'id' : (sortByParam === 'createdat' ? 'createdAt' : 'updatedAt');
 
+        // offset: permite paginar (el sitemap pide tramos de N assets por archivo).
+        const offsetNum = Number(req.query.offset);
+        const skip = Number.isFinite(offsetNum) && offsetNum > 0 ? Math.floor(offsetNum) : 0;
+
         const rows = await prisma.asset.findMany({
             where,
             select: { id: true, slug: true, updatedAt: true },
-            orderBy: { [sortField]: sortOrder },
+            // id como desempate: sin él, dos assets con el mismo updatedAt/createdAt
+            // podrían repetirse o saltarse entre páginas.
+            orderBy: sortField === 'id' ? { id: sortOrder } : [{ [sortField]: sortOrder }, { id: sortOrder }],
+            skip,
             take: limit,
         });
         return res.json(rows);
     } catch (e) {
         console.error('[ASSETS] listPublishedSlugs error:', e);
         return res.status(500).json({ message: 'Error listing slugs' });
+    }
+};
+
+/** Total de assets publicados que lista /slugs (mismo filtro). GET /api/assets/slugs/count */
+export const countPublishedSlugs = async (req, res) => {
+    try {
+        const count = await prisma.asset.count({ where: { status: 'PUBLISHED', ...buildNsfwWhere(req) } });
+        return res.json({ count });
+    } catch (e) {
+        console.error('[ASSETS] countPublishedSlugs error:', e);
+        return res.status(500).json({ message: 'Error counting slugs' });
     }
 };
 
