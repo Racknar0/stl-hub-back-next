@@ -226,7 +226,19 @@ export const updateEngine = async (req, res) => {
   }
 };
 
+/** POST /engine/test — envía un paso del embudo al correo del admin que lo pide. */
+export const sendEngineTest = async (req, res) => {
+  try {
+    const out = await engine.sendTestEmail({ kind: String(req.body?.kind || ''), userId: req.user.id });
+    if (out.error) return res.status(400).json({ error: out.error });
+    return res.json(out);
+  } catch (e) {
+    return fail(res, e, 'No se pudo enviar la prueba');
+  }
+};
+
 export default {
+  sendEngineTest,
   getEngine,
   updateEngine,
   getOverview,

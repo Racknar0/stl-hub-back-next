@@ -3,6 +3,7 @@ import { requireAuth, requireAdmin } from '../../middlewares/auth.js';
 import {
   getEngine,
   updateEngine,
+  sendEngineTest,
   getOverview,
   getAudiences,
   listAudience,
@@ -25,6 +26,7 @@ router.get('/templates', listTemplates);
 router.get('/logs', listLogs);
 router.get('/engine', getEngine);
 router.put('/engine', updateEngine);
+router.post('/engine/test', sendEngineTest);
 
 router.get('/audiences', getAudiences);
 router.get('/audiences/:stage', listAudience);

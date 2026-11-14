@@ -360,6 +360,37 @@ export async function sendDue(now = new Date()) {
   return { sent, skipped, failed, quota, sentToday };
 }
 
+/**
+ * Prueba: envía un paso del embudo al correo del propio administrador, con los mismos
+ * parámetros que un envío real. No usa la cola ni cuenta como envío del embudo.
+ */
+export async function sendTestEmail({ kind, userId }) {
+  const step = stepOf(kind);
+  if (!step) return { error: 'Paso del embudo desconocido' };
+  if (!brevo.isConfigured()) return { error: 'BREVO_API_KEY no configurada' };
+  if (!process.env.EMAIL_UNSUBSCRIBE_SECRET) return { error: 'EMAIL_UNSUBSCRIBE_SECRET no configurada' };
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, email: true, language: true },
+  });
+  if (!user) return { error: 'Usuario no encontrado' };
+
+  const cfg = getConfig();
+  const unsubscribeUrl = buildUnsubscribeUrl(user.id, cfg.publicUrl);
+  const res = await brevo.sendTemplate({
+    templateId: step.templateId,
+    to: user.email,
+    params: { LANGUAGE: user.language || 'es', UNSUBSCRIBE_URL: unsubscribeUrl },
+    tags: ['funnel-test', step.kind],
+    headers: {
+      'List-Unsubscribe': `<${unsubscribeUrl}>`,
+      'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+    },
+  });
+  return { ok: true, to: user.email, messageId: res?.messageId || null };
+}
+
 // ---------------------------------------------------------------- Estado y ciclo
 
 /** Resumen de la cola para el panel. */
@@ -438,6 +469,7 @@ export default {
   buildUnsubscribeUrl,
   planFunnel,
   sendDue,
+  sendTestEmail,
   getQueueSummary,
   tick,
   startEmailEngine,
