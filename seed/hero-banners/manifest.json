@@ -1,0 +1,81 @@
+{
+  "variants": [
+    {
+      "name": "Ninja y sakura",
+      "seedKey": "user-variant-01",
+      "active": true,
+      "altEs": "Estatua de ninja con jardín de sakura y modelos de fantasía para impresión 3D.",
+      "altEn": "Ninja statue with a sakura garden and fantasy models for 3D printing.",
+      "esDesktop": "variant-01/esDesktop.webp",
+      "enDesktop": "variant-01/enDesktop.webp",
+      "esMobile": "variant-01/esMobile.webp",
+      "enMobile": "variant-01/enMobile.webp"
+    },
+    {
+      "name": "Jinete de dragón",
+      "seedKey": "user-variant-02",
+      "active": true,
+      "altEs": "Aventurera sobre un dragón violeta y esculturas de fantasía para imprimir en 3D.",
+      "altEn": "Adventurer riding a purple dragon with fantasy sculptures for 3D printing.",
+      "esDesktop": "variant-02/esDesktop.webp",
+      "enDesktop": "variant-02/enDesktop.webp",
+      "esMobile": "variant-02/esMobile.webp",
+      "enMobile": "variant-02/enMobile.webp"
+    },
+    {
+      "name": "Cosplay y diseño",
+      "seedKey": "user-variant-03",
+      "active": true,
+      "altEs": "Casco de cosplay con miniaturas, soportes y mecanismos imprimibles en 3D.",
+      "altEn": "Cosplay helmet with miniatures, stands and mechanisms for 3D printing.",
+      "esDesktop": "variant-03/esDesktop.webp",
+      "enDesktop": "variant-03/enDesktop.webp",
+      "esMobile": "variant-03/esMobile.webp",
+      "enMobile": "variant-03/enMobile.webp"
+    },
+    {
+      "name": "Escritorio creativo",
+      "seedKey": "user-variant-04",
+      "active": true,
+      "altEs": "Organizador de escritorio con soporte de auriculares, teléfono y proyectos de impresión 3D.",
+      "altEn": "Desk organizer with headphone and phone stands and creative 3D printing projects.",
+      "esDesktop": "variant-04/esDesktop.webp",
+      "enDesktop": "variant-04/enDesktop.webp",
+      "esMobile": "variant-04/esMobile.webp",
+      "enMobile": "variant-04/enMobile.webp"
+    },
+    {
+      "name": "Coleccionables y anime",
+      "seedKey": "user-variant-05",
+      "active": true,
+      "altEs": "Coleccionables de anime y videojuegos con Goku, Kratos y figuras para impresión 3D.",
+      "altEn": "Anime and video game collectibles with Goku, Kratos and figures for 3D printing.",
+      "esDesktop": "variant-05/esDesktop.webp",
+      "enDesktop": "variant-05/enDesktop.webp",
+      "esMobile": "variant-05/esMobile.webp",
+      "enMobile": "variant-05/enMobile.webp"
+    },
+    {
+      "name": "Impresión y proyectos",
+      "seedKey": "user-variant-06",
+      "active": true,
+      "altEs": "Impresora 3D con pantalla de lámpara y proyectos decorativos y funcionales.",
+      "altEn": "3D printer with a sculptural lamp shade and decorative and functional projects.",
+      "esDesktop": "variant-06/esDesktop.webp",
+      "enDesktop": "variant-06/enDesktop.webp",
+      "esMobile": "variant-06/esMobile.webp",
+      "enMobile": "variant-06/enMobile.webp"
+    },
+    {
+      "name": "Juegos y personalización",
+      "seedKey": "user-variant-07",
+      "active": true,
+      "altEs": "Torre de dados, ajolote articulado, litofanía y accesorios personalizados para imprimir.",
+      "altEn": "Dice tower, articulated axolotl, lithophane and personalized printable accessories.",
+      "esDesktop": "variant-07/esDesktop.webp",
+      "enDesktop": "variant-07/enDesktop.webp",
+      "esMobile": "variant-07/esMobile.webp",
+      "enMobile": "variant-07/enMobile.webp"
+    }
+  ]
+}

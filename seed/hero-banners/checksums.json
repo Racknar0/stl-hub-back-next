@@ -1,0 +1,114 @@
+{
+  "variant-01/esDesktop.webp": {
+    "bytes": 251460,
+    "sha256": "3389555c3c3ba25efc645294f6a2c0ee37142d757eddc1b56e7f4680d6570f26"
+  },
+  "variant-01/enDesktop.webp": {
+    "bytes": 244322,
+    "sha256": "3cfb3352011adb8c3f153fbfd29f27cd694707e2db8997e7d452b39cc13d8bf6"
+  },
+  "variant-01/esMobile.webp": {
+    "bytes": 212896,
+    "sha256": "1a4d600ee188468c331339ae5cdd7a4ca53ca435114a331c536ee843551866a3"
+  },
+  "variant-01/enMobile.webp": {
+    "bytes": 206094,
+    "sha256": "007b33e3953ad5ac354e9bb239574c36b29ae652c71840f98d5df98bb4def694"
+  },
+  "variant-02/esDesktop.webp": {
+    "bytes": 257482,
+    "sha256": "44c680f2868b3c5e46f11200849cad5c1bdea9ce2c0d97460709ca1d4820268c"
+  },
+  "variant-02/enDesktop.webp": {
+    "bytes": 253720,
+    "sha256": "e63f4da0cbeea49f3cb5dc698bbafc362b3c6e4b8ba1de832864990eaf7d858a"
+  },
+  "variant-02/esMobile.webp": {
+    "bytes": 218888,
+    "sha256": "797461765ae71a73fd1919cd5e12dd251a850603187aebf9bfd45e3a147418b2"
+  },
+  "variant-02/enMobile.webp": {
+    "bytes": 200142,
+    "sha256": "f8b329bff933231c3a11f8b4ee2dd5df390fbd542967a703f4d0a3dd92367d20"
+  },
+  "variant-03/esDesktop.webp": {
+    "bytes": 257532,
+    "sha256": "a182adb166d5bf0a4ae6a8f0a71deba4e272b8366c91c5b88e97ae1a5b496568"
+  },
+  "variant-03/enDesktop.webp": {
+    "bytes": 239772,
+    "sha256": "b540868b9d0e6bcd1c1fd44b044a8f533c1ac44f1af39f041a3ba62c4d3a1ea0"
+  },
+  "variant-03/esMobile.webp": {
+    "bytes": 209978,
+    "sha256": "1a98a8347b511e9b2cf052338b4492297e1ccf6537cda015c717ebf5de95829e"
+  },
+  "variant-03/enMobile.webp": {
+    "bytes": 203146,
+    "sha256": "ae46e6e05c32334b3b990f0d4a83204b5979a7d6455091bd95d8b8079d55c9fb"
+  },
+  "variant-04/esDesktop.webp": {
+    "bytes": 251434,
+    "sha256": "dac34fa57a674ebe2520433b8121ad58710522cfc4130fc3139930dad818f1fa"
+  },
+  "variant-04/enDesktop.webp": {
+    "bytes": 241852,
+    "sha256": "40ab23d10f1c85dcc522644c46952f0df8fb3d8695b0ab6f19e209cf3f3f5dbb"
+  },
+  "variant-04/esMobile.webp": {
+    "bytes": 196582,
+    "sha256": "a8f353daf1b15db9041d8f0e5e7ca2f21f35f1f3e41a0a18f93510e917cdd74f"
+  },
+  "variant-04/enMobile.webp": {
+    "bytes": 192760,
+    "sha256": "a04686772678805fdc60d86eaec1127172688168b2910c2107ca90e68a49ed79"
+  },
+  "variant-05/esDesktop.webp": {
+    "bytes": 274736,
+    "sha256": "1342ad823fc87b94878d3395ee18dc87accc2d77d96b35a6bd0cebe94d9f1e48"
+  },
+  "variant-05/enDesktop.webp": {
+    "bytes": 269954,
+    "sha256": "ed6042b49403862b746e0397d48d721313d49090196c594fb3284f4b52b28d92"
+  },
+  "variant-05/esMobile.webp": {
+    "bytes": 214894,
+    "sha256": "9c6e8236a403ced2b46bcb0662d69677a02b7198f02f4bee60eb9c30e2b673cd"
+  },
+  "variant-05/enMobile.webp": {
+    "bytes": 205174,
+    "sha256": "081087a72e752d54b63eb7ee7e796bdef69244a418e4a6be6e29020befbe8f45"
+  },
+  "variant-06/esDesktop.webp": {
+    "bytes": 252810,
+    "sha256": "1c7001340996e2bc1f7e66f5a84d12b504c9c402ca5856819fd14abad6fdb003"
+  },
+  "variant-06/enDesktop.webp": {
+    "bytes": 250660,
+    "sha256": "186402dec7fd807ea37bf1f48d22e6a8b1ca4ffeb3392a9df53da0db887f6ce5"
+  },
+  "variant-06/esMobile.webp": {
+    "bytes": 204542,
+    "sha256": "babdd79aab17d5a808e73a1729eb03ce5a5ad1bbd6b2051a9cb7e6bb64f0f4a6"
+  },
+  "variant-06/enMobile.webp": {
+    "bytes": 195952,
+    "sha256": "1b88c76cdf6996fbe37a418cc3e5b0c67b4cd405a4364bc529e9b3c967c4f665"
+  },
+  "variant-07/esDesktop.webp": {
+    "bytes": 264130,
+    "sha256": "ff090b9dc31a056bc478fb062bdd607fa2605ae922704050054753ecbdc46bf6"
+  },
+  "variant-07/enDesktop.webp": {
+    "bytes": 257710,
+    "sha256": "7da0ac5e669c1e5a3054be3c625ae76ee43e39df1e21ba3500ca5133ecbf2d7f"
+  },
+  "variant-07/esMobile.webp": {
+    "bytes": 200954,
+    "sha256": "0e9ad256122d7f2107392867b434e3fa64bbba0a5d7fdf1f9bb5e40e9cc17271"
+  },
+  "variant-07/enMobile.webp": {
+    "bytes": 196008,
+    "sha256": "3c3bcfc2399adc61586c23fa23f9a3863da93e273c00e47d309350693f5de7f4"
+  }
+}
