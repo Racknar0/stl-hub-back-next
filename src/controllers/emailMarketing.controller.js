@@ -180,8 +180,32 @@ export const optInContact = async (req, res) => {
 };
 
 const engineState = async () => {
-  const [config, queue] = await Promise.all([engine.loadConfig(), engine.getQueueSummary()]);
+  const [config, queue, failedLogs] = await Promise.all([
+    engine.loadConfig(),
+    engine.getQueueSummary(),
+    prisma.emailLog.findMany({
+      where: { status: 'FAILED' },
+      orderBy: { scheduledFor: 'desc' },
+      take: 10,
+      select: {
+        id: true,
+        kind: true,
+        attempts: true,
+        lastError: true,
+        scheduledFor: true,
+        contact: { select: { user: { select: { email: true } } } },
+      },
+    }),
+  ]);
   return {
+    failures: failedLogs.map((l) => ({
+      id: l.id,
+      kind: l.kind,
+      attempts: l.attempts,
+      error: l.lastError,
+      scheduledFor: l.scheduledFor,
+      email: l.contact?.user?.email || null,
+    })),
     enabled: config.enabled,
     start: config.start,
     dailyLimit: config.dailyLimit,
