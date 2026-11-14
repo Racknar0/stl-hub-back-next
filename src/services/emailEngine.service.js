@@ -57,7 +57,7 @@ export function buildConfig(env = process.env, overrides = {}) {
     // Un paso atrasado más de estas horas se descarta en vez de enviarse tarde.
     staleHours: Number(env.EMAIL_STALE_HOURS || 24),
     maxAttempts: 3,
-    publicUrl: (env.EMAIL_PUBLIC_URL || 'https://stl-hub.com').replace(/\/$/, ''),
+    publicUrl: (env.EMAIL_PUBLIC_URL || 'https://stlgratis.com').replace(/\/$/, ''),
   };
 }
 
