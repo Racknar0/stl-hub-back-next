@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import { getStickyProxyForAccount, applyMegaProxy } from './megaProxy.js';
 import { runCmd } from './megaCmd.js';
 import { log } from './logger.js';
+import { ensureMegaHttps } from './megaHttps.js';
 
 function isWindows() {
   return process.platform === 'win32';
@@ -49,7 +50,7 @@ function extractProgressSignals(s) {
   return { pct };
 }
 
-export function megaCmdWithProgressAndStall({
+export async function megaCmdWithProgressAndStall({
   cmd,
   args = [],
   label = 'MEGA',
@@ -61,6 +62,10 @@ export function megaCmdWithProgressAndStall({
   onProgress,
   onHeartbeat,
 }) {
+  if (cmd === 'mega-put' || cmd === 'mega-get') {
+    await ensureMegaHttps(runCmd, label);
+  }
+
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { shell, cwd, windowsHide: true });
 

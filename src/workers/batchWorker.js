@@ -37,6 +37,7 @@ import { extractArchiveWithFallback, run7z } from '../utils/archiveExtractor.js'
 import { parseSizeToMB, parseStorageFromDfText } from '../utils/megaDfParser.js'
 import { killProcessTreeBestEffort } from '../utils/megaTransfer.js'
 import { megaLoginFull, megaLogoutSafe } from '../utils/megaSession.js'
+import { ensureMegaHttps, isMegaHttpsError } from '../utils/megaHttps.js'
 
 const prisma = new PrismaClient()
 const UPLOADS_DIR  = path.resolve('uploads')
@@ -435,7 +436,7 @@ async function ensureMegaSessionForAccount(payload, accountId, ctx, opts = {}) {
 
 // ────────── mega-put CON stall detection (idéntico al uploader) ──────────
 
-function megaPutWithStall({
+async function megaPutWithStall({
   srcPath,
   remotePath,
   logPrefix,
@@ -446,6 +447,11 @@ function megaPutWithStall({
   slowTimeoutMs = 10 * 60 * 1000, // 10 minutos
   isLastAttempt = false,
 }) {
+  await ensureMegaHttps(runCmd, logPrefix || 'BATCH PUT')
+  if (typeof shouldAbort === 'function' && shouldAbort()) {
+    throw new Error('FORCE_PROXY_SWITCH_REQUESTED')
+  }
+
   return new Promise((resolve, reject) => {
     const child = spawn('mega-put', [srcPath, remotePath], { shell: true })
     attachAutoAcceptTerms(child, logPrefix || 'BATCH PUT')
@@ -1022,6 +1028,7 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
       clearActiveBatchUpload(account.__batchItemId)
       const msg = String(e?.message || e)
       console.error(`[BATCH][${role.toUpperCase()}][FAIL] attempt=${attempt}/${MAX_STALL_RETRIES} accId=${account.id}: ${msg}`)
+      if (isMegaHttpsError(e)) throw e
       if (/BATCH_STOP_REQUESTED/i.test(msg)) {
         throw new Error('BATCH_STOP_REQUESTED')
       }
