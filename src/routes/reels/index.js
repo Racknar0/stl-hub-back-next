@@ -110,6 +110,14 @@ router.post('/upload', requireAuth, requireAdmin, (req, res) => {
 });
 
 // 1b. Generar metadata con IA para los reels que aún no la tienen (o los ids indicados)
+// 1c. Títulos y descripciones propios de los canales de YouTube extra (solo los que faltan)
+router.get('/youtube-variants', requireAuth, requireAdmin, async (req, res) => {
+  try { res.json({ pending: (await reels.reelsMissingYoutubeVariants()).length }); } catch (error) { sendError(res, error); }
+});
+router.post('/youtube-variants', requireAuth, requireAdmin, async (req, res) => {
+  try { res.json(await reels.fillMissingYoutubeVariants()); } catch (error) { sendError(res, error); }
+});
+
 router.post('/ai-generate', requireAuth, requireAdmin, async (req, res) => {
   try {
     const ids = Array.isArray(req.body.ids) ? req.body.ids.map(Number).filter(Boolean) : null;

@@ -232,6 +232,56 @@ export function enqueueAi(ids) {
   })();
 }
 
+/**
+ * Reels sin publicar que van a YouTube y aún no tienen título/descripción propios para algún canal extra.
+ * Devuelve [{ id, missing: [channelId] }].
+ */
+export async function reelsMissingYoutubeVariants() {
+  const extra = (await youtubeChannels().catch(() => [])).slice(1);
+  if (!extra.length) return [];
+  const posts = await prisma.reelPost.findMany({
+    where: { status: { not: 'PUBLISHED' }, aiGenerated: true },
+    select: { id: true, platforms: true, youtubeChannels: true, youtubeVariants: true },
+  });
+  return posts
+    .filter(p => Array.isArray(p.platforms) && p.platforms.includes('youtube'))
+    .map((p) => {
+      const chosen = Array.isArray(p.youtubeChannels) ? p.youtubeChannels : extra.map(c => c.id);
+      const variants = p.youtubeVariants && typeof p.youtubeVariants === 'object' ? p.youtubeVariants : {};
+      return { id: p.id, missing: extra.filter(c => chosen.includes(c.id) && !variants[c.id]?.title).map(c => c.id) };
+    })
+    .filter(p => p.missing.length);
+}
+
+let variantsRunning = false;
+/** Genera en segundo plano los textos que faltan de los canales extra, sin tocar el resto de textos del reel. */
+export async function fillMissingYoutubeVariants() {
+  if (variantsRunning) return { queued: 0, running: true };
+  const pending = await reelsMissingYoutubeVariants();
+  if (!pending.length) return { queued: 0 };
+  variantsRunning = true;
+  (async () => {
+    for (const { id, missing } of pending) {
+      try {
+        const post = await prisma.reelPost.findUnique({ where: { id } });
+        if (!post || post.status === 'PUBLISHED' || post.publishing) continue;
+        const asset = post.assetId ? await prisma.asset.findUnique({ where: { id: post.assetId } }) : null;
+        const variants = { ...(post.youtubeVariants && typeof post.youtubeVariants === 'object' ? post.youtubeVariants : {}) };
+        for (const channelId of missing) {
+          variants[channelId] = await generateYoutubeVariant({
+            asset, language: post.language, base: { title: post.title, description: post.youtubeDescription }, avoid: Object.values(variants),
+          });
+        }
+        await prisma.reelPost.update({ where: { id }, data: { youtubeVariants: variants } });
+      } catch (e) {
+        console.error(`[REELS][AI] Textos de canales extra del reel ${id}:`, e.message);
+      }
+    }
+    variantsRunning = false;
+  })();
+  return { queued: pending.length };
+}
+
 // ---------- Validación para publicar ----------
 export function missingFields(post) {
   const platforms = Array.isArray(post.platforms) ? post.platforms : [];
@@ -519,5 +569,5 @@ export async function deleteReel(postId) {
 
 export default {
   getSettings, saveSettings, processReelAi, enqueueAi, missingFields, publishReel, publishInBackground, publishDueReels,
-  startReelsWorker, assignDay, autoFill, deleteReel,
+  startReelsWorker, assignDay, autoFill, deleteReel, reelsMissingYoutubeVariants, fillMissingYoutubeVariants,
 };
