@@ -140,4 +140,37 @@ export async function generateReelTexts({ asset, imageParts = [], notes, languag
   };
 }
 
-export default { generateReelTexts };
+/**
+ * Otro título y otra descripción de YouTube para el mismo modelo (para un segundo o tercer canal): mismo tema,
+ * redacción claramente distinta a la base y a las variantes ya generadas.
+ */
+export async function generateYoutubeVariant({ asset, language = 'es', base, avoid = [] }) {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
+  const ai = new GoogleGenAI({ apiKey });
+  const lang = LANG_NAMES[language] || 'Spanish';
+  const prompt = [
+    `Write a NEW YouTube Shorts title and description in ${lang} for a short video of this 3D printable STL model: "${asset?.titleEn || asset?.title || base?.title || ''}".`,
+    'The STL files are PAID: never say "free"/"gratis". No URLs.',
+    'It must be clearly different (wording, angle, hook) from these existing versions, which must NOT be repeated or paraphrased closely:',
+    JSON.stringify([base, ...avoid].filter(Boolean)),
+    'Rules: title max 90 characters, catchy, without "#Shorts". Description: 1-2 short sentences plus 3 hashtags on a new line, and the last line exactly "' + (language === 'en' ? 'Get the STL:' : 'Consigue el STL:') + '".',
+    'Return ONLY JSON: {"title": "...", "description": "..."}',
+  ].join('\n');
+  const response = await ai.models.generateContent({
+    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+    contents: [prompt],
+    config: { responseMimeType: 'application/json', temperature: 1.2 },
+  });
+  const rawText = String(response?.text || '').trim();
+  let parsed;
+  try { parsed = JSON.parse(rawText); }
+  catch {
+    const match = rawText.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error('No se pudo leer el resultado de la revisión');
+    parsed = JSON.parse(match[0]);
+  }
+  return { title: String(parsed.title || '').trim().slice(0, 100), description: String(parsed.description || '').trim() };
+}
+
+export default { generateReelTexts, generateYoutubeVariant };

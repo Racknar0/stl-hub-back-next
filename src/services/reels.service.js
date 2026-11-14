@@ -1,10 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 import { PrismaClient } from '@prisma/client';
-import { generateReelTexts, mockReelTexts, isMockAi, captionBody } from './reelsAi.service.js';
+import { generateReelTexts, generateYoutubeVariant, mockReelTexts, isMockAi, captionBody } from './reelsAi.service.js';
 import { metaConfigured, publishInstagramReel, publishFacebookReel } from './metaReels.service.js';
 import { dispatchReelNotification } from '../utils/reelsNotifications.js';
-import { uploadShort, connectionStatus as youtubeStatus } from './youtube.service.js';
+import { uploadShort, connectionStatus as youtubeStatus, listChannels as youtubeChannels } from './youtube.service.js';
 import { publishVideo as publishTiktokVideo, connectionStatus as tiktokStatus, tiktokOptionsProblem } from './tiktok.service.js';
 import { publishVideo as publishThreadsVideo, connectionStatus as threadsStatus, threadsText } from './threads.service.js';
 
@@ -168,6 +168,7 @@ export async function processReelAi(postId, { notes, language } = {}) {
         hashtags: texts.hashtags,
         title: texts.youtubeTitle || null,
         youtubeDescription: texts.youtubeDescription || null,
+        youtubeVariants: await youtubeVariantsFor(asset, texts, lang),
         language: lang,
         aiGenerated: true,
         aiStatus: 'READY',
@@ -178,6 +179,21 @@ export async function processReelAi(postId, { notes, language } = {}) {
     console.error(`[REELS][AI] Reel ${postId}:`, e.message);
     return prisma.reelPost.update({ where: { id: postId }, data: { aiStatus: 'ERROR', aiError: e.message } });
   }
+}
+
+/** Título y descripción distintos para cada canal de YouTube que no es el principal. */
+async function youtubeVariantsFor(asset, texts, language) {
+  const channels = (await youtubeChannels().catch(() => [])).slice(1);
+  if (!channels.length || isMockAi()) return null;
+  const variants = {};
+  for (const ch of channels) {
+    try {
+      variants[ch.id] = await generateYoutubeVariant({ asset, language, base: { title: texts.youtubeTitle, description: texts.youtubeDescription }, avoid: Object.values(variants) });
+    } catch (e) {
+      console.warn(`[REELS][AI] Variante de YouTube para ${ch.title}: ${e.message}`);
+    }
+  }
+  return Object.keys(variants).length ? variants : null;
 }
 
 // Los STL son de pago: la descripción no puede prometer nada gratis (el dominio "stlgratis" sí aparece)
@@ -239,6 +255,32 @@ const hashtagLine = (post) => (Array.isArray(post.hashtags) && post.hashtags.len
 const withHashtags = (text, post) => [String(text || '').trim(), hashtagLine(post)].filter(Boolean).join('\n\n');
 const publicVideoUrl = (videoPath) => `${PUBLIC_UPLOADS_BASE}/${String(videoPath).split('/').map(encodeURIComponent).join('/')}`;
 
+/**
+ * Canales de YouTube de un reel: el principal (el primero conectado) usa la clave "youtube" y el título/descripción
+ * del reel; los demás usan "youtube:<id>", su propio texto y se programan unas horas después para no salir a la vez.
+ */
+async function youtubeTargets(post) {
+  const channels = await youtubeChannels().catch(() => []);
+  if (!channels.length) return [];
+  const chosen = Array.isArray(post.youtubeChannels) ? post.youtubeChannels : channels.map(c => c.id);
+  const variants = post.youtubeVariants && typeof post.youtubeVariants === 'object' ? post.youtubeVariants : {};
+  let extra = 0;
+  return channels.filter(c => chosen.includes(c.id)).map((c) => {
+    const primary = c.id === channels[0].id;
+    const v = variants[c.id] || {};
+    // Cada canal extra sale ~2 h después del anterior (con unos minutos al azar)
+    const delayMin = primary ? 0 : (++extra) * 120 + Math.round((Math.random() * 2 - 1) * 20);
+    return {
+      key: primary ? 'youtube' : `youtube:${c.id}`,
+      channelId: c.id,
+      channelTitle: c.title,
+      title: (!primary && v.title) || post.title,
+      description: (!primary && v.description) || post.youtubeDescription,
+      publishAt: delayMin > 0 ? new Date(Date.now() + delayMin * 60000).toISOString() : null,
+    };
+  });
+}
+
 const PLATFORM_NAMES = { instagram: 'Instagram', facebook: 'Facebook', youtube: 'YouTube', tiktok: 'TikTok', threads: 'Threads' };
 
 // Reels que se están subiendo ahora mismo (evita publicar dos veces el mismo si coinciden el worker y "Publicar ahora")
@@ -252,10 +294,15 @@ async function publishToPlatform(platform, post) {
   if (platform === 'facebook') {
     return publishFacebookReel({ videoAbsPath: toAbsVideoPath(post.videoPath), videoUrl: publicVideoUrl(post.videoPath), caption: withHashtags(post.facebookCaption || post.caption, post), firstComment: link ? `🔗 ${link}` : null });
   }
-  if (platform === 'youtube') {
+  if (platform === 'youtube' || platform.startsWith('youtube:')) {
     const { youtubePrivacy } = await getSettings();
-    const description = [String(post.youtubeDescription || '').trim(), link].filter(Boolean).join(' ');
-    return uploadShort({ videoAbsPath: toAbsVideoPath(post.videoPath), title: post.title, description, tags: Array.isArray(post.hashtags) ? post.hashtags : [], privacyStatus: youtubePrivacy });
+    const target = (await youtubeTargets(post)).find(t => t.key === platform);
+    if (!target) throw new Error('Ese canal de YouTube ya no está conectado');
+    const description = [String(target.description || '').trim(), link].filter(Boolean).join(' ');
+    return uploadShort({
+      channelId: target.channelId, videoAbsPath: toAbsVideoPath(post.videoPath), title: target.title, description,
+      tags: Array.isArray(post.hashtags) ? post.hashtags : [], privacyStatus: youtubePrivacy, publishAt: target.publishAt,
+    });
   }
   if (platform === 'threads') {
     return publishThreadsVideo({ videoUrl: publicVideoUrl(post.videoPath), text: threadsText(captionBody(post.caption), link) });
@@ -284,26 +331,30 @@ export async function publishReel(post) {
     // Las redes ya publicadas de verdad en un intento anterior no se repiten
     const results = { ...(post.results && typeof post.results === 'object' ? post.results : {}) };
     const errors = [];
-    for (const p of platforms) {
+    // YouTube se publica en cada canal elegido: cada uno es un destino aparte
+    const ytTargets = platforms.includes('youtube') ? await youtubeTargets(post) : [];
+    const targets = platforms.flatMap(p => (p === 'youtube' ? ytTargets.map(t => t.key) : [p]));
+    const nameOf = (key) => (key.startsWith('youtube:') ? `YouTube (${ytTargets.find(t => t.key === key)?.channelTitle || 'canal'})` : PLATFORM_NAMES[key] || key);
+    for (const p of targets) {
       if (results[p]?.id && !results[p].simulated) continue;
       try {
         results[p] = { ...(await publishToPlatform(p, post)), publishedAt: new Date().toISOString(), simulated: false };
         console.log(`[REELS] Reel ${post.id} publicado en ${p}: ${results[p].url || results[p].id}`);
       } catch (e) {
         delete results[p];
-        errors.push(`${PLATFORM_NAMES[p] || p}: ${e.message}`);
+        errors.push(`${nameOf(p)}: ${e.message}`);
         console.error(`[REELS] Reel ${post.id} falló en ${p}:`, e.message);
       }
     }
 
-    const allDone = platforms.every(p => results[p]?.id && !results[p].simulated);
-    const published = platforms.filter(p => results[p]?.id && !results[p].simulated);
-    const publishedLinks = published.map(p => ({ label: `Publicado en ${PLATFORM_NAMES[p] || p}`, url: results[p].url }));
+    const allDone = targets.length > 0 && targets.every(p => results[p]?.id && !results[p].simulated);
+    const published = targets.filter(p => results[p]?.id && !results[p].simulated);
+    const publishedLinks = published.map(p => ({ label: `Publicado en ${nameOf(p)}`, url: results[p].url }));
     if (errors.length) {
       dispatchReelNotification({
         post,
         title: published.length ? 'Publicado solo en parte' : 'No se pudo publicar',
-        detail: `${errors.join('\n')}\n\n${published.length ? `Sí se publicó en: ${published.map(p => PLATFORM_NAMES[p] || p).join(', ')}. ` : ''}Usa "Reintentar publicación": solo se reintentan las redes que fallaron.`,
+        detail: `${errors.join('\n')}\n\n${published.length ? `Sí se publicó en: ${published.map(nameOf).join(', ')}. ` : ''}Usa "Reintentar publicación": solo se reintentan las redes que fallaron.`,
         links: publishedLinks,
       });
     }

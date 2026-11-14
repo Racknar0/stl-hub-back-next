@@ -44,6 +44,17 @@ const normalizeTiktokOptions = (o) => ({
   yourBrand: !!(o?.commercial && o?.yourBrand),
   brandedContent: !!(o?.commercial && o?.brandedContent),
 });
+// { [channelId]: { title, description } } con textos recortados (los vacíos se descartan)
+const normalizeYoutubeVariants = (v) => {
+  if (!v || typeof v !== 'object') return null;
+  const out = {};
+  for (const [id, t] of Object.entries(v).slice(0, 10)) {
+    const title = String(t?.title || '').trim().slice(0, 100);
+    const description = String(t?.description || '').trim().slice(0, 4900);
+    if (title || description) out[String(id)] = { title, description };
+  }
+  return Object.keys(out).length ? out : null;
+};
 const normalizeHashtags = (value) => (Array.isArray(value) ? value : String(value || '').split(/[\s,]+/))
   .map(h => String(h).replace(/[#\s]+/g, '')).filter(Boolean).slice(0, 5);
 
@@ -211,7 +222,7 @@ router.get('/youtube/callback', async (req, res) => {
 
 // 6d. YouTube: desconectar el canal
 router.post('/youtube/disconnect', requireAuth, requireAdmin, async (req, res) => {
-  try { await youtube.disconnect(); res.json({ success: true }); } catch (error) { sendError(res, error); }
+  try { await youtube.disconnect(req.body?.channelId || null); res.json({ success: true }); } catch (error) { sendError(res, error); }
 });
 
 // 6e. TikTok: URL para autorizar la cuenta (el frontend la abre en una ventana nueva)
@@ -328,6 +339,8 @@ router.put('/:id', requireAuth, requireAdmin, async (req, res) => {
       ...(b.tiktokOptions !== undefined && { tiktokOptions: normalizeTiktokOptions(b.tiktokOptions) }),
       ...(b.title !== undefined && { title: text(b.title) }),
       ...(b.youtubeDescription !== undefined && { youtubeDescription: text(b.youtubeDescription) }),
+      ...(b.youtubeChannels !== undefined && { youtubeChannels: Array.isArray(b.youtubeChannels) ? b.youtubeChannels.map(String).slice(0, 10) : null }),
+      ...(b.youtubeVariants !== undefined && { youtubeVariants: normalizeYoutubeVariants(b.youtubeVariants) }),
       ...(b.onScreenText !== undefined && { onScreenText: text(b.onScreenText)?.slice(0, 120) ?? null }),
       ...(b.hashtags !== undefined && { hashtags: normalizeHashtags(b.hashtags) }),
     };

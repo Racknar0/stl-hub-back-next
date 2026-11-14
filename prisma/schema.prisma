@@ -897,6 +897,8 @@ model ReelPost {
   subject       String?        @db.VarChar(255) // qué detectó la IA en el video
   title         String?        @db.VarChar(150) // título para YouTube Shorts
   youtubeDescription String?   @db.Text
+  youtubeChannels Json?         // ids de los canales de YouTube donde se publica (null = todos los conectados)
+  youtubeVariants Json?         // { [channelId]: { title, description } } para los canales que no son el principal
   caption       String?        @db.Text         // texto para Instagram (CTA: link en la bio)
   facebookCaption String?      @db.Text         // texto para Facebook (el link va en el primer comentario)
   tiktokCaption String?        @db.Text         // texto para TikTok (vacío = se usa el de Instagram)

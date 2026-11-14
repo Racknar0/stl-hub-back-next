@@ -1,11 +1,13 @@
-// YouTube Shorts: conexión del canal (OAuth de Google) y subida de videos con la YouTube Data API v3.
-// El refresh token se guarda en SystemSetting (como Pinterest); el client id/secret vienen del .env.
+// YouTube Shorts: conexión de uno o varios canales (OAuth de Google) y subida de videos con la YouTube Data API v3.
+// Los canales conectados (con su refresh token) se guardan en SystemSetting; el client id/secret vienen del .env.
 import crypto from 'crypto';
 import fs from 'fs';
 import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
-const KEYS = { refreshToken: 'YOUTUBE_REFRESH_TOKEN', channel: 'YOUTUBE_CHANNEL' };
+const ACCOUNTS_KEY = 'YOUTUBE_ACCOUNTS';
+// Formato antiguo (un solo canal): se migra a la lista al leerla
+const LEGACY = { refreshToken: 'YOUTUBE_REFRESH_TOKEN', channel: 'YOUTUBE_CHANNEL' };
 const SCOPES = ['https://www.googleapis.com/auth/youtube.upload', 'https://www.googleapis.com/auth/youtube.readonly'];
 
 export const youtubeConfigured = () => !!(process.env.YOUTUBE_CLIENT_ID && process.env.YOUTUBE_CLIENT_SECRET && process.env.YOUTUBE_REDIRECT_URI);
@@ -24,7 +26,7 @@ export function getAuthUrl() {
     response_type: 'code',
     scope: SCOPES.join(' '),
     access_type: 'offline',
-    prompt: 'consent', // fuerza el refresh token aunque ya se haya autorizado antes
+    prompt: 'consent select_account', // fuerza el refresh token y deja elegir el canal (cuenta de marca)
     include_granted_scopes: 'true',
     state,
   }).toString();
@@ -45,33 +47,63 @@ async function saveSetting(key, value) {
   await prisma.systemSetting.upsert({ where: { key }, update: { value }, create: { key, value } });
 }
 
-/** Intercambia el código del callback, guarda el refresh token y devuelve el canal conectado. */
+/** Canales conectados: [{ id, title, handle, refreshToken }] (el primero es el canal principal). */
+async function loadAccounts() {
+  const rows = await prisma.systemSetting.findMany({ where: { key: { in: [ACCOUNTS_KEY, ...Object.values(LEGACY)] } } });
+  const byKey = Object.fromEntries(rows.map(r => [r.key, r.value]));
+  let accounts = [];
+  try { accounts = byKey[ACCOUNTS_KEY] ? JSON.parse(byKey[ACCOUNTS_KEY]) : []; } catch { accounts = []; }
+  if (!accounts.length && byKey[LEGACY.refreshToken]) {
+    let channel = {};
+    try { channel = JSON.parse(byKey[LEGACY.channel] || '{}'); } catch { /* sin datos del canal */ }
+    accounts = [{ id: channel.id, title: channel.title, handle: channel.handle || null, refreshToken: byKey[LEGACY.refreshToken] }];
+    await saveAccounts(accounts);
+    await prisma.systemSetting.deleteMany({ where: { key: { in: Object.values(LEGACY) } } });
+  }
+  return accounts;
+}
+
+async function saveAccounts(accounts) {
+  await saveSetting(ACCOUNTS_KEY, JSON.stringify(accounts));
+}
+
+const publicChannel = (a) => ({ id: a.id, title: a.title, handle: a.handle || null });
+
+/** Canales conectados sin el token (para la interfaz y para elegir canales). */
+export async function listChannels() {
+  return (await loadAccounts()).map(publicChannel);
+}
+
+/** Intercambia el código del callback y añade (o actualiza) el canal elegido en la lista. */
 export async function handleCallback({ code, state }) {
   const expires = pendingStates.get(state);
   pendingStates.delete(state);
   if (!expires || expires < Date.now()) throw new Error('La autorización caducó o no es válida: vuelve a pulsar "Conectar YouTube"');
   const tokens = await tokenRequest({ code, grant_type: 'authorization_code', redirect_uri: process.env.YOUTUBE_REDIRECT_URI });
   if (!tokens.refresh_token) throw new Error('Google no devolvió el refresh token: quita el acceso de la app en tu cuenta de Google y vuelve a conectar');
-  accessCache = { token: tokens.access_token, expiresAt: Date.now() + (tokens.expires_in - 60) * 1000 };
-  await saveSetting(KEYS.refreshToken, tokens.refresh_token);
-  const channel = await fetchChannel();
-  await saveSetting(KEYS.channel, JSON.stringify(channel));
+  const channel = await fetchChannel(tokens.access_token);
+  accessCache.set(channel.id, { token: tokens.access_token, expiresAt: Date.now() + (tokens.expires_in - 60) * 1000 });
+  const accounts = await loadAccounts();
+  const existing = accounts.find(a => a.id === channel.id);
+  if (existing) Object.assign(existing, channel, { refreshToken: tokens.refresh_token });
+  else accounts.push({ ...channel, refreshToken: tokens.refresh_token });
+  await saveAccounts(accounts);
   return channel;
 }
 
-let accessCache = null;
-async function accessToken() {
-  if (accessCache && accessCache.expiresAt > Date.now()) return accessCache.token;
-  const row = await prisma.systemSetting.findUnique({ where: { key: KEYS.refreshToken } });
-  if (!row?.value) throw new Error('YouTube no está conectado: pulsa "Conectar YouTube"');
-  const tokens = await tokenRequest({ refresh_token: row.value, grant_type: 'refresh_token' });
-  accessCache = { token: tokens.access_token, expiresAt: Date.now() + (tokens.expires_in - 60) * 1000 };
-  return accessCache.token;
+// Token de acceso por canal (caducan en ~1 hora)
+const accessCache = new Map();
+async function accessToken(account) {
+  const cached = accessCache.get(account.id);
+  if (cached && cached.expiresAt > Date.now()) return cached.token;
+  const tokens = await tokenRequest({ refresh_token: account.refreshToken, grant_type: 'refresh_token' });
+  accessCache.set(account.id, { token: tokens.access_token, expiresAt: Date.now() + (tokens.expires_in - 60) * 1000 });
+  return tokens.access_token;
 }
 
-async function fetchChannel() {
+async function fetchChannel(token) {
   const res = await fetch('https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true', {
-    headers: { Authorization: `Bearer ${await accessToken()}` },
+    headers: { Authorization: `Bearer ${token}` },
   });
   const data = await res.json();
   if (!res.ok || data.error) throw new Error(`YouTube: ${data.error?.message || `HTTP ${res.status}`}`);
@@ -81,31 +113,33 @@ async function fetchChannel() {
 }
 
 export async function connectionStatus() {
-  if (!youtubeConfigured()) return { configured: false, connected: false };
-  const rows = await prisma.systemSetting.findMany({ where: { key: { in: Object.values(KEYS) } } });
-  const byKey = Object.fromEntries(rows.map(r => [r.key, r.value]));
-  let channel = null;
-  try { channel = byKey[KEYS.channel] ? JSON.parse(byKey[KEYS.channel]) : null; } catch { /* sin canal */ }
-  return { configured: !!byKey[KEYS.refreshToken], connected: !!byKey[KEYS.refreshToken], channel };
+  if (!youtubeConfigured()) return { configured: false, connected: false, channels: [] };
+  const channels = await listChannels();
+  return { configured: channels.length > 0, connected: channels.length > 0, channel: channels[0] || null, channels };
 }
 
-export async function disconnect() {
-  const row = await prisma.systemSetting.findUnique({ where: { key: KEYS.refreshToken } });
-  if (row?.value) {
-    await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(row.value)}`, { method: 'POST' }).catch(() => {});
+/** Desconecta un canal (o todos si no se indica): revoca su token en Google y lo borra. */
+export async function disconnect(channelId) {
+  const accounts = await loadAccounts();
+  const removed = channelId ? accounts.filter(a => a.id === channelId) : accounts;
+  for (const a of removed) {
+    await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(a.refreshToken)}`, { method: 'POST' }).catch(() => {});
+    accessCache.delete(a.id);
   }
-  await prisma.systemSetting.deleteMany({ where: { key: { in: Object.values(KEYS) } } });
-  accessCache = null;
+  await saveAccounts(accounts.filter(a => !removed.includes(a)));
 }
 
 /**
- * Sube un Short (subida reanudable en una sola petición).
- * privacyStatus: "private" | "unlisted" | "public". Mientras Google no audite el proyecto, YouTube deja los
- * videos subidos por API en privado aunque se pida "public".
+ * Sube un Short a un canal (subida reanudable en una sola petición).
+ * privacyStatus: "private" | "unlisted" | "public". Con publishAt (ISO) el video se sube privado y YouTube
+ * lo hace público solo a esa hora.
  */
-export async function uploadShort({ videoAbsPath, title, description, tags = [], privacyStatus = 'private' }) {
+export async function uploadShort({ channelId, videoAbsPath, title, description, tags = [], privacyStatus = 'private', publishAt = null }) {
   if (!videoAbsPath || !fs.existsSync(videoAbsPath)) throw new Error('El archivo de video no está en el servidor');
-  const token = await accessToken();
+  const accounts = await loadAccounts();
+  const account = channelId ? accounts.find(a => a.id === channelId) : accounts[0];
+  if (!account) throw new Error(channelId ? 'Ese canal de YouTube ya no está conectado' : 'YouTube no está conectado: pulsa "Conectar YouTube"');
+  const token = await accessToken(account);
   const file = await fs.promises.readFile(videoAbsPath);
   const safeTitle = String(title || '').replace(/[<>]/g, '').trim().slice(0, 100);
   const metadata = {
@@ -115,7 +149,12 @@ export async function uploadShort({ videoAbsPath, title, description, tags = [],
       tags: tags.slice(0, 15),
       categoryId: '26', // Howto & Style
     },
-    status: { privacyStatus, selfDeclaredMadeForKids: false, embeddable: true },
+    status: {
+      privacyStatus: publishAt ? 'private' : privacyStatus,
+      ...(publishAt && { publishAt }),
+      selfDeclaredMadeForKids: false,
+      embeddable: true,
+    },
   };
 
   const init = await fetch('https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status', {
@@ -136,7 +175,14 @@ export async function uploadShort({ videoAbsPath, title, description, tags = [],
   const put = await fetch(uploadUrl, { method: 'PUT', headers: { 'Content-Type': 'video/*', 'Content-Length': String(file.length) }, body: file });
   const video = await put.json().catch(() => ({}));
   if (!put.ok || !video.id) throw new Error(`YouTube falló al recibir el video: ${video.error?.message || `HTTP ${put.status}`}`);
-  return { id: video.id, url: `https://youtube.com/shorts/${video.id}`, privacy: video.status?.privacyStatus || privacyStatus };
+  return {
+    id: video.id,
+    url: `https://youtube.com/shorts/${video.id}`,
+    privacy: publishAt ? 'scheduled' : (video.status?.privacyStatus || privacyStatus),
+    ...(publishAt && { publishAt }),
+    channelId: account.id,
+    channelTitle: account.title,
+  };
 }
 
-export default { youtubeConfigured, getAuthUrl, handleCallback, connectionStatus, disconnect, uploadShort };
+export default { youtubeConfigured, getAuthUrl, handleCallback, connectionStatus, listChannels, disconnect, uploadShort };
