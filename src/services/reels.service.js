@@ -7,6 +7,7 @@ import { dispatchReelNotification } from '../utils/reelsNotifications.js';
 import { uploadShort, connectionStatus as youtubeStatus, listChannels as youtubeChannels } from './youtube.service.js';
 import { publishVideo as publishTiktokVideo, connectionStatus as tiktokStatus, tiktokOptionsProblem } from './tiktok.service.js';
 import { publishVideo as publishThreadsVideo, connectionStatus as threadsStatus, threadsText } from './threads.service.js';
+import { getChannelVariantVideo, cleanVariants } from './reelsVideoVariants.service.js';
 
 const prisma = new PrismaClient();
 
@@ -324,6 +325,7 @@ async function youtubeTargets(post) {
       key: primary ? 'youtube' : `youtube:${c.id}`,
       channelId: c.id,
       channelTitle: c.title,
+      channelIndex: primary ? 0 : extra,
       title: (!primary && v.title) || post.title,
       description: (!primary && v.description) || post.youtubeDescription,
       publishAt: delayMin > 0 ? new Date(Date.now() + delayMin * 60000).toISOString() : null,
@@ -349,8 +351,17 @@ async function publishToPlatform(platform, post) {
     const target = (await youtubeTargets(post)).find(t => t.key === platform);
     if (!target) throw new Error('Ese canal de YouTube ya no está conectado');
     const description = [String(target.description || '').trim(), link].filter(Boolean).join(' ');
+
+    const originalAbsPath = toAbsVideoPath(post.videoPath);
+    const videoAbsPath = await getChannelVariantVideo({
+      postId: post.id,
+      originalAbsPath,
+      channelIndex: target.channelIndex || 0,
+      channelTitle: target.channelTitle,
+    });
+
     return uploadShort({
-      channelId: target.channelId, videoAbsPath: toAbsVideoPath(post.videoPath), title: target.title, description,
+      channelId: target.channelId, videoAbsPath, title: target.title, description,
       tags: Array.isArray(post.hashtags) ? post.hashtags : [], privacyStatus: youtubePrivacy, publishAt: target.publishAt,
     });
   }
@@ -565,6 +576,7 @@ export async function deleteReel(postId) {
   await prisma.reelPost.delete({ where: { id: postId } });
   const stillUsed = await prisma.reelPost.count({ where: { videoPath: existing.videoPath } });
   if (!stillUsed) await fs.promises.rm(toAbsVideoPath(existing.videoPath), { force: true });
+  await cleanVariants(postId);
 }
 
 export default {
