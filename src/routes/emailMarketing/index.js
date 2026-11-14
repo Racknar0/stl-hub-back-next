@@ -4,6 +4,8 @@ import {
   getEngine,
   updateEngine,
   sendEngineTest,
+  getReengage,
+  launchReengage,
   getOverview,
   getAudiences,
   listAudience,
@@ -27,6 +29,8 @@ router.get('/logs', listLogs);
 router.get('/engine', getEngine);
 router.put('/engine', updateEngine);
 router.post('/engine/test', sendEngineTest);
+router.get('/reengage', getReengage);
+router.post('/reengage/launch', launchReengage);
 
 router.get('/audiences', getAudiences);
 router.get('/audiences/:stage', listAudience);

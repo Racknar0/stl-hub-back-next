@@ -71,6 +71,9 @@ export async function loadConfig() {
 
 export const getConfig = () => buildConfig(process.env);
 
+// Correo de reenganche (plantilla 19). No es del embudo: lo lanza el admin por tandas.
+export const REENGAGE_STEP = { kind: 'REENGAGE', templateId: 19, sales: false };
+
 /**
  * Valida lo que llega del panel. Devuelve { values, error }.
  * `values` solo trae las claves recibidas, ya como texto listo para guardar.
@@ -238,7 +241,7 @@ export async function planFunnel(now = new Date()) {
 
 // ---------------------------------------------------------------- Envío
 
-const stepOf = (kind) => FUNNEL.find((s) => s.kind === kind);
+const stepOf = (kind) => [...FUNNEL, REENGAGE_STEP].find((s) => s.kind === kind);
 
 /** Envía los correos vencidos respetando el cupo diario. */
 export async function sendDue(now = new Date()) {
@@ -314,7 +317,7 @@ export async function sendDue(now = new Date()) {
         templateId: log.templateId,
         to: user.email,
         params: { LANGUAGE: user.language || 'es', UNSUBSCRIBE_URL: unsubscribeUrl },
-        tags: ['funnel', log.kind],
+        tags: [log.kind === 'REENGAGE' ? 'reengage' : 'funnel', log.kind],
         headers: {
           'List-Unsubscribe': `<${unsubscribeUrl}>`,
           'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
@@ -334,7 +337,11 @@ export async function sendDue(now = new Date()) {
         }),
         prisma.emailContact.update({
           where: { id: log.contact.id },
-          data: { lastSentAt: new Date() },
+          data: {
+            lastSentAt: new Date(),
+            // Marca cuándo recibió el reenganche: de ahí corre el plazo para reaccionar.
+            ...(log.kind === 'REENGAGE' ? { reengagedAt: new Date() } : {}),
+          },
         }),
       ]);
       sent += 1;
@@ -456,6 +463,7 @@ export function startEmailEngine(intervalMs = 5 * 60 * 1000) {
 
 export default {
   FUNNEL,
+  REENGAGE_STEP,
   SETTING_KEYS,
   buildConfig,
   loadConfig,

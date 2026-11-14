@@ -5,6 +5,7 @@ import { PrismaClient } from '@prisma/client';
 import svc from '../services/emailMarketing.service.js';
 import brevo from '../services/brevo.service.js';
 import engine from '../services/emailEngine.service.js';
+import reengage from '../services/emailReengage.service.js';
 
 const prisma = new PrismaClient();
 
@@ -261,7 +262,29 @@ export const sendEngineTest = async (req, res) => {
   }
 };
 
+/** GET /reengage — estado del reenganche de dormidos. */
+export const getReengage = async (_req, res) => {
+  try {
+    return res.json(await reengage.getReengageSummary());
+  } catch (e) {
+    return fail(res, e, 'No se pudo leer el reenganche');
+  }
+};
+
+/** POST /reengage/launch — pone en cola una tanda ({ batchSize }). */
+export const launchReengage = async (req, res) => {
+  try {
+    const out = await reengage.launchReengageBatch({ batchSize: req.body?.batchSize });
+    if (out.error) return res.status(400).json({ error: out.error });
+    return res.json(out);
+  } catch (e) {
+    return fail(res, e, 'No se pudo lanzar la tanda');
+  }
+};
+
 export default {
+  getReengage,
+  launchReengage,
   sendEngineTest,
   getEngine,
   updateEngine,

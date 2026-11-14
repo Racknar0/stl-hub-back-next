@@ -6,6 +6,7 @@ import pinterestWorker from './src/services/pinterestWorker.service.js';
 import { startAutopilotScheduler } from './src/services/pinterestAutopilot.service.js';
 import { startReelsWorker } from './src/services/reels.service.js';
 import { startEmailEngine } from './src/services/emailEngine.service.js';
+import { startReengageCloser } from './src/services/emailReengage.service.js';
 import telegramCheckerService from './src/services/telegramChecker.service.js';
 
 const PORT = process.env.PORT || 3001; // usa 3001 si NGINX proxy_pass -> 3001
@@ -34,6 +35,7 @@ server.listen(PORT, () => {
   // Motor de correos propio (nace apagado: sin EMAIL_ENGINE_ENABLED=true solo planifica)
   setTimeout(() => {
     startEmailEngine();
+    startReengageCloser(); // Cierra el reenganche de quien no reaccionó en el plazo
   }, 9000);
 
   // Iniciar worker de Telegram Auto-Checker
