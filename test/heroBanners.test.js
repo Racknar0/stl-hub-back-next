@@ -6,7 +6,7 @@ import sharp from 'sharp';
 import {
   HERO_SLOTS, HERO_MAX_FILE_BYTES, HERO_SETTING_PREFIX, HERO_COOKIE,
   normalizeHeroFiles, optimizeHeroImage, isCompleteHeroVariant,
-  heroSeedFromCookie, chooseHeroVariant, createHeroBannersService,
+  heroVariantFromCookie, chooseHeroVariant, createHeroBannersService,
 } from '../src/services/heroBanners.service.js';
 import { createHeroRenderHandler } from '../src/controllers/heroBanners.controller.js';
 
@@ -175,34 +175,78 @@ function response() {
   };
 }
 
-test('a valid session cookie picks one stable design across language/device without regeneration', async t => {
+test('each refresh selects a new design and sets its matching language/device image', async t => {
   const { service } = await context(t);
-  await service.create({ name: 'One' }, files()); await service.create({ name: 'Two' }, files());
+  for (const name of ['One', 'Two', 'Three']) await service.create({ name }, files());
   const variants = await service.listPublic();
   const seed = 'a'.repeat(32);
   const chosen = chooseHeroVariant(variants, seed);
   assert.equal(chooseHeroVariant([...variants].reverse(), seed).id, chosen.id);
-  const handler = createHeroRenderHandler({ service, randomSeed: () => assert.fail('valid cookie must not regenerate') });
-  for (const [lang, device] of [['es', 'desktop'], ['en', 'desktop'], ['es', 'mobile'], ['en', 'mobile']]) {
+  let generations = 0;
+  let previousId = chosen.id;
+  const handler = createHeroRenderHandler({ service, randomSeed: () => { generations++; return seed; }, production: true });
+  const targets = [['es', 'desktop'], ['en', 'desktop'], ['es', 'mobile'], ['en', 'mobile']];
+  // Even identical random draws cannot repeat the preceding design.
+  for (let refresh = 0; refresh < 20; refresh++) {
+    const [lang, device] = targets[refresh % targets.length];
     const res = response();
-    await handler({ params: { lang, device }, headers: { cookie: `${HERO_COOKIE}=${seed}` } }, res);
+    await handler({ params: { lang, device }, headers: { cookie: `${HERO_COOKIE}=${previousId}` } }, res);
+    const selected = variants.find(v => v.id === res.headers['X-Hero-Variant']);
     assert.equal(res.statusCode, 302);
-    assert.equal(res.headers['X-Hero-Variant'], chosen.id);
-    assert.equal(res.location, chosen.images[`${lang}${device === 'desktop' ? 'Desktop' : 'Mobile'}`].url);
-    assert.equal(res.cookies.length, 0);
+    assert.ok(selected);
+    assert.notEqual(selected.id, previousId);
+    assert.equal(res.location, selected.images[`${lang}${device === 'desktop' ? 'Desktop' : 'Mobile'}`].url);
+    assert.deepEqual(res.cookies, [{ name: HERO_COOKIE, value: selected.id, options: { httpOnly: true, sameSite: 'lax', secure: true, path: '/' } }]);
     assert.equal(res.headers['Cache-Control'], 'private, no-store');
+    assert.equal(res.headers.Vary, 'Cookie');
+    previousId = selected.id;
+  }
+  assert.equal(generations, 20);
+});
+
+test('rotation includes every eligible design and handles one or no eligible alternatives', async t => {
+  const { service } = await context(t);
+  for (const name of ['One', 'Two', 'Three']) await service.create({ name }, files());
+  const variants = await service.listPublic();
+  const [first, second, third] = variants;
+  const seed = 'b'.repeat(32);
+  const seen = new Set();
+  let previousId = null;
+  for (let draw = 0; draw < 100; draw++) {
+    const selected = chooseHeroVariant(variants, draw.toString(16).padStart(32, '0'), previousId);
+    assert.notEqual(selected.id, previousId);
+    seen.add(selected.id);
+    previousId = selected.id;
+  }
+  assert.equal(seen.size, 3);
+  assert.equal(chooseHeroVariant([first], seed, first.id).id, first.id);
+  assert.equal(chooseHeroVariant([first], seed, second.id).id, first.id);
+  assert.equal(chooseHeroVariant([first, { ...second, active: false }, { ...third, archived: true }], seed, first.id).id, first.id);
+  assert.equal(chooseHeroVariant([{ ...first, images: {} }], seed), null);
+  assert.equal(chooseHeroVariant([], seed), null);
+  assert.throws(() => chooseHeroVariant(variants, '../invalid'), errorCode('INVALID_SEED'));
+  const handler = createHeroRenderHandler({ service: { listPublic: async () => [first] }, randomSeed: () => seed });
+  for (const cookie of [undefined, `${HERO_COOKIE}=../../bad`, `${HERO_COOKIE}=${first.id}`, 'stl_hero_seed=' + 'a'.repeat(32)]) {
+    const res = response();
+    await handler({ params: { lang: 'es', device: 'desktop' }, headers: { cookie } }, res);
+    assert.equal(res.headers['X-Hero-Variant'], first.id);
+    assert.equal(res.cookies[0].value, first.id);
+    assert.equal(res.location, first.images.esDesktop.url);
   }
 });
 
-test('invalid/missing cookies get a secure session seed; absent catalog falls back', async () => {
+test('cookie parsing validates IDs and an absent catalog falls back without recording a design', async () => {
   const handler = createHeroRenderHandler({ service: { listPublic: async () => [] }, randomSeed: () => 'b'.repeat(32), production: true });
   const res = response();
   await handler({ params: { lang: 'en', device: 'mobile' }, headers: { cookie: `${HERO_COOKIE}=../../bad` } }, res);
   assert.equal(res.location, '/hero/hero-mobile-en.png');
   assert.equal(res.headers['X-Hero-Variant'], 'fallback');
-  assert.deepEqual(res.cookies[0], { name: HERO_COOKIE, value: 'b'.repeat(32), options: { httpOnly: true, sameSite: 'lax', secure: true, path: '/' } });
-  assert.equal(heroSeedFromCookie('unrelated=123'), null);
-  assert.equal(heroSeedFromCookie(`${HERO_COOKIE}=${'a'.repeat(32)}; foo=bar`), 'a'.repeat(32));
+  assert.equal(res.cookies.length, 0);
+  const id = '12345678-1234-1234-1234-123456789abc';
+  assert.equal(heroVariantFromCookie('unrelated=123'), null);
+  assert.equal(heroVariantFromCookie(`${HERO_COOKIE}=../../bad`), null);
+  assert.equal(heroVariantFromCookie(`${HERO_COOKIE}=${'a'.repeat(32)}`), null);
+  assert.equal(heroVariantFromCookie(`${HERO_COOKIE}=${id}; foo=bar`), id);
 });
 
 test('render rejects invalid target before touching service and DB errors return fallback', async () => {
@@ -216,4 +260,5 @@ test('render rejects invalid target before touching service and DB errors return
   await createHeroRenderHandler({ service: { listPublic: async () => { throw new Error('DB offline'); } } })({ params: { lang: 'es', device: 'desktop' }, headers: {} }, fallback);
   assert.equal(fallback.statusCode, 302);
   assert.equal(fallback.location, '/hero/hero-desktop-es.png');
+  assert.equal(fallback.cookies.length, 0);
 });

@@ -1,4 +1,4 @@
-import { getHeroBannersService, heroSeedFromCookie, newHeroSeed, chooseHeroVariant, HERO_COOKIE } from '../services/heroBanners.service.js';
+import { getHeroBannersService, heroVariantFromCookie, newHeroSeed, chooseHeroVariant, HERO_COOKIE } from '../services/heroBanners.service.js';
 
 export function sendHeroError(res, error) {
   if (!error.status) console.error('[hero-banners]', error.message);
@@ -11,16 +11,13 @@ export function createHeroRenderHandler({ service = null, randomSeed = newHeroSe
     res.set('Cache-Control', 'private, no-store');
     res.vary('Cookie');
     if (!['es', 'en'].includes(lang) || !['desktop', 'mobile'].includes(device)) return res.status(400).json({ error: 'Idioma o dispositivo inválido.', code: 'INVALID_RENDER_TARGET' });
-    let seed = heroSeedFromCookie(req.headers.cookie);
-    if (!seed) {
-      seed = randomSeed();
-      res.cookie(HERO_COOKIE, seed, { httpOnly: true, sameSite: 'lax', secure: production, path: '/' });
-    }
     try {
       const variants = await (service || getHeroBannersService()).listPublic();
-      const variant = chooseHeroVariant(variants, seed);
+      // Cada recarga elige otro diseño; la cookie solo recuerda el último mostrado.
+      const variant = chooseHeroVariant(variants, randomSeed(), heroVariantFromCookie(req.headers.cookie));
       if (variant) {
         const slot = `${lang}${device === 'desktop' ? 'Desktop' : 'Mobile'}`;
+        res.cookie(HERO_COOKIE, variant.id, { httpOnly: true, sameSite: 'lax', secure: production, path: '/' });
         res.set('X-Hero-Variant', variant.id);
         return res.redirect(302, variant.images[slot].url);
       }

@@ -8,7 +8,7 @@ export const HERO_SETTING_PREFIX = 'HOME_HERO_BANNERS:';
 export const HERO_SLOTS = Object.freeze(['esDesktop', 'enDesktop', 'esMobile', 'enMobile']);
 export const HERO_MAX_FILE_BYTES = 10 * 1024 * 1024;
 export const HERO_MAX_INPUT_PIXELS = 40_000_000;
-export const HERO_COOKIE = 'stl_hero_seed';
+export const HERO_COOKIE = 'stl_hero_last';
 const ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export class HeroBannerError extends Error {
@@ -106,20 +106,21 @@ export function isCompleteHeroVariant(variant) {
   });
 }
 
-export function heroSeedFromCookie(header = '') {
+export function heroVariantFromCookie(header = '') {
   for (const entry of String(header).split(';')) {
     const [name, ...parts] = entry.trim().split('=');
-    if (name === HERO_COOKIE && /^[a-f0-9]{32}$/.test(parts.join('='))) return parts.join('=');
+    if (name === HERO_COOKIE && ID_PATTERN.test(parts.join('='))) return parts.join('=');
   }
   return null;
 }
 
-export function chooseHeroVariant(variants, seed) {
+export function chooseHeroVariant(variants, seed, previousId = null) {
   if (!/^[a-f0-9]{32}$/.test(seed || '')) throw new HeroBannerError('Semilla inválida.', 'INVALID_SEED');
   const eligible = variants.filter(v => v.active && !v.archived && isCompleteHeroVariant(v)).sort((a, b) => a.id.localeCompare(b.id));
   if (!eligible.length) return null;
-  const index = createHash('sha256').update(seed).digest().readUInt32BE(0) % eligible.length;
-  return eligible[index];
+  const candidates = eligible.length > 1 ? eligible.filter(v => v.id !== previousId) : eligible;
+  const index = createHash('sha256').update(seed).digest().readUInt32BE(0) % candidates.length;
+  return candidates[index];
 }
 
 export const newHeroSeed = () => randomBytes(16).toString('hex');
