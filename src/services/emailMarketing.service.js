@@ -7,6 +7,7 @@
 // NINGUNA señal, ni de correo ni de web.
 
 import { PrismaClient } from '@prisma/client';
+import { getQueueSummary } from './emailEngine.service.js';
 
 const prisma = new PrismaClient();
 
@@ -202,11 +203,11 @@ export async function getOverview() {
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
 
-  const [audience, sentToday, logs30, optOuts30, spam30] = await Promise.all([
+  const [audience, sentToday, logs30, optOuts30, spam30, queue] = await Promise.all([
     getAudienceCounts(),
-    prisma.emailLog.count({ where: { sentAt: { gte: startOfDay } } }),
+    prisma.emailLog.count({ where: { status: 'SENT', sentAt: { gte: startOfDay } } }),
     prisma.emailLog.findMany({
-      where: { sentAt: { gte: since30 } },
+      where: { status: 'SENT', sentAt: { gte: since30 } },
       select: { openedAt: true, clickedAt: true, bouncedAt: true },
     }),
     prisma.emailContact.count({
@@ -215,6 +216,7 @@ export async function getOverview() {
     prisma.emailContact.count({
       where: { optedOutAt: { gte: since30 }, optOutReason: 'SPAM_COMPLAINT' },
     }),
+    getQueueSummary(),
   ]);
 
   const sent30 = logs30.length;
@@ -229,6 +231,13 @@ export async function getOverview() {
     stages: audience.stages,
     premium: audience.premium,
     windows: audience.windows,
+    // Cola del motor propio: correos programados que aún no salen.
+    queue: {
+      queued: queue.queued,
+      failed: queue.failed,
+      nextAt: queue.nextAt,
+      engineEnabled: queue.engineEnabled,
+    },
     daily: {
       sentToday,
       limit: Number(process.env.EMAIL_DAILY_LIMIT || 300),

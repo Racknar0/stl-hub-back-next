@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 
 const TTL_MS = 10 * 60 * 1000;
-export const cleanupError = (message, status = 409, details) => Object.assign(new Error(message), { status, details });
+export const cleanupError = (message, status = 409, details) => Object.assign(new Error(message), { status, details, expose: true, ...(details?.code ? { code: details.code } : {}) });
 const EPSILON_MB = 1 / 1048576;
 const space = mb => mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${Math.ceil(mb)} MB`;
 
@@ -93,9 +93,11 @@ export function createExcessCleanupService(deps) {
   const plans = new Map();
   const now = deps.now || Date.now;
   const prune = () => { for (const [id, plan] of plans) if (plan.expiresAt <= now()) plans.delete(id); };
-  const inspect = async family => {
+  const inspect = async (family, onProgress = async () => {}) => {
     const snapshots = [];
     for (const account of family.accounts) {
+      await onProgress({ phase: 'validating', currentAccount: { id: account.id, alias: account.alias, type: account.type },
+        message: `Validando ${account.type === 'main' ? 'Main' : 'Backup'} ${account.alias}…` });
       let snapshot;
       try { snapshot = await deps.inspectAccount(account, [...family.assets, ...(family.protectedAssets || [])]); }
       catch (error) {
@@ -108,11 +110,10 @@ export function createExcessCleanupService(deps) {
     return snapshots;
   };
   const exclusive = async task => {
-    await deps.ensureIdle();
     return deps.withLock(async () => {
       await deps.ensureIdle();
       const stop = deps.startBusy();
-      try { return await task(); } finally { stop(); }
+      try { return await (deps.withSessionScope ? deps.withSessionScope(task) : task()); } finally { stop(); }
     });
   };
   const publicPlan = plan => ({
@@ -125,13 +126,27 @@ export function createExcessCleanupService(deps) {
     })),
     accounts: plan.snapshots.map(account => cleanupAccountSummary(account, plan.selected)),
   });
+  const confirmedPlan = (accountId, ownerId, planId, confirmed) => {
+    prune();
+    const plan = plans.get(planId);
+    if (!plan || plan.requestedAccountId !== accountId || plan.ownerId !== String(ownerId)) throw cleanupError('La vista previa caducó o no pertenece a esta cuenta. Vuelve a calcularla.');
+    if (confirmed !== true) throw cleanupError('Debes confirmar expresamente la eliminación del plan mostrado.', 400);
+    return plan;
+  };
   return {
-    async preview(accountId, ownerId) {
+    planInfo(accountId, ownerId, planId, confirmed) {
+      const plan = confirmedPlan(accountId, ownerId, planId, confirmed);
+      return { accountIds: plan.snapshots.map(account => account.id), totalModels: plan.selected.length,
+        totalFiles: plan.selected.reduce((sum, asset) => sum + asset.copies.reduce((count, copy) => count + (copy.missing ? 0 : copy.entries?.length || 1), 0), 0) };
+    },
+    async preview(accountId, ownerId, { onProgress = async () => {} } = {}) {
       prune();
       if (plans.size >= 100) throw cleanupError('Hay demasiadas vistas previas pendientes. Reintenta en unos minutos.', 429);
+      await onProgress({ phase: 'waiting', message: 'Esperando turno para validar las cuentas en MEGA…' });
       return exclusive(async () => {
         const family = await deps.loadFamily(accountId);
-        const snapshots = await inspect(family);
+        const snapshots = await inspect(family, onProgress);
+        await onProgress({ phase: 'planning', message: 'Calculando los archivos necesarios para llegar al 95 %…' });
         const { selected, targetIds } = selectExcessFiles(snapshots, family.assets);
         const plan = { id: crypto.randomUUID(), requestedAccountId: accountId, ownerId: String(ownerId),
           expiresAt: now() + TTL_MS, snapshots, selected, targetIds,
@@ -140,17 +155,18 @@ export function createExcessCleanupService(deps) {
         return publicPlan(plan);
       });
     },
-    async execute(accountId, ownerId, planId, confirmed) {
-      prune();
-      const plan = plans.get(planId);
-      if (!plan || plan.requestedAccountId !== accountId || plan.ownerId !== String(ownerId)) throw cleanupError('La vista previa caducó o no pertenece a esta cuenta. Vuelve a calcularla.');
-      if (confirmed !== true) throw cleanupError('Debes confirmar expresamente la eliminación del plan mostrado.', 400);
+    async execute(accountId, ownerId, planId, confirmed, { onProgress = async () => {} } = {}) {
+      const plan = confirmedPlan(accountId, ownerId, planId, confirmed);
+      const counters = { completedModels: 0, totalModels: plan.selected.length, completedFiles: 0,
+        totalFiles: plan.selected.reduce((sum, asset) => sum + asset.copies.reduce((count, copy) => count + (copy.missing ? 0 : copy.entries?.length || 1), 0), 0) };
+      const notify = patch => onProgress({ ...counters, ...patch });
       // Consume before waiting for the global lock: duplicate clicks cannot replay a plan.
       plans.delete(planId);
+      await notify({ phase: 'waiting', message: 'Depuración confirmada. Esperando turno de MEGA…' });
       return exclusive(async () => {
         if (plan.expiresAt <= now()) throw cleanupError('La vista previa caducó. Vuelve a calcularla.');
         const family = await deps.loadFamily(accountId);
-        const fresh = await inspect(family);
+        const fresh = await inspect(family, notify);
         if (plan.expiresAt <= now()) throw cleanupError('La vista previa caducó durante la validación. Vuelve a calcularla.');
         if (snapshotFingerprint(fresh, [...family.assets, ...(family.protectedAssets || [])]) !== plan.fingerprint) throw cleanupError('Las cuentas o sus archivos cambiaron desde la vista previa. Recalcula antes de eliminar.');
         await deps.audit({ planId, stage: 'confirmed', ownerId: String(ownerId), ...publicPlan(plan) });
@@ -161,6 +177,9 @@ export function createExcessCleanupService(deps) {
           const result = { key: asset.key, assetId: asset.assetId, title: asset.title, copies: [], completed: false };
           results.push(result);
           try {
+            const currentAsset = { id: asset.assetId, title: asset.title };
+            await notify({ phase: 'deleting', currentAsset, currentAccount: null, results,
+              message: `Preparando modelo ${counters.completedModels + 1} de ${counters.totalModels}: ${asset.title}` });
             // Withdraw before touching the public download, including on partial failures.
             if (asset.assetId !== null) await deps.withdrawAsset(asset.assetId, planId);
             for (const copy of asset.copies) {
@@ -169,17 +188,25 @@ export function createExcessCleanupService(deps) {
               const copyResult = { accountId: account.id, deleted: false, files: [] };
               result.copies.push(copyResult);
               for (const file of copy.entries || [copy]) {
+                await notify({ phase: 'deleting', currentAsset, currentAccount: { id: account.id, alias: account.alias, type: account.type }, results,
+                  message: `Modelo ${counters.completedModels + 1} de ${counters.totalModels} · ${account.type === 'main' ? 'Main' : 'Backup'} ${account.alias}` });
                 try {
                   await deps.deleteFile(account, file);
-                  copyResult.files.push({ path: file.relativePath || file.path, deleted: true });
                 } catch (error) {
                   copyResult.files.push({ path: file.relativePath || file.path, deleted: false, error: error.message });
                   throw error;
                 }
+                copyResult.files.push({ path: file.relativePath || file.path, deleted: true });
+                counters.completedFiles++;
+                await notify({ phase: 'deleting', currentAsset, currentAccount: { id: account.id, alias: account.alias, type: account.type }, results,
+                  message: `${counters.completedFiles} de ${counters.totalFiles} archivos procesados` });
               }
               copyResult.deleted = true;
             }
             result.completed = true;
+            counters.completedModels++;
+            await notify({ phase: 'deleting', currentAsset, currentAccount: null, results,
+              message: `${counters.completedModels} de ${counters.totalModels} modelos procesados` });
           } catch (error) {
             result.error = error.message;
             stopped = true;
@@ -196,6 +223,8 @@ export function createExcessCleanupService(deps) {
         const accounts = [];
         for (const account of family.accounts) {
           try {
+            await notify({ phase: 'refreshing', currentAccount: { id: account.id, alias: account.alias, type: account.type }, currentAsset: null, results,
+              message: `Comprobando el porcentaje final de ${account.alias}…` });
             const storage = await deps.refreshAccount(account);
             accounts.push({ id: account.id, alias: account.alias, ...storage, percent: storage.usedMB / storage.totalMB * 100 });
           } catch (error) { accounts.push({ id: account.id, alias: account.alias, error: error.message }); stopped = true; }

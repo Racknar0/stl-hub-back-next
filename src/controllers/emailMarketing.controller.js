@@ -63,13 +63,15 @@ export const listAudience = async (req, res) => {
 export const getFlows = async (_req, res) => {
   try {
     const grouped = await prisma.emailLog.groupBy({
-      by: ['kind'],
+      by: ['kind', 'status'],
       _count: { _all: true },
     });
-    const sentByKind = new Map(grouped.map((g) => [g.kind, g._count._all]));
+    const countOf = (kind, status) =>
+      grouped.find((g) => g.kind === kind && g.status === status)?._count._all || 0;
+    const sentByKind = new Map(WELCOME_FLOW.map((s) => [s.kind, countOf(s.kind, 'SENT')]));
 
     const logs = await prisma.emailLog.findMany({
-      where: { kind: { in: WELCOME_FLOW.map((s) => s.kind) } },
+      where: { kind: { in: WELCOME_FLOW.map((s) => s.kind) }, status: 'SENT' },
       select: { kind: true, openedAt: true, clickedAt: true },
     });
 
@@ -78,6 +80,7 @@ export const getFlows = async (_req, res) => {
       return {
         ...step,
         sent: sentByKind.get(step.kind) || 0,
+        queued: countOf(step.kind, 'QUEUED'),
         opened: own.filter((l) => l.openedAt).length,
         clicked: own.filter((l) => l.clickedAt).length,
       };
@@ -113,6 +116,7 @@ export const listLogs = async (req, res) => {
     const take = Math.min(200, Math.max(1, Number(req.query.take) || 50));
     const items = await prisma.emailLog.findMany({
       take,
+      where: { status: 'SENT' },
       orderBy: { sentAt: 'desc' },
       include: {
         contact: { select: { userId: true, user: { select: { email: true } } } },

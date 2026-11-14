@@ -16,6 +16,7 @@ import adminOpsRoutes from './adminOps/index.js';
 import marketingRoutes from './marketing/index.js';
 import emailMarketingRoutes from './emailMarketing/index.js';
 import { handleBrevoWebhook } from '../controllers/brevoWebhook.controller.js';
+import { unsubscribePage, unsubscribeOneClick } from '../controllers/emailUnsubscribe.controller.js';
 import batchImportsRoutes from './batchImports/index.js';
 import aiRoutes from './ai/index.js';
 import telegramRoutes from './telegram/index.js';
@@ -76,6 +77,10 @@ router.post('/gift-codes/redeem', requireAuth, redeemGiftCode); // auth - for lo
 
 // ─── Webhook de Brevo (público, protegido por secreto en la URL) ──────
 router.post('/webhooks/brevo', handleBrevoWebhook);
+
+// ─── Baja de correos (público, token firmado) ──────
+router.get('/email/unsubscribe/:token', unsubscribePage);
+router.post('/email/unsubscribe/:token', unsubscribeOneClick);
 
 // Public promo status (no auth)
 router.get('/promo/status', async (req, res) => {

@@ -70,7 +70,7 @@ export async function listTemplates({ limit = 50, offset = 0 } = {}) {
  * Envía un correo usando una plantilla de Brevo.
  * `params` alimenta las variables de la plantilla.
  */
-export function sendTemplate({ templateId, to, params = {}, tags = [] }) {
+export function sendTemplate({ templateId, to, params = {}, tags = [], headers = {} }) {
   const recipients = (Array.isArray(to) ? to : [to]).map((r) =>
     typeof r === 'string' ? { email: r } : r
   );
@@ -82,6 +82,8 @@ export function sendTemplate({ templateId, to, params = {}, tags = [] }) {
       to: recipients,
       ...(Object.keys(params).length ? { params } : {}),
       ...(tags.length ? { tags } : {}),
+      // Cabeceras extra del correo (p. ej. List-Unsubscribe).
+      ...(Object.keys(headers).length ? { headers } : {}),
     },
   });
 }

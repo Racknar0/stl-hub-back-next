@@ -1052,6 +1052,14 @@ enum EmailKind {
   OTHER
 }
 
+// Estado de un correo en la cola del motor de envíos propio.
+enum EmailSendStatus {
+  QUEUED // programado, esperando su hora y cupo
+  SENT // entregado a Brevo
+  FAILED // agotó sus reintentos
+  SKIPPED // descartado a propósito (antes del corte, Premium, baja, etc.)
+}
+
 // Qué se le envió a quién. Evita duplicados y permite medir por correo.
 model EmailLog {
   id        Int       @id @default(autoincrement())
@@ -1063,7 +1071,14 @@ model EmailLog {
   templateId Int? // id de la plantilla en Brevo
   messageId String?   @db.VarChar(255) // id del mensaje devuelto por Brevo
 
-  sentAt      DateTime  @default(now())
+  // Estado en la cola de envío del motor propio
+  status       EmailSendStatus @default(QUEUED)
+  scheduledFor DateTime? // hora a la que debe salir (ya ajustada a la zona del usuario)
+  attempts     Int       @default(0) // intentos de envío fallidos o realizados
+  lastError    String?   @db.VarChar(255) // último error de envío
+  dedupeKey    String?   @unique @db.VarChar(120) // evita repetir un paso del embudo (p. ej. WELCOME_2:15)
+
+  sentAt      DateTime? // se rellena al enviar; en cola es null
   deliveredAt DateTime?
   openedAt    DateTime?
   clickedAt   DateTime?
@@ -1072,6 +1087,7 @@ model EmailLog {
   @@index([contactId])
   @@index([kind])
   @@index([sentAt(sort: Desc)])
+  @@index([status, scheduledFor])
   @@map("emaillog")
 }
 

@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { megaLoginFull, megaLogoutSafe } from '../utils/megaSession.js';
 import { decryptToJson } from '../utils/cryptoUtils.js';
 import { parseStorageFromDfText } from '../utils/megaDfParser.js';
@@ -12,6 +13,9 @@ import { isUploadsActive, startUploadsActive } from '../utils/uploadsActiveFlag.
 import { createExcessCleanupService, cleanupError } from '../services/accountExcessCleanup.js';
 import { expectedAssetPath, inspectCleanupInventory, parseCleanupEntries } from '../utils/excessCleanupInventory.js';
 import { applyMegaProxy, getStickyProxyForAccount, listMegaProxies } from '../utils/megaProxy.js';
+import { createCleanupSessionRunner } from '../utils/excessCleanupSession.js';
+import { createExcessCleanupJobs } from '../services/excessCleanupJobs.js';
+import { createCleanupJobHandlers } from './accountExcessCleanupJobs.controller.js';
 
 const prisma = new PrismaClient();
 const executeFile = promisify(execFile);
@@ -20,28 +24,11 @@ const mega = async (command, args, timeout = 60000) => {
   return stdout;
 };
 const credentials = account => decryptToJson(account.credentials.encData, account.credentials.encIv, account.credentials.encTag);
-const session = async (account, task) => {
-  const ctx = `excess-cleanup account=${account.id}`;
-  try {
-    const proxies = listMegaProxies({ shuffle: false });
-    if (!proxies.length) throw cleanupError('No hay un proxy MEGA disponible para validar esta cuenta.', 503);
-    let loggedIn = false;
-    let loginError;
-    for (let attempt = 0; attempt < Math.min(3, proxies.length); attempt++) {
-      try {
-        const proxy = getStickyProxyForAccount(account, attempt);
-        if (!proxy) continue;
-        const applied = await applyMegaProxy(proxy, { ctx, timeoutMs: 15000, clearOnFail: false });
-        if (!applied?.enabled) continue;
-        await megaLoginFull(prisma, account.id, credentials(account), ctx, { skipStorageRefresh: true, skipProxySetup: true, skipResetServer: true, timeoutMs: 15000, maxProxyRetries: 0 });
-        loggedIn = true;
-        break;
-      } catch (error) { loginError = error; }
-    }
-    if (!loggedIn) throw cleanupError(`No se pudo validar ${account.alias} mediante proxy. Reintenta más tarde.`, 503);
-    void loginError;
-    return await task();
-  } finally { await megaLogoutSafe(ctx); }
+const sessionScope = new AsyncLocalStorage();
+const session = (account, task) => {
+  const runner = sessionScope.getStore();
+  if (!runner) throw cleanupError('No se pudo preparar la sesión de esta depuración.', 503);
+  return runner.run(account, task);
 };
 
 async function loadFamily(id) {
@@ -87,8 +74,23 @@ async function readStorage() {
 const service = createExcessCleanupService({
   loadFamily,
   withLock: task => withMegaLock(task, 'ACCOUNT-EXCESS-CLEANUP'),
+  withSessionScope: async task => {
+    const runner = createCleanupSessionRunner({
+      listProxies: listMegaProxies,
+      getProxyForAccount: getStickyProxyForAccount,
+      applyProxy: (proxy, { ctx }) => applyMegaProxy(proxy, { ctx, timeoutMs: 15000, clearOnFail: false }),
+      credentials,
+      login: (account, { ctx, credentials: payload }) => megaLoginFull(prisma, account.id, payload, ctx,
+        { skipStorageRefresh: true, skipProxySetup: true, skipResetServer: true, timeoutMs: 15000, maxProxyRetries: 0 }),
+      logout: megaLogoutSafe,
+    });
+    return sessionScope.run(runner, async () => {
+      try { return await task(); }
+      finally { await runner.close(); }
+    });
+  },
   ensureIdle: async () => {
-    if (isUploadsActive()) throw cleanupError('Hay subidas activas. Reintenta cuando terminen.', 423);
+    if (isUploadsActive()) throw cleanupError('MEGA está ocupado con otra operación. Vuelve a calcular cuando termine.', 423);
     const flags = [process.env.UPLOADS_ACTIVE_FLAG || path.resolve('uploads/sync-cache/uploads-active.lock'), path.resolve('uploads/uploads-active.lock')];
     for (const flag of flags) {
       const stat = await fs.stat(flag).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
@@ -164,22 +166,10 @@ const service = createExcessCleanupService({
   }),
 });
 
-function handler(action) {
-  return async (req, res) => {
-    const accountId = Number(req.params.id);
-    if (!Number.isSafeInteger(accountId) || accountId <= 0) return res.status(400).json({ message: 'Cuenta no válida.' });
-    if (!req.user?.id) return res.status(401).json({ message: 'Sesión no válida.' });
-    try {
-      const result = action === 'preview'
-        ? await service.preview(accountId, req.user.id)
-        : await service.execute(accountId, req.user.id, req.body?.planId, req.body?.confirm);
-      return res.status(result.partial ? 207 : 200).json(result);
-    } catch (error) {
-      console.error(`[EXCESS-CLEANUP] ${action} account=${accountId}: ${error.message}${error.details ? ` details=${JSON.stringify(error.details)}` : ''}`);
-      return res.status(error.status || 500).json({ message: error.status ? error.message : 'No se pudo completar la operación. Revisa las cuentas y vuelve a calcular la vista previa.', details: error.status ? error.details : undefined });
-    }
-  };
-}
-
-export const previewAccountExcessCleanup = handler('preview');
-export const executeAccountExcessCleanup = handler('execute');
+const jobs = createExcessCleanupJobs({ directory: path.resolve('logs/excess-cleanup-jobs') });
+const handlers = createCleanupJobHandlers({ jobs, service, loadFamily });
+export const previewAccountExcessCleanup = handlers.preview;
+export const executeAccountExcessCleanup = handlers.execute;
+export const getAccountExcessCleanupJob = handlers.get;
+export const getCurrentAccountExcessCleanupJob = handlers.current;
+export const listAccountExcessCleanupJobs = handlers.list;
