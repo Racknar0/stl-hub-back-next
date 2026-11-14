@@ -27,24 +27,97 @@ export const FUNNEL = [
   { kind: 'WELCOME_4', templateId: 18, delayDays: 12, sales: true },
 ];
 
-export const getConfig = () => {
-  const start = process.env.EMAIL_ENGINE_START ? new Date(process.env.EMAIL_ENGINE_START) : null;
+// Ajustes editables desde el panel (tabla SystemSetting). Mandan sobre las variables de entorno.
+export const SETTING_KEYS = {
+  enabled: 'EMAIL_ENGINE_ENABLED',
+  start: 'EMAIL_ENGINE_START',
+  dailyLimit: 'EMAIL_DAILY_LIMIT',
+  dailyReserve: 'EMAIL_DAILY_RESERVE',
+};
+
+const toDate = (value) => {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
+/** Configuración final: ajuste del panel si existe; si no, variable de entorno; si no, valor por defecto. */
+export function buildConfig(env = process.env, overrides = {}) {
+  const pick = (key) => (overrides[key] !== undefined && overrides[key] !== '' ? overrides[key] : env[key]);
   return {
-    enabled: process.env.EMAIL_ENGINE_ENABLED === 'true',
-    start: start && !Number.isNaN(start.getTime()) ? start : null,
-    dailyLimit: Number(process.env.EMAIL_DAILY_LIMIT || 300),
+    enabled: pick(SETTING_KEYS.enabled) === 'true',
+    start: toDate(pick(SETTING_KEYS.start)),
+    dailyLimit: Number(pick(SETTING_KEYS.dailyLimit) || 300),
     // Cupo que se deja libre para los correos de activación y contraseña, que cuentan igual.
-    dailyReserve: Number(process.env.EMAIL_DAILY_RESERVE || 50),
+    dailyReserve: Number(pick(SETTING_KEYS.dailyReserve) || 50),
     window: {
-      startHour: Number(process.env.EMAIL_SEND_START_HOUR || 9),
-      endHour: Number(process.env.EMAIL_SEND_END_HOUR || 20),
+      startHour: Number(env.EMAIL_SEND_START_HOUR || 9),
+      endHour: Number(env.EMAIL_SEND_END_HOUR || 20),
     },
     // Un paso atrasado más de estas horas se descarta en vez de enviarse tarde.
-    staleHours: Number(process.env.EMAIL_STALE_HOURS || 24),
+    staleHours: Number(env.EMAIL_STALE_HOURS || 24),
     maxAttempts: 3,
-    publicUrl: (process.env.EMAIL_PUBLIC_URL || 'https://stl-hub.com').replace(/\/$/, ''),
+    publicUrl: (env.EMAIL_PUBLIC_URL || 'https://stl-hub.com').replace(/\/$/, ''),
   };
-};
+}
+
+/** Lee los ajustes guardados en la base y arma la configuración. */
+export async function loadConfig() {
+  const rows = await prisma.systemSetting.findMany({
+    where: { key: { in: Object.values(SETTING_KEYS) } },
+  });
+  return buildConfig(process.env, Object.fromEntries(rows.map((r) => [r.key, r.value])));
+}
+
+export const getConfig = () => buildConfig(process.env);
+
+/**
+ * Valida lo que llega del panel. Devuelve { values, error }.
+ * `values` solo trae las claves recibidas, ya como texto listo para guardar.
+ * Encender el motor exige fecha de corte y secreto de baja configurado.
+ */
+export function parseEngineSettings(body = {}, { current, hasSecret }) {
+  const values = {};
+  const next = { ...current };
+
+  if (body.enabled !== undefined) {
+    if (typeof body.enabled !== 'boolean') return { error: 'enabled debe ser verdadero o falso' };
+    values[SETTING_KEYS.enabled] = String(body.enabled);
+    next.enabled = body.enabled;
+  }
+
+  if (body.start !== undefined) {
+    if (body.start === null || body.start === '') {
+      values[SETTING_KEYS.start] = '';
+      next.start = null;
+    } else {
+      const d = toDate(body.start);
+      if (!d) return { error: 'La fecha de corte no es válida' };
+      values[SETTING_KEYS.start] = d.toISOString();
+      next.start = d;
+    }
+  }
+
+  if (body.dailyLimit !== undefined) {
+    const n = Number(body.dailyLimit);
+    if (!Number.isInteger(n) || n < 1 || n > 2000) return { error: 'El límite diario debe ser un entero entre 1 y 2000' };
+    values[SETTING_KEYS.dailyLimit] = String(n);
+    next.dailyLimit = n;
+  }
+
+  if (body.dailyReserve !== undefined) {
+    const n = Number(body.dailyReserve);
+    if (!Number.isInteger(n) || n < 0) return { error: 'La reserva debe ser un entero de 0 en adelante' };
+    values[SETTING_KEYS.dailyReserve] = String(n);
+    next.dailyReserve = n;
+  }
+
+  if (next.dailyReserve >= next.dailyLimit) return { error: 'La reserva debe ser menor que el límite diario' };
+  if (next.enabled && !next.start) return { error: 'Para encender el motor define antes la fecha de corte' };
+  if (next.enabled && !hasSecret) return { error: 'Falta EMAIL_UNSUBSCRIBE_SECRET en el servidor' };
+
+  return { values };
+}
 
 // ---------------------------------------------------------------- Funciones puras
 
@@ -102,7 +175,7 @@ export const buildUnsubscribeUrl = (userId, publicUrl = getConfig().publicUrl) =
 
 /** Crea en `emaillog` los correos del embudo de quienes se registraron hace poco. */
 export async function planFunnel(now = new Date()) {
-  const cfg = getConfig();
+  const cfg = await loadConfig();
   if (!cfg.start) return { planned: 0, skipped: 0, reason: 'EMAIL_ENGINE_START no configurado' };
 
   // Quien se registró antes de (corte - 14 días) ya tenía todos sus pasos vencidos antes del corte.
@@ -169,7 +242,7 @@ const stepOf = (kind) => FUNNEL.find((s) => s.kind === kind);
 
 /** Envía los correos vencidos respetando el cupo diario. */
 export async function sendDue(now = new Date()) {
-  const cfg = getConfig();
+  const cfg = await loadConfig();
 
   const sentToday = await prisma.emailLog.count({
     where: { status: 'SENT', sentAt: { gte: startOfUtcDay(now) } },
@@ -300,7 +373,7 @@ export async function getQueueSummary(now = new Date()) {
     }),
     prisma.emailLog.count({ where: { status: 'FAILED' } }),
   ]);
-  const cfg = getConfig();
+  const cfg = await loadConfig();
   return {
     queued,
     failed,
@@ -352,6 +425,9 @@ export function startEmailEngine(intervalMs = 5 * 60 * 1000) {
 
 export default {
   FUNNEL,
+  SETTING_KEYS,
+  buildConfig,
+  loadConfig,
   getConfig,
   initialStatus,
   remainingQuota,

@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js';
 import {
+  getEngine,
+  updateEngine,
   getOverview,
   getAudiences,
   listAudience,
@@ -21,6 +23,8 @@ router.get('/overview', getOverview);
 router.get('/flows', getFlows);
 router.get('/templates', listTemplates);
 router.get('/logs', listLogs);
+router.get('/engine', getEngine);
+router.put('/engine', updateEngine);
 
 router.get('/audiences', getAudiences);
 router.get('/audiences/:stage', listAudience);

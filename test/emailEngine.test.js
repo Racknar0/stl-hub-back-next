@@ -60,6 +60,27 @@ test('descartes antes de enviar', () => {
   assert.equal(engine.skipReason({ step: {}, user: { isActive: false }, contact: {} }), 'cuenta inactiva');
 });
 
+test('configuración: el panel manda sobre el entorno', () => {
+  const env = { EMAIL_DAILY_LIMIT: '300', EMAIL_ENGINE_ENABLED: 'false' };
+  const cfg = engine.buildConfig(env, { EMAIL_DAILY_LIMIT: '200', EMAIL_ENGINE_ENABLED: 'true', EMAIL_ENGINE_START: '2026-11-20T00:00:00Z' });
+  assert.equal(cfg.dailyLimit, 200);
+  assert.equal(cfg.enabled, true);
+  assert.equal(cfg.start.toISOString(), '2026-11-20T00:00:00.000Z');
+  assert.equal(engine.buildConfig({}, {}).dailyLimit, 300);
+  assert.equal(engine.buildConfig({}, {}).enabled, false);
+});
+
+test('ajustes del panel: validaciones', () => {
+  const current = engine.buildConfig({}, {});
+  const ok = { current, hasSecret: true };
+  assert.ok(engine.parseEngineSettings({ enabled: true }, ok).error, 'sin fecha no enciende');
+  assert.ok(engine.parseEngineSettings({ enabled: true, start: '2026-11-20T00:00:00Z' }, { current, hasSecret: false }).error);
+  assert.ok(!engine.parseEngineSettings({ enabled: true, start: '2026-11-20T00:00:00Z' }, ok).error);
+  assert.ok(engine.parseEngineSettings({ start: 'no-es-fecha' }, ok).error);
+  assert.ok(engine.parseEngineSettings({ dailyLimit: 40 }, ok).error, 'reserva 50 >= límite 40');
+  assert.equal(engine.parseEngineSettings({ dailyLimit: 250 }, ok).values.EMAIL_DAILY_LIMIT, '250');
+});
+
 test('token de baja: válido, manipulado y sin secreto', () => {
   const token = engine.buildUnsubscribeToken(42);
   assert.equal(engine.verifyUnsubscribeToken(token), 42);

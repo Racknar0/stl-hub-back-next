@@ -4,6 +4,7 @@
 import { PrismaClient } from '@prisma/client';
 import svc from '../services/emailMarketing.service.js';
 import brevo from '../services/brevo.service.js';
+import engine from '../services/emailEngine.service.js';
 
 const prisma = new PrismaClient();
 
@@ -178,7 +179,56 @@ export const optInContact = async (req, res) => {
   }
 };
 
+const engineState = async () => {
+  const [config, queue] = await Promise.all([engine.loadConfig(), engine.getQueueSummary()]);
+  return {
+    enabled: config.enabled,
+    start: config.start,
+    dailyLimit: config.dailyLimit,
+    dailyReserve: config.dailyReserve,
+    queue: { queued: queue.queued, failed: queue.failed, nextAt: queue.nextAt },
+    ready: {
+      secret: Boolean(process.env.EMAIL_UNSUBSCRIBE_SECRET),
+      brevo: brevo.isConfigured(),
+    },
+  };
+};
+
+/** GET /engine — ajustes y estado del motor de envíos. */
+export const getEngine = async (_req, res) => {
+  try {
+    return res.json(await engineState());
+  } catch (e) {
+    return fail(res, e, 'No se pudo leer el motor de envíos');
+  }
+};
+
+/** PUT /engine — cambia interruptor, fecha de corte, límite o reserva. */
+export const updateEngine = async (req, res) => {
+  try {
+    const current = await engine.loadConfig();
+    const { values, error } = engine.parseEngineSettings(req.body || {}, {
+      current,
+      hasSecret: Boolean(process.env.EMAIL_UNSUBSCRIBE_SECRET),
+    });
+    if (error) return res.status(400).json({ error });
+
+    for (const [key, value] of Object.entries(values)) {
+      await prisma.systemSetting.upsert({
+        where: { key },
+        update: { value },
+        create: { key, value, description: 'Motor de correos (panel Marketing)' },
+      });
+    }
+    return res.json(await engineState());
+  } catch (e) {
+    return fail(res, e, 'No se pudo guardar el motor de envíos');
+  }
+};
+
 export default {
+  getEngine,
+  updateEngine,
   getOverview,
   getAudiences,
   listAudience,
