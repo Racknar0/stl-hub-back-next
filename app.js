@@ -58,6 +58,10 @@ app.use(unless(isMultipart, express.urlencoded({ limit: '10mb', extended: true }
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+app.use('/uploads/hero-banners', express.static(path.join(__dirname, 'uploads', 'hero-banners'), {
+	maxAge: '1y',
+	immutable: true,
+}));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 app.use('/api', routes);

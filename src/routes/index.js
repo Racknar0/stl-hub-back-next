@@ -14,6 +14,8 @@ import metricsRoutes from './metrics/index.js';
 import trackRoutes from './track/index.js';
 import adminOpsRoutes from './adminOps/index.js';
 import marketingRoutes from './marketing/index.js';
+import emailMarketingRoutes from './emailMarketing/index.js';
+import { handleBrevoWebhook } from '../controllers/brevoWebhook.controller.js';
 import batchImportsRoutes from './batchImports/index.js';
 import aiRoutes from './ai/index.js';
 import telegramRoutes from './telegram/index.js';
@@ -22,6 +24,7 @@ import settingsRoutes from './settings/index.js';
 import notesRoutes from './notes/index.js';
 import pinterestRoutes from './pinterest/index.js';
 import reelsRoutes from './reels/index.js';
+import heroBannersRoutes, { publicHeroBannersRouter } from './heroBanners/index.js';
 import { requireAuth, requireAdmin, requireAuthOrQueryToken } from '../middlewares/auth.js';
 import {
   createGiftCode, listGiftCodes, updateGiftCode, deleteGiftCode,
@@ -43,8 +46,13 @@ router.use('/admin/reports', reportsRoutes);
 router.use('/admin/notifications', notificationsRoutes);
 router.use('/admin/ops', adminOpsRoutes);
 router.use('/admin/marketing', marketingRoutes);
+// Email marketing (embudos, audiencias, plantillas). Namespace aparte
+// para no mezclarlo con las campañas UTM de /admin/marketing.
+router.use('/admin/email-marketing', emailMarketingRoutes);
 router.use('/admin/settings', settingsRoutes);
 router.use('/admin/notes', notesRoutes);
+router.use('/admin/hero-banners', heroBannersRoutes);
+router.use('/hero-banners', publicHeroBannersRouter);
 
 router.use('/downloads', downloadsRoutes);
 router.use('/me', meRoutes);
@@ -65,6 +73,9 @@ router.patch('/admin/gift-codes/:id', requireAuth, requireAdmin, updateGiftCode)
 router.delete('/admin/gift-codes/:id', requireAuth, requireAdmin, deleteGiftCode);
 router.get('/gift-codes/validate', validateGiftCode);          // public - for registration form
 router.post('/gift-codes/redeem', requireAuth, redeemGiftCode); // auth - for logged-in users
+
+// ─── Webhook de Brevo (público, protegido por secreto en la URL) ──────
+router.post('/webhooks/brevo', handleBrevoWebhook);
 
 // Public promo status (no auth)
 router.get('/promo/status', async (req, res) => {

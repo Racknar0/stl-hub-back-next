@@ -1,3 +1,4 @@
+import { assetSizeFilter } from '../utils/assetSizeFilter.js';
 import { PrismaClient } from '@prisma/client';
 import { transporter } from './nodeMailerController.js';
 import path from 'path';
@@ -722,6 +723,12 @@ export const listAssets = async (req, res) => {
 
         // Construir filtro dinámico
         const where = {};
+        try {
+            const sizeFilter = assetSizeFilter(req.query);
+            if (sizeFilter) where.AND = [sizeFilter];
+        } catch (error) {
+            return res.status(400).json({ message: error.message });
+        }
         if (is_ai_search === 'true' && q) {
             const limit = pageSize ? Number(pageSize) : 50;
             const aiResults = await qdrantMultimodalService.searchByImage(null, null, String(q), limit);

@@ -5,6 +5,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { extractTrackingFromBody, extractVisitIdentityFromRequest, pickTrackingForDb, resolveMarketingCampaignId, toSlug } from '../utils/attribution.js';
 import { toCopAmountFromPayment } from '../utils/paymentCurrency.js';
+import { createRegistrationTimeseriesHandler } from './registrationMetrics.controller.js';
 
 const prisma = new PrismaClient();
 
@@ -1467,74 +1468,7 @@ export async function getPlanClickTimeseries(req, res) {
   }
 }
 
-export async function getRegistrationTimeseries(req, res) {
-  try {
-    const now = new Date()
-    const fromRaw = String(req.query.from || '').trim()
-    const toRaw = String(req.query.to || '').trim()
-
-    const toDate = toRaw ? new Date(`${toRaw}T23:59:59`) : now
-    const fromDate = fromRaw ? new Date(`${fromRaw}T00:00:00`) : new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
-
-    if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
-      return res.status(400).json({ error: 'invalid-dates' })
-    }
-
-    const diffMs = toDate.getTime() - fromDate.getTime()
-    const diffDays = diffMs / (24 * 60 * 60 * 1000)
-
-    let granularity, dateExpr
-    if (diffDays <= 1) {
-      granularity = 'hour'
-      dateExpr = "DATE_FORMAT(DATE_SUB(createdAt, INTERVAL 5 HOUR), '%Y-%m-%d %H:00:00')"
-    } else if (diffDays <= 20) {
-      granularity = 'day'
-      dateExpr = 'DATE(DATE_SUB(createdAt, INTERVAL 5 HOUR))'
-    } else if (diffDays <= 100) {
-      granularity = 'week'
-      dateExpr = "DATE(DATE_SUB(DATE_SUB(createdAt, INTERVAL 5 HOUR), INTERVAL WEEKDAY(DATE_SUB(createdAt, INTERVAL 5 HOUR)) DAY))"
-    } else {
-      granularity = 'month'
-      dateExpr = "DATE_FORMAT(DATE_SUB(createdAt, INTERVAL 5 HOUR), '%Y-%m-01')"
-    }
-
-    if (granularity === 'week') {
-      const day = fromDate.getDay();
-      const diff = fromDate.getDate() - day + (day === 0 ? -6 : 1); // Lunes
-      fromDate.setDate(diff);
-      fromDate.setHours(0, 0, 0, 0);
-    } else if (granularity === 'month') {
-      fromDate.setDate(1);
-      fromDate.setHours(0, 0, 0, 0);
-    }
-
-    const query = `
-      SELECT ${dateExpr} as bucket,
-             COUNT(*) as cnt
-      FROM user
-      WHERE createdAt >= ? AND createdAt <= ?
-      GROUP BY bucket
-      ORDER BY bucket ASC
-    `
-
-    const rows = await prisma.$queryRawUnsafe(query, fromDate, toDate)
-
-    const series = (rows || []).map((r) => ({
-      date: r.bucket instanceof Date ? r.bucket.toISOString().slice(0, granularity === 'hour' ? 16 : 10) : String(r.bucket || '').slice(0, granularity === 'hour' ? 16 : 10),
-      count: Number(r.cnt || 0),
-    }))
-
-    return res.json({
-      from: fromDate.toISOString().slice(0, 10),
-      to: toDate.toISOString().slice(0, 10),
-      granularity,
-      series,
-    })
-  } catch (e) {
-    console.error('getRegistrationTimeseries error', e)
-    return res.status(500).json({ error: 'internal' })
-  }
-}
+export const getRegistrationTimeseries = createRegistrationTimeseriesHandler(prisma);
 
 export async function getRecentDownloads(req, res) {
   try {

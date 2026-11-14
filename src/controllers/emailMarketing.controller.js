@@ -1,0 +1,187 @@
+// Endpoints del módulo Marketing (correo) del dashboard.
+// Ojo: marketing.controller.js es otra cosa (campañas UTM de adquisición).
+
+import { PrismaClient } from '@prisma/client';
+import svc from '../services/emailMarketing.service.js';
+import brevo from '../services/brevo.service.js';
+
+const prisma = new PrismaClient();
+
+// Definición del embudo de bienvenida. Hoy corre dentro de Brevo;
+// aquí se declara para poder pintarlo y medirlo desde el panel.
+export const WELCOME_FLOW = [
+  { kind: 'WELCOME_1', delayDays: 0, delayLabel: '1 h', templateId: 15, name: 'Bienvenida' },
+  { kind: 'WELCOME_2', delayDays: 3, delayLabel: 'día 3', templateId: 16, name: 'Premium' },
+  { kind: 'WELCOME_3', delayDays: 7, delayLabel: 'día 7', templateId: 17, name: 'Top descargas' },
+  { kind: 'WELCOME_4', delayDays: 12, delayLabel: 'día 12', templateId: 18, name: 'Planes' },
+];
+
+const fail = (res, e, msg) => {
+  console.error(`[email-marketing] ${msg}:`, e);
+  return res.status(500).json({ error: msg, detail: e?.message || null });
+};
+
+/** GET /overview — métricas de la pantalla Resumen. */
+export const getOverview = async (_req, res) => {
+  try {
+    const data = await svc.getOverview();
+    return res.json(data);
+  } catch (e) {
+    return fail(res, e, 'No se pudo calcular el resumen');
+  }
+};
+
+/** GET /audiences — conteos por etapa. */
+export const getAudiences = async (_req, res) => {
+  try {
+    const data = await svc.getAudienceCounts();
+    return res.json(data);
+  } catch (e) {
+    return fail(res, e, 'No se pudieron calcular las audiencias');
+  }
+};
+
+/** GET /audiences/:stage — listado paginado (NEW | ACTIVE | DORMANT | OPTED_OUT | ALL). */
+export const listAudience = async (req, res) => {
+  try {
+    const stage = String(req.params.stage || 'ALL').toUpperCase();
+    if (stage !== 'ALL' && !svc.STAGES.includes(stage)) {
+      return res.status(400).json({ error: 'Etapa no válida', stages: svc.STAGES });
+    }
+
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const pageSize = Math.min(200, Math.max(1, Number(req.query.pageSize) || 50));
+
+    const data = await svc.listAudience(stage, { page, pageSize });
+    return res.json(data);
+  } catch (e) {
+    return fail(res, e, 'No se pudo listar la audiencia');
+  }
+};
+
+/** GET /flows — embudo de bienvenida con sus contadores. */
+export const getFlows = async (_req, res) => {
+  try {
+    const grouped = await prisma.emailLog.groupBy({
+      by: ['kind'],
+      _count: { _all: true },
+    });
+    const sentByKind = new Map(grouped.map((g) => [g.kind, g._count._all]));
+
+    const logs = await prisma.emailLog.findMany({
+      where: { kind: { in: WELCOME_FLOW.map((s) => s.kind) } },
+      select: { kind: true, openedAt: true, clickedAt: true },
+    });
+
+    const steps = WELCOME_FLOW.map((step) => {
+      const own = logs.filter((l) => l.kind === step.kind);
+      return {
+        ...step,
+        sent: sentByKind.get(step.kind) || 0,
+        opened: own.filter((l) => l.openedAt).length,
+        clicked: own.filter((l) => l.clickedAt).length,
+      };
+    });
+
+    return res.json({
+      name: 'Bienvenida a nuevos registros',
+      // El embudo vive en Brevo; el backend solo mide lo que pasa por él.
+      runsOn: 'brevo',
+      steps,
+    });
+  } catch (e) {
+    return fail(res, e, 'No se pudo cargar el embudo');
+  }
+};
+
+/** GET /templates — plantillas desde Brevo. */
+export const listTemplates = async (_req, res) => {
+  try {
+    if (!brevo.isConfigured()) {
+      return res.status(503).json({ error: 'BREVO_API_KEY no configurada', items: [] });
+    }
+    const data = await brevo.listTemplates({ limit: 50 });
+    return res.json(data);
+  } catch (e) {
+    return fail(res, e, 'No se pudieron leer las plantillas de Brevo');
+  }
+};
+
+/** GET /logs — últimos envíos registrados. */
+export const listLogs = async (req, res) => {
+  try {
+    const take = Math.min(200, Math.max(1, Number(req.query.take) || 50));
+    const items = await prisma.emailLog.findMany({
+      take,
+      orderBy: { sentAt: 'desc' },
+      include: {
+        contact: { select: { userId: true, user: { select: { email: true } } } },
+      },
+    });
+
+    return res.json({
+      items: items.map((l) => ({
+        id: l.id,
+        kind: l.kind,
+        subject: l.subject,
+        email: l.contact?.user?.email || null,
+        sentAt: l.sentAt,
+        deliveredAt: l.deliveredAt,
+        openedAt: l.openedAt,
+        clickedAt: l.clickedAt,
+        bouncedAt: l.bouncedAt,
+      })),
+    });
+  } catch (e) {
+    return fail(res, e, 'No se pudieron leer los envíos');
+  }
+};
+
+/** POST /sync — recalcula las etapas y las guarda. */
+export const syncStages = async (_req, res) => {
+  try {
+    const result = await svc.syncStages();
+    return res.json(result);
+  } catch (e) {
+    return fail(res, e, 'No se pudieron recalcular las etapas');
+  }
+};
+
+/** POST /contacts/:userId/opt-out */
+export const optOutContact = async (req, res) => {
+  try {
+    const userId = Number(req.params.userId);
+    if (!Number.isInteger(userId)) return res.status(400).json({ error: 'userId no válido' });
+
+    const reason = String(req.body?.reason || 'MANUAL').toUpperCase();
+    const contact = await svc.optOut(userId, reason);
+    return res.json(contact);
+  } catch (e) {
+    return fail(res, e, 'No se pudo dar de baja el contacto');
+  }
+};
+
+/** POST /contacts/:userId/opt-in */
+export const optInContact = async (req, res) => {
+  try {
+    const userId = Number(req.params.userId);
+    if (!Number.isInteger(userId)) return res.status(400).json({ error: 'userId no válido' });
+
+    const contact = await svc.optIn(userId);
+    return res.json(contact);
+  } catch (e) {
+    return fail(res, e, 'No se pudo reactivar el contacto');
+  }
+};
+
+export default {
+  getOverview,
+  getAudiences,
+  listAudience,
+  getFlows,
+  listTemplates,
+  listLogs,
+  syncStages,
+  optOutContact,
+  optInContact,
+};

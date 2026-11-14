@@ -74,6 +74,9 @@ model user {
   lastLoginIp      String? @db.VarChar(45)
   lastLoginCountry String? @db.VarChar(2)
 
+  // Estado de email marketing (embudo, señales, bajas)
+  emailContact EmailContact?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -981,3 +984,109 @@ model UserNotification {
   @@map("usernotification")
 }
 
+
+// ─────────────────────────────────────────────────────────────
+// Email marketing: estado del contacto, envíos y eventos.
+// Distinto de MarketingCampaign, que es atribución UTM de adquisición.
+// ─────────────────────────────────────────────────────────────
+
+enum EmailStage {
+  NEW // registrado hace poco, recorriendo el embudo de bienvenida
+  ACTIVE // dio alguna señal de vida en la ventana configurada
+  DORMANT // sin señales; candidato al correo de reenganche
+  OPTED_OUT // fuera del marketing (baja, spam, rebote o sin reacción)
+}
+
+enum EmailOptOutReason {
+  UNSUBSCRIBE
+  SPAM_COMPLAINT
+  HARD_BOUNCE
+  NO_RESPONSE // no reaccionó al reenganche
+  MANUAL
+}
+
+// Un registro por usuario con su estado de marketing.
+// Las señales de la web (login, descargas) se leen de sus tablas;
+// aquí solo se guardan las que vienen del proveedor de correo.
+model EmailContact {
+  id     Int  @id @default(autoincrement())
+  userId Int  @unique
+  user   user @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  stage EmailStage @default(NEW)
+
+  // Señales del proveedor (Brevo)
+  lastSentAt    DateTime?
+  lastOpenAt    DateTime?
+  lastClickAt   DateTime?
+  lastBounceAt  DateTime?
+
+  // Reenganche
+  reengagedAt   DateTime? // cuándo se le envió el correo de reenganche
+  reengagedOpen Boolean   @default(false) // si reaccionó a él
+
+  // Salida del marketing
+  optedOutAt     DateTime?
+  optOutReason   EmailOptOutReason?
+
+  // Recalculado por el job de audiencias
+  stageUpdatedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  logs EmailLog[]
+
+  @@index([stage])
+  @@index([lastOpenAt(sort: Desc)])
+  @@map("emailcontact")
+}
+
+enum EmailKind {
+  WELCOME_1
+  WELCOME_2
+  WELCOME_3
+  WELCOME_4
+  REENGAGE
+  NEWSLETTER
+  OTHER
+}
+
+// Qué se le envió a quién. Evita duplicados y permite medir por correo.
+model EmailLog {
+  id        Int       @id @default(autoincrement())
+  contactId Int
+  contact   EmailContact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  kind      EmailKind
+  subject   String?   @db.VarChar(255)
+  templateId Int? // id de la plantilla en Brevo
+  messageId String?   @db.VarChar(255) // id del mensaje devuelto por Brevo
+
+  sentAt      DateTime  @default(now())
+  deliveredAt DateTime?
+  openedAt    DateTime?
+  clickedAt   DateTime?
+  bouncedAt   DateTime?
+
+  @@index([contactId])
+  @@index([kind])
+  @@index([sentAt(sort: Desc)])
+  @@map("emaillog")
+}
+
+// Eventos crudos del webhook de Brevo. Sirve de auditoría y para reprocesar.
+model EmailEvent {
+  id        Int      @id @default(autoincrement())
+  event     String   @db.VarChar(40) // delivered, opened, click, hard_bounce, unsubscribe...
+  email     String   @db.VarChar(191)
+  messageId String?  @db.VarChar(255)
+  payload   String?  @db.LongText
+  occurredAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([email])
+  @@index([event])
+  @@index([occurredAt(sort: Desc)])
+  @@map("emailevent")
+}

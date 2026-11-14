@@ -494,9 +494,8 @@ export const testAccount = async (req, res) => {
       console.warn('[ACCOUNTS] find warn:', String(e.message).slice(0,200));
     }
 
-    // Fallbacks de totales y clamps
+    // La cuota no aumenta cuando el uso la supera: ese exceso debe seguir visible.
     if (!storageTotalMB || storageTotalMB <= 0) storageTotalMB = DEFAULT_FREE_QUOTA_MB;
-    if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB;
 
     log.verbose(`Métricas crudas id=${id} used=${storageUsedMB}MB total=${storageTotalMB}MB archivos=${fileCount} carpetas=${folderCount}`);
     const updated = await prisma.megaAccount.update({

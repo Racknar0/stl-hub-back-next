@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { createAccount, testAccount, listAccounts, updateAccount, deleteAccount, getAccountDetail, logoutAccount, listAccountAssets, addBackupToMain, removeBackupFromMain, listBackupCandidates, syncMainToBackups, alignmentAudit, alignmentSync, alignmentCleanup, alignmentCleanupUnified, alignmentRestore, alignmentGhostCleanup } from '../../controllers/account.controller.js';
 import { syncBackupsToMain } from '../../controllers/restoreFromBackups.controller.js';
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js';
+import { previewAccountExcessCleanup, executeAccountExcessCleanup } from '../../controllers/accountExcessCleanup.controller.js';
 import {
   listAccountDirectory,
   createAccountFolder,
@@ -22,6 +23,8 @@ router.post('/', createAccount);
 router.patch('/:id', updateAccount);
 router.delete('/:id', deleteAccount);
 router.post('/:id/test', testAccount);
+router.post('/:id/excess/preview', previewAccountExcessCleanup);
+router.post('/:id/excess/execute', executeAccountExcessCleanup);
 router.post('/:id/sync-main-backups', syncMainToBackups);
 router.post('/:id/restore-from-backups', syncBackupsToMain);
 router.post('/:id/backups', addBackupToMain); // body: { backupAccountId }

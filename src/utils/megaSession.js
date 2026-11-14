@@ -142,7 +142,7 @@ export async function refreshStorageMetrics(prisma, accountId, ctx = '') {
 
   // Defaults
   if (!storageTotalMB || storageTotalMB <= 0) storageTotalMB = DEFAULT_FREE_QUOTA_MB;
-  if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB;
+  // Preserve the reported quota even when usage exceeds it.
   if (!storageUsedMB && !storageTotalMB) return null;
 
   try {

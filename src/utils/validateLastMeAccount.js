@@ -156,7 +156,7 @@ export async function runValidateLastMeAccount() {
     }, 'VALIDATE-LAST-MEGA');
 
     if (!storageTotalMB || storageTotalMB <= 0) storageTotalMB = DEFAULT_FREE_QUOTA_MB;
-    if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB;
+    // Keep over-quota usage visible instead of increasing the account capacity.
 
   log.info(`[VALIDAR][MÉTRICAS] cuenta=${account.id} carpetaBase="${base||'/'}" almacenamientoUsadoMB=${storageUsedMB} almacenamientoTotalMB=${storageTotalMB} fuenteAlmacenamiento=${storageSource} archivos=${fileCount} carpetas=${folderCount} fuenteConteos=mega-find`);
 

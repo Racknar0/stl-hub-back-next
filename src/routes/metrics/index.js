@@ -10,6 +10,7 @@ import { recordSearchEvent, recordSearchClick, getSearchInsights, getRecentSearc
 import { recordCampaignVisit } from '../../controllers/metrics.controller.js'
 import { getSalesMetrics, getTrafficSources } from '../../controllers/metrics.controller.js'
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
+import { getFreebieRollTimeseries } from '../../controllers/freebieMetrics.controller.js'
 
 const router = express.Router()
 
@@ -42,5 +43,6 @@ router.get('/site-visits/sources', getTrafficSources)
 router.get('/search-insights', getSearchInsights)
 router.get('/recent-searches', getRecentSearches)
 router.get('/plan-clicks/timeseries', getPlanClickTimeseries)
+router.get('/freebie-rolls/timeseries', getFreebieRollTimeseries)
 
 export default router

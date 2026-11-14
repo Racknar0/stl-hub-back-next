@@ -145,7 +145,7 @@ async function getAccountMetrics(base){
   }
 
   if (!storageTotalMB) storageTotalMB = DEFAULT_FREE_QUOTA_MB;
-  if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB;
+  // An over-quota account must keep its real capacity.
 
   return { storageUsedMB, storageTotalMB, fileCount, folderCount, storageSource };
 }

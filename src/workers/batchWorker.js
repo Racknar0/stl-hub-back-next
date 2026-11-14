@@ -357,8 +357,8 @@ async function refreshMainAccountStorageMetrics(mainAccount, extraCtx = '') {
   const prevTotal = toSafeNumber(mainAccount?.storageTotalMB, 0)
   if (!storageUsedMB && prevUsed > 0) storageUsedMB = prevUsed
   if (!storageTotalMB && prevTotal > 0) storageTotalMB = prevTotal
-  if (storageUsedMB > storageTotalMB) storageTotalMB = storageUsedMB
-  if (!storageUsedMB && !storageTotalMB) return null
+  // Never infer capacity from usage; keep the previous metric if quota is unavailable.
+  if (!storageTotalMB) return null
 
   try {
     const updated = await prisma.megaAccount.update({
