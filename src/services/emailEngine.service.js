@@ -460,6 +460,7 @@ export default {
   buildConfig,
   loadConfig,
   getConfig,
+  parseEngineSettings,
   initialStatus,
   remainingQuota,
   startOfUtcDay,

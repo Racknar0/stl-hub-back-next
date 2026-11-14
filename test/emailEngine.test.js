@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { scheduleStep, clampToSendWindow, timezoneForCountry } from '../src/utils/emailSchedule.js';
 
 process.env.EMAIL_UNSUBSCRIBE_SECRET = 'test-secret';
-const engine = await import('../src/services/emailEngine.service.js');
+// Se prueba el export por defecto, que es el que usan los controladores.
+const engine = (await import('../src/services/emailEngine.service.js')).default;
 
 const window = { startHour: 9, endHour: 20 };
 
