@@ -59,29 +59,81 @@ export async function getUpcomingSelection(heroId = null) {
     hero = await prisma.reelPost.findUnique({ where: { id: Number(heroId) } });
   }
 
+  const now = new Date();
+  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+  const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+
   if (!hero) {
-    // Si no se especifica, toma el reel más reciente aprobado o publicado
+    // 1. Prioridad: Reel publicado hoy
+    hero = await prisma.reelPost.findFirst({
+      where: {
+        approved: true,
+        status: 'PUBLISHED',
+        publishedAt: { gte: startOfDay, lte: endOfDay }
+      },
+      orderBy: { publishedAt: 'desc' }
+    });
+  }
+
+  if (!hero) {
+    // 2. Prioridad: Último reel publicado en general
+    hero = await prisma.reelPost.findFirst({
+      where: {
+        approved: true,
+        status: 'PUBLISHED'
+      },
+      orderBy: { publishedAt: 'desc' }
+    });
+  }
+
+  if (!hero) {
+    // 3. Fallback: Reel programado más reciente
     hero = await prisma.reelPost.findFirst({
       where: { approved: true },
-      orderBy: { id: 'desc' }
+      orderBy: [{ scheduledAt: 'desc' }, { id: 'desc' }]
     });
   }
 
   const heroExcludeId = hero?.id || 0;
 
-  // Los 19 restantes seleccionados por menor uso y fecha de descanso más antigua
-  const restingModels = await prisma.reelPost.findMany({
+  // Los 19 restantes: seleccionados por descanso (menor uso y descanso más antiguo),
+  // priorizando reels que ya fueron publicados en días anteriores
+  let restingModels = await prisma.reelPost.findMany({
     where: {
       id: { not: heroExcludeId },
-      approved: true
+      approved: true,
+      OR: [
+        { status: 'PUBLISHED' },
+        { scheduledAt: { lte: now } }
+      ]
     },
     orderBy: [
       { lastUsedInHorizontal: 'asc' },
       { horizontalUsesCount: 'asc' },
-      { id: 'desc' }
+      { publishedAt: 'desc' },
+      { scheduledAt: 'desc' }
     ],
     take: 19
   });
+
+  // Si hay menos de 19 publicados, completar con otros reels aprobados del catálogo
+  if (restingModels.length < 19) {
+    const excludeIds = [heroExcludeId, ...restingModels.map(m => m.id)];
+    const remainingCount = 19 - restingModels.length;
+    const additional = await prisma.reelPost.findMany({
+      where: {
+        id: { notIn: excludeIds },
+        approved: true
+      },
+      orderBy: [
+        { lastUsedInHorizontal: 'asc' },
+        { horizontalUsesCount: 'asc' },
+        { id: 'asc' }
+      ],
+      take: remainingCount
+    });
+    restingModels = [...restingModels, ...additional];
+  }
 
   const allSelected = hero ? [hero, ...restingModels] : restingModels;
 
@@ -202,7 +254,11 @@ export async function getHorizontalModels(filter = 'all') {
     };
   });
 
-  if (filter === 'turn') return mapped.filter(m => m.status === 'hero' || m.status === 'turn');
+  if (filter === 'turn') {
+    return mapped
+      .filter(m => m.status === 'hero' || m.status === 'turn')
+      .sort((a, b) => (a.turnPosition || 99) - (b.turnPosition || 99));
+  }
   if (filter === 'rest') return mapped.filter(m => m.status === 'rest');
   return mapped;
 }
@@ -259,7 +315,7 @@ export async function renderHorizontalVideo(models) {
       }
 
       // Asegurar mínimo 10 segundos para capítulos nativos de YouTube
-      const cmd = `ffmpeg -y ${inputs} -filter_complex "${filter}" -map "[v]" -map 0:a? -c:v libx264 -preset veryfast -crf 23 -r 24 -c:a aac -b:a 128k -t 10 "${outClip}"`;
+      const cmd = `ffmpeg -y ${inputs} -filter_complex "${filter}" -map "[v]" -map 0:a? -c:v libx264 -preset veryfast -threads 4 -crf 23 -r 24 -c:a aac -ar 48000 -ac 2 -b:a 128k -t 10 "${outClip}"`;
       await execAsync(cmd);
       processedClips.push(outClip);
     }

@@ -49,6 +49,17 @@ const normalizeTiktokOptions = (o) => ({
   brandedContent: !!(o?.commercial && o?.brandedContent),
 });
 // { [channelId]: { title, description } } con textos recortados (los vacíos se descartan)
+// { [pageId]: { caption } } de las Páginas de Facebook extra
+const normalizeFacebookVariants = (v) => {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const out = {};
+  for (const [id, val] of Object.entries(v).slice(0, 10)) {
+    const caption = String(val?.caption || '').trim().slice(0, 2200);
+    if (caption) out[String(id)] = { caption };
+  }
+  return Object.keys(out).length ? out : null;
+};
+
 const normalizeYoutubeVariants = (v) => {
   if (!v || typeof v !== 'object') return null;
   const out = {};
@@ -353,6 +364,7 @@ router.put('/:id', requireAuth, requireAdmin, async (req, res) => {
       ...(b.title !== undefined && { title: text(b.title) }),
       ...(b.youtubeDescription !== undefined && { youtubeDescription: text(b.youtubeDescription) }),
       ...(b.facebookPages !== undefined && { facebookPages: Array.isArray(b.facebookPages) ? b.facebookPages.map(String).slice(0, 10) : null }),
+      ...(b.facebookVariants !== undefined && { facebookVariants: normalizeFacebookVariants(b.facebookVariants) }),
       ...(b.youtubeChannels !== undefined && { youtubeChannels: Array.isArray(b.youtubeChannels) ? b.youtubeChannels.map(String).slice(0, 10) : null }),
       ...(b.youtubeVariants !== undefined && { youtubeVariants: normalizeYoutubeVariants(b.youtubeVariants) }),
       ...(b.onScreenText !== undefined && { onScreenText: text(b.onScreenText)?.slice(0, 120) ?? null }),

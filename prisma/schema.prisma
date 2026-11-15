@@ -902,6 +902,7 @@ model ReelPost {
   caption       String?        @db.Text         // texto para Instagram (CTA: link en la bio)
   facebookCaption String?      @db.Text         // texto para Facebook (el link va en el primer comentario)
   facebookPages Json?          // ids de las Páginas de Facebook donde se publica (null = todas las asignadas)
+  facebookVariants Json?       // { [pageId]: { caption } } para las Páginas que no son la principal
   tiktokCaption String?        @db.Text         // texto para TikTok (vacío = se usa el de Instagram)
   tiktokOptions Json?          // { privacyLevel, allowComment, allowDuet, allowStitch, commercial, yourBrand, brandedContent }
   onScreenText  String?        @db.VarChar(120) // sugerencia de texto sobre el video (IA)

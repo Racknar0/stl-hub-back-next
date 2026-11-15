@@ -37,6 +37,7 @@ router.get('/history', requireAuth, requireAdmin, async (req, res) => {
 
 // 4. Generación / Ensamble de una recopilación
 router.post('/generate', requireAuth, requireAdmin, async (req, res) => {
+  if (req.setTimeout) req.setTimeout(600000); // 10 minutos para FFmpeg
   try {
     const { heroId, channelName, title, description, render } = req.body || {};
     const result = await horizontalService.createCompilation({
@@ -44,7 +45,7 @@ router.post('/generate', requireAuth, requireAdmin, async (req, res) => {
       channelName,
       title,
       description,
-      render: !!render
+      render: render !== false
     });
     res.json({ success: true, compilation: result });
   } catch (error) {

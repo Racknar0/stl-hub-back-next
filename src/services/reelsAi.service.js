@@ -173,4 +173,38 @@ export async function generateYoutubeVariant({ asset, language = 'es', base, avo
   return { title: String(parsed.title || '').trim().slice(0, 100), description: String(parsed.description || '').trim() };
 }
 
-export default { generateReelTexts, generateYoutubeVariant };
+/**
+ * Otro caption de Facebook para el mismo modelo (para otra Página): mismo tema, redacción distinta
+ * a la base y a las variantes ya generadas. Devuelve el caption completo (encabezado + texto + CTA).
+ */
+export async function generateFacebookVariant({ asset, language = 'es', base, avoid = [] }) {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
+  const ai = new GoogleGenAI({ apiKey });
+  const lang = LANG_NAMES[language] || 'Spanish';
+  const prompt = [
+    `Write a NEW one-line Facebook Reel description in ${lang} (max 120 characters, 1-2 emojis) for a short video of this 3D printable STL model: "${asset?.titleEn || asset?.title || ''}".`,
+    'The STL files are PAID: never say "free"/"gratis". No URLs, no hashtags, no call to action.',
+    'It must be clearly different (wording, angle, hook) from these existing versions, which must NOT be repeated or paraphrased closely:',
+    JSON.stringify([captionBody(base), ...avoid.map(captionBody)].filter(Boolean)),
+    'Return ONLY JSON: {"body": "..."}',
+  ].join('\n');
+  const response = await ai.models.generateContent({
+    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+    contents: [prompt],
+    config: { responseMimeType: 'application/json', temperature: 1.2 },
+  });
+  const rawText = String(response?.text || '').trim();
+  let parsed;
+  try { parsed = JSON.parse(rawText); }
+  catch {
+    const match = rawText.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error('No se pudo leer el resultado de la revisión');
+    parsed = JSON.parse(match[0]);
+  }
+  const body = String(parsed.body || '').trim();
+  if (!body) throw new Error('Texto vacío');
+  return composeCaption('facebook', body);
+}
+
+export default { generateReelTexts, generateYoutubeVariant, generateFacebookVariant };

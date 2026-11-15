@@ -82,7 +82,7 @@ export async function publishInstagramReel({ videoUrl, caption }) {
 }
 
 /** Facebook Reel: iniciar subida → Meta descarga el video de la URL → publicar → primer comentario con el link. */
-export async function publishFacebookReel({ pageId = process.env.META_PAGE_ID, videoAbsPath, videoUrl, caption, firstComment }) {
+export async function publishFacebookReel({ pageId = process.env.META_PAGE_ID, videoAbsPath, videoUrl, caption, firstComment, publishAt = null }) {
   const token = await pageToken(pageId);
 
   const { video_id: videoId } = await graph('POST', `${pageId}/video_reels`, { upload_phase: 'start' }, token);
@@ -102,25 +102,32 @@ export async function publishFacebookReel({ pageId = process.env.META_PAGE_ID, v
     throw new Error(`Facebook no pudo recibir el video: ${reason}`);
   }
 
+  // Con publishAt, Facebook lo deja programado y lo publica solo a esa hora
+  const scheduled = !!publishAt;
   await graph('POST', `${pageId}/video_reels`, {
-    upload_phase: 'finish', video_id: videoId, video_state: 'PUBLISHED', description: caption,
+    upload_phase: 'finish', video_id: videoId, description: caption,
+    ...(scheduled
+      ? { video_state: 'SCHEDULED', scheduled_publish_time: String(Math.floor(new Date(publishAt).getTime() / 1000)) }
+      : { video_state: 'PUBLISHED' }),
   }, token);
 
-  // Esperar a que el reel quede publicado (hasta ~5 min)
+  // Esperar a que el reel quede publicado, o procesado si está programado (hasta ~5 min)
   for (let i = 0; i < 60; i++) {
     await sleep(5000);
     const { status } = await graph('GET', videoId, { fields: 'status' }, token);
-    if (status?.video_status === 'error' || status?.processing_phase?.status === 'error') {
-      throw new Error(`Facebook no pudo procesar el video: ${JSON.stringify(status?.processing_phase?.errors || status)}`);
+    if (status?.video_status === 'error' || status?.processing_phase?.status === 'error' || status?.publishing_phase?.status === 'error') {
+      throw new Error(`Facebook no pudo procesar el video: ${JSON.stringify(status?.processing_phase?.errors || status?.publishing_phase?.errors || status)}`);
     }
     if (status?.publishing_phase?.status === 'complete') break;
+    if (scheduled && status?.processing_phase?.status === 'complete') break;
     if (i === 59) throw new Error('Facebook tardó demasiado en publicar el reel');
   }
 
   const { permalink_url: permalink } = await graph('GET', videoId, { fields: 'permalink_url' }, token).catch(() => ({}));
   let commentId = null;
   let commentError = null;
-  if (firstComment) {
+  // Un reel programado aún no admite comentarios: en ese caso el link ya va dentro del texto
+  if (firstComment && !scheduled) {
     // Si el comentario falla, el reel ya está publicado: se registra (y se avisa) pero no se marca como error
     try {
       commentId = (await graph('POST', `${videoId}/comments`, { message: firstComment }, token)).id;
@@ -133,6 +140,7 @@ export async function publishFacebookReel({ pageId = process.env.META_PAGE_ID, v
     id: videoId,
     url: permalink ? (permalink.startsWith('http') ? permalink : `https://www.facebook.com${permalink}`) : null,
     commentId,
+    ...(scheduled && { privacy: 'scheduled', publishAt }),
     ...(commentError && { commentError }),
   };
 }

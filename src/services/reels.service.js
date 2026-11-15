@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { PrismaClient } from '@prisma/client';
-import { generateReelTexts, generateYoutubeVariant, mockReelTexts, isMockAi, captionBody } from './reelsAi.service.js';
+import { generateReelTexts, generateYoutubeVariant, generateFacebookVariant, mockReelTexts, isMockAi, captionBody } from './reelsAi.service.js';
 import { metaConfigured, listFacebookPages, publishInstagramReel, publishFacebookReel } from './metaReels.service.js';
 import { dispatchReelNotification } from '../utils/reelsNotifications.js';
 import { uploadShort, connectionStatus as youtubeStatus, listChannels as youtubeChannels } from './youtube.service.js';
@@ -170,6 +170,7 @@ export async function processReelAi(postId, { notes, language } = {}) {
         title: texts.youtubeTitle || null,
         youtubeDescription: texts.youtubeDescription || null,
         youtubeVariants: await youtubeVariantsFor(asset, texts, lang),
+        facebookVariants: await facebookVariantsFor(asset, texts, lang),
         language: lang,
         aiGenerated: true,
         aiStatus: 'READY',
@@ -192,6 +193,21 @@ async function youtubeVariantsFor(asset, texts, language) {
       variants[ch.id] = await generateYoutubeVariant({ asset, language, base: { title: texts.youtubeTitle, description: texts.youtubeDescription }, avoid: Object.values(variants) });
     } catch (e) {
       console.warn(`[REELS][AI] Variante de YouTube para ${ch.title}: ${e.message}`);
+    }
+  }
+  return Object.keys(variants).length ? variants : null;
+}
+
+/** Caption distinto para cada Página de Facebook que no es la principal. */
+async function facebookVariantsFor(asset, texts, language) {
+  const pages = (await listFacebookPages().catch(() => [])).slice(1);
+  if (!pages.length || isMockAi()) return null;
+  const variants = {};
+  for (const pg of pages) {
+    try {
+      variants[pg.id] = { caption: await generateFacebookVariant({ asset, language, base: texts.facebookCaption, avoid: Object.values(variants).map(v => v.caption) }) };
+    } catch (e) {
+      console.warn(`[REELS][AI] Variante de Facebook para ${pg.name}: ${e.message}`);
     }
   }
   return Object.keys(variants).length ? variants : null;
@@ -234,24 +250,32 @@ export function enqueueAi(ids) {
 }
 
 /**
- * Reels sin publicar que van a YouTube y aún no tienen título/descripción propios para algún canal extra.
- * Devuelve [{ id, missing: [channelId] }].
+ * Reels sin publicar a los que les falta el texto propio de algún canal de YouTube o Página de Facebook extra.
+ * Devuelve [{ id, missing: [channelId], missingFb: [pageId] }].
  */
 export async function reelsMissingYoutubeVariants() {
-  const extra = (await youtubeChannels().catch(() => [])).slice(1);
-  if (!extra.length) return [];
+  const [extra, extraPages] = await Promise.all([
+    youtubeChannels().then(c => c.slice(1)).catch(() => []),
+    listFacebookPages().then(p => p.slice(1)).catch(() => []),
+  ]);
+  if (!extra.length && !extraPages.length) return [];
   const posts = await prisma.reelPost.findMany({
     where: { status: { not: 'PUBLISHED' }, aiGenerated: true },
-    select: { id: true, platforms: true, youtubeChannels: true, youtubeVariants: true },
+    select: { id: true, platforms: true, youtubeChannels: true, youtubeVariants: true, facebookPages: true, facebookVariants: true },
   });
+  const obj = (v) => (v && typeof v === 'object' ? v : {});
   return posts
-    .filter(p => Array.isArray(p.platforms) && p.platforms.includes('youtube'))
+    .filter(p => Array.isArray(p.platforms))
     .map((p) => {
       const chosen = Array.isArray(p.youtubeChannels) ? p.youtubeChannels : extra.map(c => c.id);
-      const variants = p.youtubeVariants && typeof p.youtubeVariants === 'object' ? p.youtubeVariants : {};
-      return { id: p.id, missing: extra.filter(c => chosen.includes(c.id) && !variants[c.id]?.title).map(c => c.id) };
+      const chosenPages = Array.isArray(p.facebookPages) ? p.facebookPages : extraPages.map(pg => pg.id);
+      return {
+        id: p.id,
+        missing: p.platforms.includes('youtube') ? extra.filter(c => chosen.includes(c.id) && !obj(p.youtubeVariants)[c.id]?.title).map(c => c.id) : [],
+        missingFb: p.platforms.includes('facebook') ? extraPages.filter(pg => chosenPages.includes(pg.id) && !obj(p.facebookVariants)[pg.id]?.caption).map(pg => pg.id) : [],
+      };
     })
-    .filter(p => p.missing.length);
+    .filter(p => p.missing.length || p.missingFb.length);
 }
 
 let variantsRunning = false;
@@ -262,7 +286,7 @@ export async function fillMissingYoutubeVariants() {
   if (!pending.length) return { queued: 0 };
   variantsRunning = true;
   (async () => {
-    for (const { id, missing } of pending) {
+    for (const { id, missing, missingFb } of pending) {
       try {
         const post = await prisma.reelPost.findUnique({ where: { id } });
         if (!post || post.status === 'PUBLISHED' || post.publishing) continue;
@@ -273,7 +297,13 @@ export async function fillMissingYoutubeVariants() {
             asset, language: post.language, base: { title: post.title, description: post.youtubeDescription }, avoid: Object.values(variants),
           });
         }
-        await prisma.reelPost.update({ where: { id }, data: { youtubeVariants: variants } });
+        const fbVariants = { ...(post.facebookVariants && typeof post.facebookVariants === 'object' ? post.facebookVariants : {}) };
+        for (const pageId of missingFb) {
+          fbVariants[pageId] = { caption: await generateFacebookVariant({
+            asset, language: post.language, base: post.facebookCaption || post.caption, avoid: Object.values(fbVariants).map(v => v.caption),
+          }) };
+        }
+        await prisma.reelPost.update({ where: { id }, data: { youtubeVariants: variants, facebookVariants: fbVariants } });
       } catch (e) {
         console.error(`[REELS][AI] Textos de canales extra del reel ${id}:`, e.message);
       }
@@ -334,18 +364,27 @@ async function youtubeTargets(post) {
 }
 
 /**
- * Páginas de Facebook de un reel: la principal usa la clave "facebook"; las demás páginas asignadas al usuario
- * del sistema usan "facebook:<id>". Todas llevan el mismo caption.
+ * Páginas de Facebook de un reel: la principal usa la clave "facebook" y el caption del reel; las demás páginas
+ * asignadas al usuario del sistema usan "facebook:<id>", su propio caption y se programan unas horas después.
  */
 async function facebookTargets(post) {
   const pages = await listFacebookPages().catch(() => []);
   if (!pages.length) return [];
   const chosen = Array.isArray(post.facebookPages) ? post.facebookPages : pages.map(p => p.id);
-  return pages.filter(p => chosen.includes(p.id)).map(p => ({
-    key: p.id === pages[0].id ? 'facebook' : `facebook:${p.id}`,
-    pageId: p.id,
-    pageName: p.name,
-  }));
+  const variants = post.facebookVariants && typeof post.facebookVariants === 'object' ? post.facebookVariants : {};
+  let extra = 0;
+  return pages.filter(p => chosen.includes(p.id)).map((p) => {
+    const primary = p.id === pages[0].id;
+    // Cada Página extra sale ~2 h después de la anterior (con unos minutos al azar)
+    const delayMin = primary ? 0 : (++extra) * 120 + Math.round((Math.random() * 2 - 1) * 20);
+    return {
+      key: primary ? 'facebook' : `facebook:${p.id}`,
+      pageId: p.id,
+      pageName: p.name,
+      caption: (!primary && variants[p.id]?.caption) || post.facebookCaption || post.caption,
+      publishAt: delayMin > 0 ? new Date(Date.now() + delayMin * 60000).toISOString() : null,
+    };
+  });
 }
 
 const PLATFORM_NAMES = { instagram: 'Instagram', facebook: 'Facebook', youtube: 'YouTube', tiktok: 'TikTok', threads: 'Threads' };
@@ -361,7 +400,13 @@ async function publishToPlatform(platform, post) {
   if (platform === 'facebook' || platform.startsWith('facebook:')) {
     const target = (await facebookTargets(post)).find(t => t.key === platform);
     if (!target) throw new Error('Esa Página de Facebook ya no está asignada al usuario del sistema');
-    const result = await publishFacebookReel({ pageId: target.pageId, videoAbsPath: toAbsVideoPath(post.videoPath), videoUrl: publicVideoUrl(post.videoPath), caption: withHashtags(post.facebookCaption || post.caption, post), firstComment: link ? `🔗 ${link}` : null });
+    const firstComment = link ? `🔗 ${link}` : null;
+    const caption = withHashtags(target.caption, post);
+    const result = await publishFacebookReel({
+      pageId: target.pageId, videoAbsPath: toAbsVideoPath(post.videoPath), videoUrl: publicVideoUrl(post.videoPath),
+      caption: target.publishAt && firstComment ? `${caption}\n\n${firstComment}` : caption,
+      firstComment, publishAt: target.publishAt,
+    });
     return { ...result, pageId: target.pageId, pageName: target.pageName };
   }
   if (platform === 'youtube' || platform.startsWith('youtube:')) {
