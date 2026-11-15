@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { PrismaClient } from '@prisma/client';
 import { generateReelTexts, generateYoutubeVariant, generateFacebookVariant, mockReelTexts, isMockAi, captionBody } from './reelsAi.service.js';
-import { metaConfigured, listFacebookPages, publishInstagramReel, publishFacebookReel } from './metaReels.service.js';
+import { metaConfigured, listFacebookPages, publishInstagramReel, publishFacebookReel, commentOnPublishedReel } from './metaReels.service.js';
 import { dispatchReelNotification } from '../utils/reelsNotifications.js';
 import { uploadShort, connectionStatus as youtubeStatus, listChannels as youtubeChannels } from './youtube.service.js';
 import { publishVideo as publishTiktokVideo, connectionStatus as tiktokStatus, tiktokOptionsProblem } from './tiktok.service.js';
@@ -401,13 +401,12 @@ async function publishToPlatform(platform, post) {
     const target = (await facebookTargets(post)).find(t => t.key === platform);
     if (!target) throw new Error('Esa Página de Facebook ya no está asignada al usuario del sistema');
     const firstComment = link ? `🔗 ${link}` : null;
-    const caption = withHashtags(target.caption, post);
     const result = await publishFacebookReel({
       pageId: target.pageId, videoAbsPath: toAbsVideoPath(post.videoPath), videoUrl: publicVideoUrl(post.videoPath),
-      caption: target.publishAt && firstComment ? `${caption}\n\n${firstComment}` : caption,
-      firstComment, publishAt: target.publishAt,
+      caption: withHashtags(target.caption, post), firstComment, publishAt: target.publishAt,
     });
-    return { ...result, pageId: target.pageId, pageName: target.pageName };
+    // Programado: el worker pone el comentario con el link en cuanto Facebook lo publique
+    return { ...result, pageId: target.pageId, pageName: target.pageName, ...(target.publishAt && firstComment && { pendingComment: firstComment }) };
   }
   if (platform === 'youtube' || platform.startsWith('youtube:')) {
     const { youtubePrivacy } = await getSettings();
@@ -555,6 +554,52 @@ export async function publishDueReels() {
   }
 }
 
+/**
+ * Páginas de Facebook programadas: cuando Facebook ya publicó el reel, pone el primer comentario con el link
+ * (igual que en la Página principal). Si a las 12 h sigue sin poder, avisa y deja de intentarlo.
+ */
+export async function commentScheduledFacebookReels() {
+  const posts = await prisma.reelPost.findMany({
+    where: { updatedAt: { gte: new Date(Date.now() - 3 * 24 * 3600 * 1000) }, publishing: false },
+  });
+  for (const post of posts) {
+    const results = post.results && typeof post.results === 'object' ? { ...post.results } : null;
+    if (!results) continue;
+    let changed = false;
+    for (const [key, r] of Object.entries(results)) {
+      if (!key.startsWith('facebook:') || !r?.pendingComment || !r.publishAt) continue;
+      const dueAt = new Date(r.publishAt).getTime();
+      if (Date.now() < dueAt + 2 * 60000) continue;
+      let failure = null;
+      try {
+        const res = await commentOnPublishedReel({ pageId: r.pageId, videoId: r.id, message: r.pendingComment });
+        if (res.published) {
+          results[key] = { ...r, commentId: res.commentId };
+          delete results[key].pendingComment;
+          changed = true;
+          console.log(`[REELS] Reel ${post.id}: comentario con link puesto en ${r.pageName || key}`);
+          continue;
+        }
+        if (Date.now() > dueAt + 12 * 3600 * 1000) failure = 'Facebook no llegó a publicar el reel programado';
+      } catch (e) {
+        failure = e.message;
+      }
+      if (!failure) continue;
+      results[key] = { ...r, commentError: failure };
+      delete results[key].pendingComment;
+      changed = true;
+      dispatchReelNotification({
+        post,
+        level: 'WARNING',
+        title: `Facebook (${r.pageName || 'página'}): reel sin comentario con el link`,
+        detail: `No se pudo poner el primer comentario con el link.\n\nError: ${failure}\n\nPuedes añadirlo a mano en Facebook.`,
+        links: [{ label: 'Reel de Facebook', url: r.url }, { label: 'Link a comentar', url: r.pendingComment.replace(/^🔗\s*/, '') }],
+      });
+    }
+    if (changed) await prisma.reelPost.update({ where: { id: post.id }, data: { results } });
+  }
+}
+
 let workerTimer = null;
 export function startReelsWorker(intervalMs = 60000) {
   if (workerTimer) return;
@@ -568,7 +613,10 @@ export function startReelsWorker(intervalMs = 60000) {
       }
     })
     .catch(e => console.error('[REELS] Worker:', e.message));
-  workerTimer = setInterval(() => publishDueReels().catch(e => console.error('[REELS] Worker:', e.message)), intervalMs);
+  workerTimer = setInterval(() => {
+    publishDueReels().catch(e => console.error('[REELS] Worker:', e.message));
+    commentScheduledFacebookReels().catch(e => console.error('[REELS] Comentarios FB:', e.message));
+  }, intervalMs);
 }
 
 // ---------- Calendario ----------

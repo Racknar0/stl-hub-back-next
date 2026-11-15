@@ -145,4 +145,16 @@ export async function publishFacebookReel({ pageId = process.env.META_PAGE_ID, v
   };
 }
 
-export default { metaConfigured, listFacebookPages, publishInstagramReel, publishFacebookReel };
+/**
+ * Pone el primer comentario en un reel programado una vez que Facebook ya lo publicó.
+ * Devuelve { published: false } si todavía no ha salido, o { published: true, commentId }.
+ */
+export async function commentOnPublishedReel({ pageId, videoId, message }) {
+  const token = await pageToken(pageId);
+  const { status } = await graph('GET', videoId, { fields: 'status' }, token);
+  if (status?.publishing_phase?.status !== 'complete') return { published: false };
+  const { id } = await graph('POST', `${videoId}/comments`, { message }, token);
+  return { published: true, commentId: id };
+}
+
+export default { metaConfigured, listFacebookPages, publishInstagramReel, publishFacebookReel, commentOnPublishedReel };

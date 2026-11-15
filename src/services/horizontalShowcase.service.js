@@ -26,6 +26,16 @@ export function ensureDirs() {
   fs.mkdirSync(BRANDING_DIR, { recursive: true });
 }
 
+// Función para barajar aleatoriamente un array (Fisher-Yates)
+function shuffle(array) {
+  const arr = [...array];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
 // Resuelve la ruta absoluta del logo oficial
 function getLogoAbsPath() {
   const custom = path.join(BRANDING_DIR, 'logo_watermark.png');
@@ -96,9 +106,8 @@ export async function getUpcomingSelection(heroId = null) {
 
   const heroExcludeId = hero?.id || 0;
 
-  // Los 19 restantes: seleccionados por descanso (menor uso y descanso más antiguo),
-  // priorizando reels que ya fueron publicados en días anteriores
-  let restingModels = await prisma.reelPost.findMany({
+  // Pool de candidatos en descanso (menor uso en horizontal primero)
+  let candidatePool = await prisma.reelPost.findMany({
     where: {
       id: { not: heroExcludeId },
       approved: true,
@@ -108,33 +117,35 @@ export async function getUpcomingSelection(heroId = null) {
       ]
     },
     orderBy: [
-      { lastUsedInHorizontal: 'asc' },
       { horizontalUsesCount: 'asc' },
-      { publishedAt: 'desc' },
-      { scheduledAt: 'desc' }
+      { lastUsedInHorizontal: 'asc' }
     ],
-    take: 19
+    take: 35
   });
 
   // Si hay menos de 19 publicados, completar con otros reels aprobados del catálogo
-  if (restingModels.length < 19) {
-    const excludeIds = [heroExcludeId, ...restingModels.map(m => m.id)];
-    const remainingCount = 19 - restingModels.length;
+  if (candidatePool.length < 19) {
+    const excludeIds = [heroExcludeId, ...candidatePool.map(m => m.id)];
     const additional = await prisma.reelPost.findMany({
       where: {
         id: { notIn: excludeIds },
         approved: true
       },
       orderBy: [
-        { lastUsedInHorizontal: 'asc' },
         { horizontalUsesCount: 'asc' },
-        { id: 'asc' }
+        { lastUsedInHorizontal: 'asc' }
       ],
-      take: remainingCount
+      take: 19 - candidatePool.length
     });
-    restingModels = [...restingModels, ...additional];
+    candidatePool = [...candidatePool, ...additional];
   }
 
+  // BARAJAR los 19 restantes para que el video NUNCA sea igual
+  const shuffledCandidates = shuffle(candidatePool);
+  const restingModels = shuffledCandidates.slice(0, 19);
+
+  // El Hero va SIEMPRE de #1 (apertura con el último reel del día)
+  // y los 19 restantes van completamente barajados
   const allSelected = hero ? [hero, ...restingModels] : restingModels;
 
   // Construir los timestamps (asegurando >= 10s por modelo para compatibilidad de capítulos YouTube)
