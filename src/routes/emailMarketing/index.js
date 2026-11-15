@@ -12,6 +12,7 @@ import {
   getFlows,
   listTemplates,
   listLogs,
+  listSends,
   syncStages,
   optOutContact,
   optInContact,
@@ -26,6 +27,7 @@ router.get('/overview', getOverview);
 router.get('/flows', getFlows);
 router.get('/templates', listTemplates);
 router.get('/logs', listLogs);
+router.get('/sends', listSends);
 router.get('/engine', getEngine);
 router.put('/engine', updateEngine);
 router.post('/engine/test', sendEngineTest);

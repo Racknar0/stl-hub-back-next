@@ -6,6 +6,7 @@ import svc from '../services/emailMarketing.service.js';
 import brevo from '../services/brevo.service.js';
 import engine from '../services/emailEngine.service.js';
 import reengage from '../services/emailReengage.service.js';
+import sends from '../services/emailSends.service.js';
 
 const prisma = new PrismaClient();
 
@@ -140,6 +141,15 @@ export const listLogs = async (req, res) => {
     });
   } catch (e) {
     return fail(res, e, 'No se pudieron leer los envíos');
+  }
+};
+
+/** GET /sends — historial de envíos del motor (todos los estados), con filtros y paginación. */
+export const listSends = async (req, res) => {
+  try {
+    return res.json(await sends.listSends(req.query));
+  } catch (e) {
+    return fail(res, e, 'No se pudo leer el historial de envíos');
   }
 };
 
