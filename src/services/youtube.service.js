@@ -185,4 +185,55 @@ export async function uploadShort({ channelId, videoAbsPath, title, description,
   };
 }
 
-export default { youtubeConfigured, getAuthUrl, handleCallback, connectionStatus, listChannels, disconnect, uploadShort };
+export async function uploadHorizontalVideo({ channelId, videoAbsPath, title, description, tags = [], privacyStatus = 'public', publishAt = null }) {
+  if (!videoAbsPath || !fs.existsSync(videoAbsPath)) throw new Error('El archivo de video no está en el servidor');
+  const accounts = await loadAccounts();
+  const account = channelId ? accounts.find(a => a.id === channelId || a.title === channelId) : accounts[0];
+  if (!account) throw new Error(channelId ? 'Ese canal de YouTube ya no está conectado' : 'YouTube no está conectado: pulsa "Conectar YouTube"');
+  const token = await accessToken(account);
+  const file = await fs.promises.readFile(videoAbsPath);
+  const safeTitle = String(title || '').replace(/[<>]/g, '').trim().slice(0, 100);
+  const metadata = {
+    snippet: {
+      title: safeTitle,
+      description: String(description || '').replace(/[<>]/g, '').slice(0, 4900),
+      tags: tags.slice(0, 20),
+      categoryId: '26', // Howto & Style
+    },
+    status: {
+      privacyStatus: publishAt ? 'private' : privacyStatus,
+      ...(publishAt && { publishAt }),
+      selfDeclaredMadeForKids: false,
+      embeddable: true,
+    },
+  };
+
+  const init = await fetch('https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json; charset=UTF-8',
+      'X-Upload-Content-Type': 'video/*',
+      'X-Upload-Content-Length': String(file.length),
+    },
+    body: JSON.stringify(metadata),
+  });
+  if (!init.ok) {
+    const err = await init.json().catch(() => ({}));
+    throw new Error(`YouTube no aceptó la subida: ${err.error?.message || `HTTP ${init.status}`}`);
+  }
+  const uploadUrl = init.headers.get('location');
+  const put = await fetch(uploadUrl, { method: 'PUT', headers: { 'Content-Type': 'video/*', 'Content-Length': String(file.length) }, body: file });
+  const video = await put.json().catch(() => ({}));
+  if (!put.ok || !video.id) throw new Error(`YouTube falló al recibir el video: ${video.error?.message || `HTTP ${put.status}`}`);
+  return {
+    id: video.id,
+    url: `https://youtube.com/watch?v=${video.id}`,
+    privacy: publishAt ? 'scheduled' : (video.status?.privacyStatus || privacyStatus),
+    ...(publishAt && { publishAt }),
+    channelId: account.id,
+    channelTitle: account.title,
+  };
+}
+
+export default { youtubeConfigured, getAuthUrl, handleCallback, connectionStatus, listChannels, disconnect, uploadShort, uploadHorizontalVideo };

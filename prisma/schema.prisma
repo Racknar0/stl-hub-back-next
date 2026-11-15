@@ -919,6 +919,8 @@ model ReelPost {
   results       Json?          // { instagram: { id, url, publishedAt }, ... }
   errorMessage  String?        @db.Text
   publishedAt   DateTime?
+  horizontalUsesCount Int       @default(0)
+  lastUsedInHorizontal DateTime?
 
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
@@ -926,6 +928,34 @@ model ReelPost {
   @@index([status])
   @@index([scheduledAt])
   @@map("reelpost")
+}
+
+model HorizontalCompilation {
+  id             Int       @id @default(autoincrement())
+  title          String    @db.VarChar(255)
+  description    String    @db.Text
+  tags           Json?
+  channelId      String    @db.VarChar(100)
+  channelName    String?   @db.VarChar(100)
+  youtubeVideoId String?   @db.VarChar(100)
+  youtubeUrl     String?   @db.VarChar(255)
+  videoPath      String?   @db.VarChar(512)
+  durationSec    Float?
+  fileSizeB      Int?
+  heroPostId     Int?
+  modelIds       Json
+  status         String    @default("PUBLISHED") @db.VarChar(20)
+  fbSynced       Boolean   @default(false)
+  fbPostId       String?   @db.VarChar(100)
+  errorMessage   String?   @db.Text
+  publishedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([channelId])
+  @@index([status])
+  @@index([publishedAt])
+  @@map("horizontalcompilation")
 }
 
 model TelegramChannel {

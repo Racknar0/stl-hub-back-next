@@ -8,10 +8,13 @@ import reels, { PLATFORMS, assetLink, dayKey, defaultPlatforms } from '../../ser
 import youtube from '../../services/youtube.service.js';
 import tiktok, { PRIVACY_LEVELS } from '../../services/tiktok.service.js';
 import threads from '../../services/threads.service.js';
+import horizontalRoutes from './horizontal.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
 const REELS_DIR = path.resolve('uploads', 'reels');
+
+router.use('/horizontal', horizontalRoutes);
 
 const uploadVideos = multer({
   storage: multer.diskStorage({
