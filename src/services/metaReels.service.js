@@ -165,6 +165,57 @@ export async function publishFacebookReel({ pageId = process.env.META_PAGE_ID, v
 }
 
 /**
+ * Video normal (horizontal 16:9) en el feed de una Página: se sube el archivo → se espera a que Facebook lo procese
+ * → primer comentario con el link. A diferencia de video_reels, admite videos largos y horizontales.
+ */
+export async function publishFacebookVideo({ pageId = process.env.META_PAGE_ID, videoAbsPath, title, description, firstComment }) {
+  const token = await pageToken(pageId);
+  if (!videoAbsPath || !fs.existsSync(videoAbsPath)) throw new Error('El archivo de video no está en el servidor');
+  const form = new FormData();
+  form.append('access_token', token);
+  form.append('title', String(title || '').slice(0, 250));
+  form.append('description', description || '');
+  form.append('published', 'true');
+  form.append('source', new Blob([await fs.promises.readFile(videoAbsPath)], { type: 'video/mp4' }), 'video.mp4');
+  const res = await fetch(`https://graph-video.facebook.com/${version()}/${pageId}/videos`, { method: 'POST', body: form });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error || !data.id) {
+    const e = data.error || {};
+    throw new Error(`Facebook no pudo recibir el video: ${e.error_user_msg || e.message || `HTTP ${res.status}`}`);
+  }
+  const videoId = String(data.id);
+
+  // Esperar a que Facebook termine de procesarlo (hasta ~5 min) antes de comentar
+  for (let i = 0; i < 60; i++) {
+    await sleep(5000);
+    const { status } = await graph('GET', videoId, { fields: 'status' }, token).catch(() => ({}));
+    if (status?.video_status === 'error' || status?.processing_phase?.status === 'error') {
+      throw new Error(`Facebook no pudo procesar el video: ${JSON.stringify(status?.processing_phase?.errors || status)}`);
+    }
+    if (status?.video_status === 'ready' || status?.publishing_phase?.status === 'complete') break;
+  }
+
+  const { permalink_url: permalink } = await graph('GET', videoId, { fields: 'permalink_url' }, token).catch(() => ({}));
+  let commentId = null;
+  let commentError = null;
+  if (firstComment) {
+    // Si el comentario falla, el video ya está publicado: se registra pero no se marca como error
+    try {
+      commentId = (await graph('POST', `${videoId}/comments`, { message: firstComment }, token)).id;
+    } catch (e) {
+      commentError = e.message;
+      console.warn('[HORIZONTAL][FB] No se pudo publicar el primer comentario:', e.message);
+    }
+  }
+  return {
+    id: videoId,
+    url: permalink ? (permalink.startsWith('http') ? permalink : `https://www.facebook.com${permalink}`) : null,
+    commentId,
+    ...(commentError && { commentError }),
+  };
+}
+
+/**
  * Pone el primer comentario en un reel programado una vez que Facebook ya lo publicó.
  * Devuelve { published: false } si todavía no ha salido, o { published: true, commentId }.
  */
@@ -176,4 +227,4 @@ export async function commentOnPublishedReel({ pageId, videoId, message }) {
   return { published: true, commentId: id };
 }
 
-export default { metaConfigured, listFacebookPages, listInstagramAccounts, publishInstagramReel, publishFacebookReel, commentOnPublishedReel };
+export default { metaConfigured, listFacebookPages, listInstagramAccounts, publishInstagramReel, publishFacebookReel, publishFacebookVideo, commentOnPublishedReel };

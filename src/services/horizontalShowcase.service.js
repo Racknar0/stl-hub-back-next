@@ -5,6 +5,7 @@ import util from 'util';
 import { PrismaClient } from '@prisma/client';
 import youtube, { listChannels as youtubeChannels } from './youtube.service.js';
 import { createShortLink } from './shortLinks.service.js';
+import { metaConfigured, listFacebookPages, publishFacebookVideo } from './metaReels.service.js';
 
 const execAsync = util.promisify(exec);
 const prisma = new PrismaClient();
@@ -16,7 +17,8 @@ const SETTINGS = {
   LAST_PUBLISHED_AT: 'HORIZONTAL_LAST_PUBLISHED_AT',
   AUTO_ENABLED: 'HORIZONTAL_AUTO_ENABLED', // "false" apaga la publicación automática
   SPACING_MINUTES: 'HORIZONTAL_SPACING_MINUTES', // minutos tras el reel (por defecto 120)
-  LAST_AUTO_REEL: 'HORIZONTAL_LAST_AUTO_REEL' // id del último reel que ya disparó un video horizontal
+  LAST_AUTO_REEL: 'HORIZONTAL_LAST_AUTO_REEL', // id del último reel que ya disparó un video horizontal
+  LAST_FB_PAGE: 'HORIZONTAL_LAST_FB_PAGE' // id de la última Página de Facebook donde salió un video horizontal
 };
 const DEFAULT_SPACING_MINUTES = 120;
 
@@ -464,7 +466,20 @@ export async function getHorizontalStatus() {
     where: { status: 'PUBLISHED', publishedAt: { not: null } },
     orderBy: { publishedAt: 'desc' },
   });
+  // Facebook: Página en turno (rotan todas las Páginas asignadas) y último video horizontal publicado allí
+  const fbPage = metaConfigured() ? await nextFacebookPage().catch(() => null) : null;
+  const lastFb = await prisma.horizontalCompilation.findFirst({ where: { fbSynced: true }, orderBy: { updatedAt: 'desc' } });
+  const lastFbInfo = lastFb ? facebookInfo(lastFb) : null;
   const kpis = {
+    facebook: {
+      configured: metaConfigured(),
+      pageToday: fbPage?.name || null,
+      lastPublished: lastFbInfo ? {
+        date: lastFbInfo.publishedAt ? fmtBogota(lastFbInfo.publishedAt) : null,
+        page: lastFbInfo.pageName || null,
+        url: lastFbInfo.url || null,
+      } : null,
+    },
     nextPublish: next.label,
     nextPublishNote: next.note,
     channelToday: todayChannel,
@@ -513,6 +528,7 @@ export async function getHorizontalStatus() {
     youtubeUrl: latestCompilation.youtubeUrl || (latestCompilation.youtubeVideoId ? `https://youtube.com/watch?v=${latestCompilation.youtubeVideoId}` : null),
     publishedAt: latestCompilation.publishedAt ? fmtBogota(latestCompilation.publishedAt) : null,
     errorMessage: latestCompilation.errorMessage || null,
+    facebook: facebookState(latestCompilation),
   } : null;
 
   return {
@@ -593,6 +609,7 @@ export async function getHorizontalHistory() {
     videoPath: item.videoPath,
     youtubeUrl: item.youtubeUrl || (item.youtubeVideoId ? `https://youtube.com/watch?v=${item.youtubeVideoId}` : null),
     fbSynced: item.fbSynced,
+    facebook: facebookState(item),
     status: item.status,
     errorMessage: item.errorMessage || null,
     language: (item.tags && typeof item.tags === 'object' && item.tags.language) || 'es',
@@ -783,6 +800,168 @@ export async function latestReadyCompilation() {
   });
 }
 
+// ─── Facebook: el mismo video horizontal se publica como video normal en una Página (rotan todas) ───
+
+// "tags" guarda { tags, language, facebook } (los registros viejos pueden tener solo el array de tags)
+const tagsObject = (record) => (record?.tags && typeof record.tags === 'object' && !Array.isArray(record.tags))
+  ? record.tags
+  : { tags: Array.isArray(record?.tags) ? record.tags : [] };
+const facebookInfo = (record) => tagsObject(record).facebook || null;
+
+// Recopilaciones que se están subiendo a Facebook ahora mismo (evita doble publicación por doble clic)
+const fbRunning = new Set();
+
+/** Estado de Facebook de una recopilación para el panel. */
+function facebookState(record) {
+  const info = facebookInfo(record) || {};
+  return {
+    published: Boolean(record.fbSynced),
+    publishing: fbRunning.has(record.id),
+    pageName: info.pageName || null,
+    url: info.url || null,
+    publishedAt: info.publishedAt ? fmtBogota(info.publishedAt) : null,
+    error: record.fbSynced ? null : (info.error || null),
+    commentError: info.commentError || null,
+  };
+}
+
+/** Página de Facebook en turno: la siguiente a la última usada (empieza por la principal). */
+export async function nextFacebookPage() {
+  const pages = await listFacebookPages();
+  if (!pages.length) return null;
+  const last = (await prisma.systemSetting.findUnique({ where: { key: SETTINGS.LAST_FB_PAGE } }))?.value;
+  const idx = pages.findIndex(p => p.id === String(last));
+  return pages[(idx + 1) % pages.length];
+}
+
+const slugify = (v) => String(v || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+
+/**
+ * Texto del video y primer comentario para Facebook, con enlaces cortos propios (source "facebook")
+ * y la Página en la campaña UTM, para medir los clics de cada Página por separado.
+ */
+async function facebookTexts(record, page) {
+  const language = tagsObject(record).language === 'en' ? 'en' : 'es';
+  const campaign = `horizontal_fb_${slugify(page.name) || page.id}`;
+  const withUtm = (link) => {
+    try {
+      const url = new URL(link);
+      url.searchParams.set('utm_source', 'facebook');
+      url.searchParams.set('utm_medium', 'video');
+      url.searchParams.set('utm_campaign', campaign);
+      return url.toString();
+    } catch {
+      return link;
+    }
+  };
+  const shorten = async (targetUrl, label) => {
+    try {
+      return (await createShortLink({ targetUrl, source: 'facebook', label: `${page.name} · horizontal · ${label}`, refType: 'horizontal', refId: record.id })) || targetUrl;
+    } catch (e) {
+      console.warn('[HORIZONTAL][FB] No se pudo acortar un enlace:', e.message);
+      return targetUrl;
+    }
+  };
+
+  const ids = (Array.isArray(record.modelIds) ? record.modelIds : []).map(Number).filter(Boolean);
+  const reels = ids.length ? await prisma.reelPost.findMany({ where: { id: { in: ids } } }) : [];
+  const reelMap = new Map(reels.map(r => [r.id, r]));
+  const assetIds = reels.map(r => r.assetId).filter(Boolean);
+  const assets = assetIds.length
+    ? await prisma.asset.findMany({ where: { id: { in: assetIds } }, select: { id: true, titleEn: true, title: true, slug: true } })
+    : [];
+  const assetMap = new Map(assets.map(a => [a.id, a]));
+
+  const lines = [];
+  let hero = null;
+  for (const [i, id] of ids.entries()) {
+    const reel = reelMap.get(id);
+    if (!reel) continue;
+    const asset = reel.assetId ? assetMap.get(reel.assetId) : null;
+    const name = String((language === 'en' && asset) ? (asset.titleEn || asset.title) : (reel.assetTitle || reel.title || `Modelo ${reel.id}`))
+      .replace(/^STL\s*[-–:]\s*/i, '');
+    const link = await shorten(withUtm(modelLink(asset, reel, language)), `#${i + 1} ${name}`);
+    if (!hero) hero = { name, link };
+    lines.push(`#${i + 1} ${name} → ${link}`);
+  }
+  const site = await shorten(withUtm(language === 'en' ? 'https://stlgratis.com/en/' : 'https://stlgratis.com/'), 'web');
+  const hashtags = (tagsObject(record).tags || []).slice(0, 8).map(t => `#${String(t).replace(/[#\s]+/g, '')}`).filter(t => t.length > 1).join(' ');
+
+  const description = language === 'en'
+    ? `🔥 The 20 3D models in this compilation, ready to download and print in resin or filament:\n\n${lines.join('\n')}\n\n🔗 All the models at ${site}${hashtags ? `\n\n${hashtags}` : ''}`
+    : `🔥 Los 20 modelos 3D de esta recopilación, listos para descargar e imprimir en resina o filamento:\n\n${lines.join('\n')}\n\n🔗 Todos los modelos en ${site}${hashtags ? `\n\n${hashtags}` : ''}`;
+  const firstComment = language === 'en'
+    ? `${hero ? `🔗 Download #1 ${hero.name}: ${hero.link}\n` : ''}🌐 All the models: ${site}`
+    : `${hero ? `🔗 Descarga el #1 ${hero.name}: ${hero.link}\n` : ''}🌐 Todos los modelos: ${site}`;
+  return { description, firstComment };
+}
+
+/**
+ * Publica una recopilación ya generada en la Página de Facebook en turno (video normal 16:9 + primer comentario).
+ * Con background: true valida, devuelve enseguida y la subida sigue en segundo plano (el panel consulta el estado).
+ */
+export async function publishToFacebook(compilationId, { background = false } = {}) {
+  if (!metaConfigured()) throw new Error('Facebook no está configurado en el servidor (faltan las claves META_ del .env)');
+  const record = await prisma.horizontalCompilation.findUnique({ where: { id: Number(compilationId) } });
+  if (!record) throw new Error('Recopilación no encontrada');
+  if (record.fbSynced) throw new Error('Esta recopilación ya está publicada en Facebook');
+  if (fbRunning.has(record.id)) throw new Error('Esta recopilación ya se está publicando en Facebook');
+  const videoAbsPath = record.videoPath ? path.resolve('uploads', record.videoPath) : null;
+  if (!videoAbsPath || !fs.existsSync(videoAbsPath)) throw new Error('El archivo de video renderizado no se encuentra en el servidor.');
+
+  fbRunning.add(record.id);
+  const run = async () => {
+    let page = null;
+    try {
+      page = await nextFacebookPage();
+      if (!page) throw new Error('No hay Páginas de Facebook asignadas al usuario del sistema');
+      const texts = await facebookTexts(record, page);
+      const result = await publishFacebookVideo({
+        pageId: page.id, videoAbsPath, title: record.title, description: texts.description, firstComment: texts.firstComment,
+      });
+      await prisma.systemSetting.upsert({
+        where: { key: SETTINGS.LAST_FB_PAGE },
+        create: { key: SETTINGS.LAST_FB_PAGE, value: page.id, description: 'Última Página de Facebook donde se publicó un video horizontal' },
+        update: { value: page.id },
+      });
+      const fresh = await prisma.horizontalCompilation.findUnique({ where: { id: record.id } });
+      const updated = await prisma.horizontalCompilation.update({
+        where: { id: record.id },
+        data: {
+          fbSynced: true,
+          fbPostId: result.id,
+          tags: {
+            ...tagsObject(fresh || record),
+            facebook: {
+              pageId: page.id, pageName: page.name, url: result.url, commentId: result.commentId,
+              ...(result.commentError && { commentError: result.commentError }),
+              publishedAt: new Date().toISOString(),
+            },
+          },
+        },
+      });
+      console.log(`[HORIZONTAL][FB] Recopilación ${record.id}: publicada en ${page.name} → ${result.url}`);
+      return updated;
+    } catch (e) {
+      console.error(`[HORIZONTAL][FB] Recopilación ${record.id}: falló la publicación en Facebook:`, e.message);
+      const fresh = await prisma.horizontalCompilation.findUnique({ where: { id: record.id } }).catch(() => null);
+      await prisma.horizontalCompilation.update({
+        where: { id: record.id },
+        data: { tags: { ...tagsObject(fresh || record), facebook: { ...(page && { pageId: page.id, pageName: page.name }), error: e.message } } },
+      }).catch(() => {});
+      throw e;
+    } finally {
+      fbRunning.delete(record.id);
+    }
+  };
+
+  if (background) {
+    run().catch(() => {});
+    return { started: true, id: record.id };
+  }
+  return run();
+}
+
 // ─── Publicación automática: cada reel publicado dispara un video horizontal X minutos después ───
 
 async function autoSettings() {
@@ -878,7 +1057,17 @@ export async function publishDueHorizontal({ notify } = {}) {
       post: reel,
       title: 'Video horizontal: no se pudo publicar',
       detail: `La recopilación automática (${spacingText(cfg.spacingMin)} tras el reel) falló.\n\nError: ${e.message}\n\nPuedes publicarla a mano desde "Videos Horizontales".`,
-    });
+    }).catch(() => {});
+  }
+  // El mismo video sale también en la Página de Facebook en turno (aunque YouTube haya fallado)
+  try {
+    if (record?.videoPath && metaConfigured()) await publishToFacebook(record.id);
+  } catch (e) {
+    await notify?.({
+      post: reel,
+      title: 'Video horizontal: no se pudo publicar en Facebook',
+      detail: `La recopilación se generó pero Facebook falló.\n\nError: ${e.message}\n\nPuedes publicarla a mano con "Publicar en Facebook" en "Videos Horizontales".`,
+    }).catch(() => {});
   } finally {
     autoRunning = false;
   }
@@ -889,6 +1078,8 @@ export default {
   publishDueHorizontal,
   nextAutoPublishInfo,
   latestReadyCompilation,
+  publishToFacebook,
+  nextFacebookPage,
   getChannelSchedule,
   getNextLanguage,
   getUpcomingSelection,

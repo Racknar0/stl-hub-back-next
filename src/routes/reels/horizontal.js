@@ -84,20 +84,15 @@ router.post('/publish', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-// 7. Sincronización a Facebook
-router.post('/:id/sync-facebook', requireAuth, requireAdmin, async (req, res) => {
+// 7. Publicación en Facebook (Página en turno): la subida sigue en segundo plano y el panel consulta /status
+router.post('/publish-facebook', requireAuth, requireAdmin, async (req, res) => {
   try {
-    const { id } = req.params;
-    // Marca como sincronizado o llama a la API de Facebook
-    const { PrismaClient } = await import('@prisma/client');
-    const prisma = new PrismaClient();
-    const updated = await prisma.horizontalCompilation.update({
-      where: { id: Number(id) },
-      data: { fbSynced: true }
-    });
-    res.json({ success: true, compilation: updated });
+    const id = Number(req.body?.compilationId);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'Falta la recopilación a publicar' });
+    const result = await horizontalService.publishToFacebook(id, { background: true });
+    res.json({ success: true, ...result });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(400).json({ error: error.message });
   }
 });
 
