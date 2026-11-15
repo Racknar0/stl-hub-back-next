@@ -237,6 +237,10 @@ export async function getHorizontalStatus() {
     }
   };
 
+  const latestCompilation = await prisma.horizontalCompilation.findFirst({
+    orderBy: { id: 'desc' }
+  });
+
   return {
     kpis,
     channels,
@@ -248,7 +252,7 @@ export async function getHorizontalStatus() {
       modelsCount: selection.allSelected.length,
       durationSec: selection.totalDurationSec,
       timestamps: selection.timestamps,
-      videoPreviewUrl: '/demo_horizontal.mp4'
+      videoPath: latestCompilation?.videoPath || null
     }
   };
 }
@@ -280,7 +284,7 @@ export async function getHorizontalModels(filter = 'all') {
       lastUsedAt: p.lastUsedInHorizontal,
       restDays: p.lastUsedInHorizontal ? Math.max(0, Math.floor((Date.now() - new Date(p.lastUsedInHorizontal).getTime()) / (1000 * 60 * 60 * 24))) : 99,
       status: isHero ? 'hero' : isTurn ? 'turn' : 'rest',
-      thumb: '/demo_horizontal_poster.png'
+      thumb: null
     };
   });
 
@@ -307,7 +311,7 @@ export async function getHorizontalHistory() {
     channelHandle: `@${item.channelName || item.channelId}`,
     date: item.publishedAt ? new Date(item.publishedAt).toLocaleDateString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'Pendiente',
     duration: item.durationSec ? `${Math.floor(item.durationSec / 60)}:${String(Math.floor(item.durationSec % 60)).padStart(2, '0')} min` : '2:50 min',
-    thumb: '/demo_horizontal_poster.png',
+    videoPath: item.videoPath,
     youtubeUrl: item.youtubeUrl || (item.youtubeVideoId ? `https://youtube.com/watch?v=${item.youtubeVideoId}` : null),
     fbSynced: item.fbSynced,
     modelsCount: Array.isArray(item.modelIds) ? item.modelIds.length : 20,
