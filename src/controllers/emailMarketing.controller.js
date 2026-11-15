@@ -6,6 +6,8 @@ import svc from '../services/emailMarketing.service.js';
 import brevo from '../services/brevo.service.js';
 import engine from '../services/emailEngine.service.js';
 import reengage from '../services/emailReengage.service.js';
+import sends from '../services/emailSends.service.js';
+import campaigns from '../services/emailCampaigns.service.js';
 
 const prisma = new PrismaClient();
 
@@ -143,6 +145,15 @@ export const listLogs = async (req, res) => {
   }
 };
 
+/** GET /sends — historial de envíos del motor (todos los estados), con filtros y paginación. */
+export const listSends = async (req, res) => {
+  try {
+    return res.json(await sends.listSends(req.query));
+  } catch (e) {
+    return fail(res, e, 'No se pudo leer el historial de envíos');
+  }
+};
+
 /** POST /sync — recalcula las etapas y las guarda. */
 export const syncStages = async (_req, res) => {
   try {
@@ -208,6 +219,7 @@ const engineState = async () => {
       email: l.contact?.user?.email || null,
     })),
     enabled: config.enabled,
+    newsletterEnabled: config.newsletterEnabled,
     start: config.start,
     dailyLimit: config.dailyLimit,
     dailyReserve: config.dailyReserve,
@@ -282,7 +294,100 @@ export const launchReengage = async (req, res) => {
   }
 };
 
+// ---------------------------------------------------------------- Campañas manuales
+
+const sendResult = (res, out, okStatus = 200) =>
+  out.error ? res.status(out.status || 400).json({ error: out.error }) : res.status(okStatus).json(out);
+
+/** GET /campaigns — lista con resultados. */
+export const listCampaigns = async (_req, res) => {
+  try {
+    return res.json({ items: await campaigns.listCampaigns() });
+  } catch (e) {
+    return fail(res, e, 'No se pudieron leer las campañas');
+  }
+};
+
+/** GET /campaigns/audience?audience=&plan= — a cuántos llegaría. */
+export const previewCampaignAudience = async (req, res) => {
+  try {
+    const audience = String(req.query.audience || 'ACTIVE');
+    const plan = String(req.query.plan || 'all');
+    if (!campaigns.AUDIENCES.includes(audience) || !campaigns.PLANS.includes(plan)) {
+      return res.status(400).json({ error: 'Audiencia o plan no válidos' });
+    }
+    return res.json({ count: await campaigns.countRecipients({ audience, plan }) });
+  } catch (e) {
+    return fail(res, e, 'No se pudo calcular la audiencia');
+  }
+};
+
+/** POST /campaigns — crea un borrador. */
+export const createCampaign = async (req, res) => {
+  try {
+    return sendResult(res, await campaigns.createCampaign(req.body || {}), 201);
+  } catch (e) {
+    return fail(res, e, 'No se pudo crear la campaña');
+  }
+};
+
+/** PUT /campaigns/:id — edita un borrador. */
+export const updateCampaign = async (req, res) => {
+  try {
+    return sendResult(res, await campaigns.updateCampaign(req.params.id, req.body || {}));
+  } catch (e) {
+    return fail(res, e, 'No se pudo guardar la campaña');
+  }
+};
+
+/** DELETE /campaigns/:id — borra un borrador o una cancelada. */
+export const deleteCampaign = async (req, res) => {
+  try {
+    return sendResult(res, await campaigns.deleteCampaign(req.params.id));
+  } catch (e) {
+    return fail(res, e, 'No se pudo borrar la campaña');
+  }
+};
+
+/** POST /campaigns/:id/launch — lanza ahora, o programa si trae { scheduledAt } futura. */
+export const launchCampaign = async (req, res) => {
+  try {
+    const cfg = await engine.loadConfig();
+    return sendResult(res, await campaigns.launchCampaign(req.params.id, { cfg, scheduledAt: req.body?.scheduledAt }));
+  } catch (e) {
+    return fail(res, e, 'No se pudo lanzar la campaña');
+  }
+};
+
+/** POST /campaigns/:id/cancel — descarta lo que sigue en cola. */
+export const cancelCampaign = async (req, res) => {
+  try {
+    return sendResult(res, await campaigns.cancelCampaign(req.params.id));
+  } catch (e) {
+    return fail(res, e, 'No se pudo cancelar la campaña');
+  }
+};
+
+/** POST /campaigns/:id/test — manda la plantilla al correo del admin. */
+export const testCampaign = async (req, res) => {
+  try {
+    const campaign = await campaigns.getCampaign(req.params.id);
+    if (!campaign) return res.status(404).json({ error: 'Campaña no encontrada' });
+    return sendResult(res, await engine.sendCampaignTest({ templateId: campaign.templateId, userId: req.user.id }));
+  } catch (e) {
+    return fail(res, e, 'No se pudo enviar la prueba');
+  }
+};
+
 export default {
+  listCampaigns,
+  previewCampaignAudience,
+  createCampaign,
+  updateCampaign,
+  deleteCampaign,
+  launchCampaign,
+  cancelCampaign,
+  testCampaign,
   getReengage,
   launchReengage,
   sendEngineTest,
