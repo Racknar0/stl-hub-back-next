@@ -1,4 +1,4 @@
-import { resolveShortLink, listShortLinks } from '../services/shortLinks.service.js';
+import { resolveShortLink, listShortLinks, createShortLink } from '../services/shortLinks.service.js';
 
 /**
  * GET /api/s/:code (público). Lo llama la ruta /v/<code> del front para redirigir.
@@ -29,4 +29,27 @@ export async function listShortLinksController(req, res) {
   }
 }
 
-export default { resolveShortLinkController, listShortLinksController };
+/**
+ * POST /api/admin/short-links (admin): crea (o reutiliza) enlaces cortos a mano, p. ej. para TikTok.
+ * Body: { links: [{ targetUrl, source, label? }] } con destinos solo de stlgratis.com (máx. 30).
+ */
+export async function createShortLinksController(req, res) {
+  try {
+    const links = Array.isArray(req.body?.links) ? req.body.links.slice(0, 30) : [];
+    if (!links.length) return res.status(400).json({ error: 'Falta la lista de enlaces' });
+    const out = [];
+    for (const l of links) {
+      const targetUrl = String(l?.targetUrl || '').trim();
+      const source = String(l?.source || '').trim();
+      if (!/^https:\/\/(www\.)?stlgratis\.com\//.test(targetUrl)) return res.status(400).json({ error: `Destino no permitido: ${targetUrl.slice(0, 80)}` });
+      if (!/^[a-z0-9_]{2,40}$/.test(source)) return res.status(400).json({ error: 'Origen no válido (solo minúsculas, números y _)' });
+      out.push({ targetUrl, url: await createShortLink({ targetUrl, source, label: l.label ? String(l.label) : null, refType: 'manual' }) });
+    }
+    return res.json({ links: out });
+  } catch (e) {
+    console.error('[SHORT] Error creando enlaces:', e.message);
+    return res.status(500).json({ error: 'No se pudieron crear los enlaces cortos' });
+  }
+}
+
+export default { resolveShortLinkController, listShortLinksController, createShortLinksController };
