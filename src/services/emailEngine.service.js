@@ -13,6 +13,7 @@ import crypto from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 import brevo from './brevo.service.js';
 import newsletter, { NEWSLETTER_STEP, NEWSLETTER_MIN_MODELS } from './emailNewsletter.service.js';
+import campaignsSvc from './emailCampaigns.service.js';
 import { scheduleStep, zonedParts, clampToSendWindow, timezoneForCountry } from '../utils/emailSchedule.js';
 
 const prisma = new PrismaClient();
@@ -504,7 +505,7 @@ export async function sendDue(now = new Date()) {
             : {}),
           ...(models ? { MODELS: models } : {}),
         },
-        tags: [tagOf(log.kind), log.kind],
+        tags: String(log.dedupeKey).startsWith('CAMPAIGN:') ? ['campaign', log.dedupeKey.split(':')[1]] : [tagOf(log.kind), log.kind],
         headers: {
           'List-Unsubscribe': `<${unsubscribeUrl}>`,
           'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
@@ -605,6 +606,32 @@ export async function sendTestEmail({ kind, userId }) {
   return { ok: true, to: user.email, messageId: res?.messageId || null };
 }
 
+/** Prueba de una campaña manual: la plantilla elegida llega al correo del admin que la pide. */
+export async function sendCampaignTest({ templateId, userId }) {
+  if (!Number.isInteger(templateId) || templateId < 1) return { error: 'Plantilla no válida' };
+  if (!brevo.isConfigured()) return { error: 'BREVO_API_KEY no configurada' };
+  if (!process.env.EMAIL_UNSUBSCRIBE_SECRET) return { error: 'EMAIL_UNSUBSCRIBE_SECRET no configurada' };
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, email: true, language: true },
+  });
+  if (!user) return { error: 'Usuario no encontrado' };
+
+  const unsubscribeUrl = buildUnsubscribeUrl(user.id, getConfig().publicUrl);
+  const res = await brevo.sendTemplate({
+    templateId,
+    to: user.email,
+    params: { LANGUAGE: user.language || 'es', UNSUBSCRIBE_URL: unsubscribeUrl },
+    tags: ['campaign-test'],
+    headers: {
+      'List-Unsubscribe': `<${unsubscribeUrl}>`,
+      'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+    },
+  });
+  return { ok: true, to: user.email, messageId: res?.messageId || null };
+}
+
 // ---------------------------------------------------------------- Estado y ciclo
 
 /** Resumen de la cola para el panel. */
@@ -638,9 +665,12 @@ export async function tick() {
   try {
     const plan = await planFunnel();
     const premium = await planPremiumNotices();
-    const news = await newsletter.planNewsletter(await loadConfig());
+    const cfg = await loadConfig();
+    const news = await newsletter.planNewsletter(cfg);
+    // Las campañas programadas se lanzan solo con el motor encendido.
+    const campaigns = cfg.enabled ? await campaignsSvc.launchDue(cfg) : { launched: 0 };
     const send = await sendDue();
-    return { plan, premium, news, send };
+    return { plan, premium, news, campaigns, send };
   } finally {
     running = false;
   }
@@ -693,6 +723,7 @@ export default {
   planFunnel,
   sendDue,
   sendTestEmail,
+  sendCampaignTest,
   getQueueSummary,
   tick,
   startEmailEngine,

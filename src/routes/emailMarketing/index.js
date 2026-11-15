@@ -16,6 +16,14 @@ import {
   syncStages,
   optOutContact,
   optInContact,
+  listCampaigns,
+  previewCampaignAudience,
+  createCampaign,
+  updateCampaign,
+  deleteCampaign,
+  launchCampaign,
+  cancelCampaign,
+  testCampaign,
 } from '../../controllers/emailMarketing.controller.js';
 
 const router = Router();
@@ -33,6 +41,15 @@ router.put('/engine', updateEngine);
 router.post('/engine/test', sendEngineTest);
 router.get('/reengage', getReengage);
 router.post('/reengage/launch', launchReengage);
+
+router.get('/campaigns', listCampaigns);
+router.get('/campaigns/audience', previewCampaignAudience);
+router.post('/campaigns', createCampaign);
+router.put('/campaigns/:id', updateCampaign);
+router.delete('/campaigns/:id', deleteCampaign);
+router.post('/campaigns/:id/launch', launchCampaign);
+router.post('/campaigns/:id/cancel', cancelCampaign);
+router.post('/campaigns/:id/test', testCampaign);
 
 router.get('/audiences', getAudiences);
 router.get('/audiences/:stage', listAudience);
