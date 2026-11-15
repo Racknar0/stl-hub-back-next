@@ -188,8 +188,17 @@ export async function uploadShort({ channelId, videoAbsPath, title, description,
 export async function uploadHorizontalVideo({ channelId, videoAbsPath, title, description, tags = [], privacyStatus = 'public', publishAt = null }) {
   if (!videoAbsPath || !fs.existsSync(videoAbsPath)) throw new Error('El archivo de video no está en el servidor');
   const accounts = await loadAccounts();
-  const account = channelId ? accounts.find(a => a.id === channelId || a.title === channelId) : accounts[0];
-  if (!account) throw new Error(channelId ? 'Ese canal de YouTube ya no está conectado' : 'YouTube no está conectado: pulsa "Conectar YouTube"');
+  // El video horizontal guarda el canal por nombre (p. ej. "ozaru_art"): se compara con id, título y handle sin
+  // distinguir mayúsculas ni "@"
+  const norm = (v) => String(v || '').trim().replace(/^@/, '').toLowerCase();
+  const account = channelId
+    ? accounts.find(a => a.id === channelId) || accounts.find(a => [a.title, a.handle].some(v => v && norm(v) === norm(channelId)))
+    : accounts[0];
+  if (!account) {
+    throw new Error(channelId
+      ? `No hay ningún canal de YouTube conectado llamado "${channelId}". Conectados: ${accounts.map(a => a.title || a.handle || a.id).join(', ') || 'ninguno'}`
+      : 'YouTube no está conectado: pulsa "Conectar YouTube"');
+  }
   const token = await accessToken(account);
   const file = await fs.promises.readFile(videoAbsPath);
   const safeTitle = String(title || '').replace(/[<>]/g, '').trim().slice(0, 100);

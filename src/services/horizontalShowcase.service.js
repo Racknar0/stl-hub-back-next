@@ -11,10 +11,13 @@ const prisma = new PrismaClient();
 const ROTATION_ORDER = ['Ozaru_art', 'stlgratis', 'stl-gratis'];
 const SETTINGS = {
   LAST_CHANNEL: 'HORIZONTAL_LAST_CHANNEL',
+  LAST_LANGUAGE: 'HORIZONTAL_LAST_LANGUAGE',
   LAST_PUBLISHED_AT: 'HORIZONTAL_LAST_PUBLISHED_AT',
-  AUTO_ENABLED: 'HORIZONTAL_AUTO_ENABLED',
-  SPACING_MINUTES: 'HORIZONTAL_SPACING_MINUTES' // default 150 (2h 30m)
+  AUTO_ENABLED: 'HORIZONTAL_AUTO_ENABLED', // "false" apaga la publicación automática
+  SPACING_MINUTES: 'HORIZONTAL_SPACING_MINUTES', // minutos tras el reel (por defecto 120)
+  LAST_AUTO_REEL: 'HORIZONTAL_LAST_AUTO_REEL' // id del último reel que ya disparó un video horizontal
 };
+const DEFAULT_SPACING_MINUTES = 120;
 
 const HORIZONTAL_DIR = path.resolve('uploads', 'horizontal');
 const COMPLETED_DIR = path.resolve(HORIZONTAL_DIR, 'completed');
@@ -59,14 +62,27 @@ export async function getChannelSchedule() {
   const nextIdx = (tomorrowIdx + 1) % ROTATION_ORDER.length;
 
   return [
-    { id: ROTATION_ORDER[todayIdx].toLowerCase(), name: ROTATION_ORDER[todayIdx], handle: `@${ROTATION_ORDER[todayIdx]}`, status: 'today', turnLabel: 'Turno de Hoy', nextPublish: 'Hoy · 17:30 (+2h 30m)' },
-    { id: ROTATION_ORDER[tomorrowIdx].toLowerCase(), name: ROTATION_ORDER[tomorrowIdx], handle: `@${ROTATION_ORDER[tomorrowIdx]}`, status: 'tomorrow', turnLabel: 'Mañana', nextPublish: 'Mañana · 17:30' },
-    { id: ROTATION_ORDER[nextIdx].toLowerCase(), name: ROTATION_ORDER[nextIdx], handle: `@${ROTATION_ORDER[nextIdx]}`, status: 'next', turnLabel: 'En 2 días', nextPublish: 'En 2 días · 17:30' },
+    { id: ROTATION_ORDER[todayIdx].toLowerCase(), name: ROTATION_ORDER[todayIdx], handle: `@${ROTATION_ORDER[todayIdx]}`, status: 'today', turnLabel: 'Turno de Hoy', nextPublish: 'Próximo video (2 h tras el reel)' },
+    { id: ROTATION_ORDER[tomorrowIdx].toLowerCase(), name: ROTATION_ORDER[tomorrowIdx], handle: `@${ROTATION_ORDER[tomorrowIdx]}`, status: 'tomorrow', turnLabel: 'Mañana', nextPublish: 'El siguiente' },
+    { id: ROTATION_ORDER[nextIdx].toLowerCase(), name: ROTATION_ORDER[nextIdx], handle: `@${ROTATION_ORDER[nextIdx]}`, status: 'next', turnLabel: 'En 2 días', nextPublish: 'Dentro de dos' },
   ];
 }
 
+// Detecta el idioma en turno (alternando automáticamente entre Español 'es' e Inglés 'en')
+export async function getNextLanguage() {
+  const setting = await prisma.systemSetting.findUnique({ where: { key: SETTINGS.LAST_LANGUAGE } });
+  if (setting?.value === 'en') return 'es';
+  if (setting?.value === 'es') return 'en';
+
+  const lastComp = await prisma.horizontalCompilation.findFirst({
+    orderBy: { id: 'desc' }
+  });
+  const lastLang = (lastComp?.tags && typeof lastComp.tags === 'object' && lastComp.tags.language) || 'es';
+  return lastLang === 'en' ? 'es' : 'en';
+}
+
 // Obtiene los 20 modelos para la próxima recopilación (1 Hero + 19 en descanso)
-export async function getUpcomingSelection(heroId = null) {
+export async function getUpcomingSelection(heroId = null, language = 'es') {
   let hero = null;
   if (heroId) {
     hero = await prisma.reelPost.findUnique({ where: { id: Number(heroId) } });
@@ -167,6 +183,21 @@ export async function getUpcomingSelection(heroId = null) {
   // y los 19 restantes van barajados sin repetir personajes
   const allSelected = hero ? [hero, ...restingModels] : restingModels;
 
+  // Si el idioma es inglés, buscar títulos en inglés si están disponibles en la tabla asset
+  let assetMap = new Map();
+  const assetIds = allSelected.map(m => m.assetId).filter(Boolean);
+  if (language === 'en' && assetIds.length > 0) {
+    try {
+      const assets = await prisma.asset.findMany({
+        where: { id: { in: assetIds } },
+        select: { id: true, titleEn: true, title: true }
+      });
+      for (const a of assets) {
+        assetMap.set(a.id, a.titleEn || a.title);
+      }
+    } catch {}
+  }
+
   // Construir los timestamps (asegurando >= 10s por modelo para compatibilidad de capítulos YouTube)
   let currentSec = 0;
   const timestamps = allSelected.map((m, idx) => {
@@ -176,12 +207,16 @@ export async function getUpcomingSelection(heroId = null) {
     const timeStr = `${mins}:${secs}`;
     const rawDur = Math.max(Math.round(m.durationSec || 10), 10); // Mínimo 10s para capítulos oficiales
     currentSec += rawDur;
+    const rawTitle = (language === 'en' && m.assetId && assetMap.has(m.assetId))
+      ? assetMap.get(m.assetId)
+      : (m.assetTitle || m.title || `Modelo ${m.id}`);
+
     return {
       index: idx + 1,
       time: timeStr,
       id: m.id,
       assetId: m.assetId,
-      title: (m.assetTitle || m.title || `Modelo ${m.id}`).replace(/^STL\s*[-–:]\s*/i, ''),
+      title: rawTitle.replace(/^STL\s*[-–:]\s*/i, ''),
       link: `https://stlgratis.com/stl/${m.assetId || m.id}`,
       isHero: idx === 0
     };
@@ -191,7 +226,25 @@ export async function getUpcomingSelection(heroId = null) {
 }
 
 // Redacta la descripción completa optimizada para YouTube (base estándar con capítulos intactos)
-export function buildDescription(timestamps) {
+export function buildDescription(timestamps, language = 'es') {
+  if (language === 'en') {
+    const intro = `🔥 Discover the ultimate TOP 20 3D printable models and premium STL files ready for resin and filament 3D printing!
+
+From iconic action figures and anime characters to ultra-detailed collectibles. All files are fully optimized and available for direct download on our official platform.
+
+🔗 DOWNLOAD ALL MODELS AT: https://stlgratis.com/
+
+⏱️ CHAPTERS & DIRECT LINKS TO EACH MODEL:`;
+
+    const chapters = timestamps.map(t => `${t.time} - #${t.index} ${t.title} (${t.link})`).join('\n');
+
+    const footer = `⭐ Subscribe to the channel to never miss daily 3D printing showcases and let us know in the comments which figure was your favorite!
+
+#STL #3DPrinting #3DPrint #AnimeSTL #MarvelSTL #ActionFigures #STLGratis #3DFigure #Collectible3D #ResinPrinting #FDMSlicer`;
+
+    return `${intro}\n${chapters}\n\n${footer}`;
+  }
+
   const intro = `🔥 ¡Descubre la recopilación definitiva de los 20 mejores modelos 3D y archivos STL listos para imprimir en resina y filamento!
 
 Desde figuras de acción icónicas y anime hasta los coleccionables más detallados. Todos los archivos están optimizados y listos para descarga directa en nuestra plataforma oficial.
@@ -209,14 +262,15 @@ Desde figuras de acción icónicas y anime hasta los coleccionables más detalla
   return `${intro}\n${chapters}\n\n${footer}`;
 }
 
-// Genera metadata optimizada con Inteligencia Artificial (Gemini) para YouTube y Pinterest
-export async function generateAiMetadata({ heroId = null, channelName = null, language = 'es' } = {}) {
-  const selection = await getUpcomingSelection(heroId);
+// Genera metadata optimizada con Inteligencia Artificial (Gemini) para YouTube respetando el idioma y los capítulos
+export async function generateAiMetadata({ heroId = null, channelName = null, language = null } = {}) {
+  const currentLang = language || await getNextLanguage();
+  const selection = await getUpcomingSelection(heroId, currentLang);
   const hero = selection.hero;
   const models = selection.allSelected;
 
   const heroName = (hero?.assetTitle || hero?.title || 'Figura Destacada').replace(/^STL\s*[-–:]\s*/i, '');
-  const modelNames = models.map(m => (m.assetTitle || m.title || `Modelo ${m.id}`).replace(/^STL\s*[-–:]\s*/i, ''));
+  const modelNames = selection.timestamps.map(t => t.title);
   const sampleNotable = modelNames.slice(0, 10).join(', ');
 
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
@@ -228,7 +282,26 @@ export async function generateAiMetadata({ heroId = null, channelName = null, la
       const ai = new GoogleGenAI({ apiKey });
       const model = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
 
-      const prompt = `You are a high-level YouTube & Pinterest SEO expert and copywriter for "STLFREE / STL GRATIS" (stlgratis.com), a premier platform for 3D printing STL files (figures, anime, comics, gaming, resin & filament).
+      const prompt = currentLang === 'en' ? `You are a high-level YouTube SEO expert and copywriter for "STLFREE / STL GRATIS" (stlgratis.com), a premier global platform for 3D printing STL files (figures, anime, comics, gaming, resin & filament).
+
+We are creating the metadata for a TOP 20 3D Models compilation video (Horizontal 16:9 Showcase, ~3 minutes).
+- Opening / Hero Model (#1): "${heroName}"
+- Other notable models in this showcase: ${sampleNotable}
+- Target language: ENGLISH. Everything must be written in natural, fluent, high-engagement English.
+
+Generate the following in JSON:
+1. "title": A catchy, high-CTR YouTube title in English (MAX 95 chars). Start with an emoji (🔥, ⚡, ⚔️). It MUST highlight "${heroName}" and mention other top characters or anime/gaming figures. End with "| Premium STL Files" or similar.
+2. "intro": 2-3 engaging, well-written paragraphs in English introducing today's showcase. Emphasize the detail of the 3D sculpts, printing in resin (SLA) and filament (FDM), painting, and collecting. Mention that all files are ready for direct download at https://stlgratis.com/.
+3. "outro": 1-2 paragraphs closing the video. Ask viewers which figure was their favorite, remind them to subscribe for daily releases and like the video.
+4. "tags": An array of 15-20 specific YouTube SEO tags in English (e.g. "${heroName.split(' ')[0]}", franchises, "3DPrinting", "STLFiles", "STLGratis", "ResinPrint", "ActionFigures", "AnimeSTL").
+
+Respond ONLY with valid JSON in this structure:
+{
+  "title": "...",
+  "intro": "...",
+  "outro": "...",
+  "tags": ["..."]
+}` : `You are a high-level YouTube SEO expert and copywriter for "STLFREE / STL GRATIS" (stlgratis.com), a premier platform for 3D printing STL files (figures, anime, comics, gaming, resin & filament).
 
 We are creating the metadata for a TOP 20 3D Models compilation video (Horizontal 16:9 Showcase, ~3 minutes).
 - Opening / Hero Model (#1): "${heroName}"
@@ -236,21 +309,17 @@ We are creating the metadata for a TOP 20 3D Models compilation video (Horizonta
 - Target language: Spanish.
 
 Generate the following in JSON:
-1. "title": A catchy, high-CTR YouTube title (MAX 95 chars). Start with an emoji (🔥, ⚡, ⚔️). It MUST highlight "${heroName}" and mention other top characters or anime/action figures. End with "| Archivos STL Premium" or similar.
+1. "title": A catchy, high-CTR YouTube title in Spanish (MAX 95 chars). Start with an emoji (🔥, ⚡, ⚔️). It MUST highlight "${heroName}" and mention other top characters or anime/action figures. End with "| Archivos STL Premium" or similar.
 2. "intro": 2-3 engaging, well-written paragraphs (in Spanish) introducing today's showcase. Emphasize the detail of the 3D sculpts, printing in resin (SLA) and filament (FDM), painting, and collecting. Mention that all files are ready for direct download at https://stlgratis.com/.
 3. "outro": 1-2 paragraphs closing the video. Ask viewers which figure was their favorite, remind them to subscribe for daily releases and like the video.
 4. "tags": An array of 15-20 specific YouTube SEO tags. Include the main character names, franchises present, and 3D printing terms ("Impresion3D", "Modelos3D", "STLGratis", "Resina3D", "ActionFigures", "AnimeSTL").
-5. "pinterestTitle": A Pinterest-optimized pin title (max 95 chars) highlighting "${heroName} & Top 20 3D Print Figures".
-6. "pinterestDescription": A compelling 2-line Pinterest pin description with emojis and hashtags highlighting 3D printing STL files with link to stlgratis.com.
 
 Respond ONLY with valid JSON in this structure:
 {
   "title": "...",
   "intro": "...",
   "outro": "...",
-  "tags": ["..."],
-  "pinterestTitle": "...",
-  "pinterestDescription": "..."
+  "tags": ["..."]
 }`;
 
       const resp = await ai.models.generateContent({
@@ -272,31 +341,41 @@ Respond ONLY with valid JSON in this structure:
   }
 
   // Fallbacks si falla la IA
-  const finalTitle = aiResult?.title || `🔥 TOP 20 Mejores Modelos 3D de Acción & Anime: ${heroName} y Más | Archivos STL Premium`;
-  const intro = aiResult?.intro || `¡Eleva tu taller de impresión al siguiente nivel! Te presentamos la recopilación definitiva con los 20 mejores modelos 3D y archivos STL listos para imprimir en resina y filamento.\n\nDesde figuras icónicas y anime hasta los coleccionables más detallados de la comunidad. Todos los archivos están optimizados para un acabado profesional y disponibles para descarga directa en nuestra plataforma oficial.\n\n🔗 DESCARGA TODOS LOS MODELOS EN: https://stlgratis.com/`;
-  const outro = aiResult?.outro || `⭐ ¿Cuál de estas figuras será tu próximo proyecto de impresión y pintura? Déjanos tu favorita en los comentarios y suscríbete al canal para no perderte las recopilaciones diarias con nuevos lanzamientos exclusivos.`;
+  const finalTitle = aiResult?.title || (currentLang === 'en'
+    ? `🔥 TOP 20 Best 3D Printable Models: ${heroName} & More | Premium STL Files`
+    : `🔥 TOP 20 Mejores Modelos 3D de Acción & Anime: ${heroName} y Más | Archivos STL Premium`);
+
+  const intro = aiResult?.intro || (currentLang === 'en'
+    ? `Take your 3D printing workshop to the next level! We present the ultimate compilation of the top 20 3D models and STL files ready to print in resin and filament.\n\nFrom iconic figures and anime statues to ultra-detailed collector pieces. All files are fully optimized for professional results and available for direct download on our official platform.\n\n🔗 DOWNLOAD ALL MODELS AT: https://stlgratis.com/`
+    : `¡Eleva tu taller de impresión al siguiente nivel! Te presentamos la recopilación definitiva con los 20 mejores modelos 3D y archivos STL listos para imprimir en resina y filamento.\n\nDesde figuras icónicas y anime hasta los coleccionables más detallados de la comunidad. Todos los archivos están optimizados para un acabado profesional y disponibles para descarga directa en nuestra plataforma oficial.\n\n🔗 DESCARGA TODOS LOS MODELOS EN: https://stlgratis.com/`);
+
+  const outro = aiResult?.outro || (currentLang === 'en'
+    ? `⭐ Which of these figures is going to be your next 3D printing and painting project? Let us know your favorite in the comments and subscribe to never miss daily releases!`
+    : `⭐ ¿Cuál de estas figuras será tu próximo proyecto de impresión y pintura? Déjanos tu favorita en los comentarios y suscríbete al canal para no perderte las recopilaciones diarias con nuevos lanzamientos exclusivos.`);
+
   const tags = Array.isArray(aiResult?.tags) && aiResult.tags.length > 0 
     ? aiResult.tags 
-    : ['STL', '3D Printing', 'Modelos 3D', 'Impresión 3D', 'Anime STL', 'Marvel STL', 'Dragon Ball STL', 'Figuras Coleccionables', 'Archivos STL Gratis', 'Resina 3D', 'Filamento PLA', 'STLGratis'];
+    : (currentLang === 'en'
+      ? ['STL', '3D Printing', '3D Print', 'Anime STL', 'Action Figures', 'STLGratis', '3D Models', 'Resin Print', 'FDM 3D', '3D File']
+      : ['STL', '3D Printing', 'Modelos 3D', 'Impresión 3D', 'Anime STL', 'Marvel STL', 'Dragon Ball STL', 'Figuras Coleccionables', 'Archivos STL Gratis', 'Resina 3D', 'Filamento PLA', 'STLGratis']);
 
   // RESPETAR EL TEMA DE LOS CAPITULOS AL 100%
-  const chaptersHeader = '⏱️ CAPÍTULOS Y ENLACES DIRECTOS A CADA MODELO:';
+  const chaptersHeader = currentLang === 'en' 
+    ? '⏱️ CHAPTERS & DIRECT LINKS TO EACH MODEL:' 
+    : '⏱️ CAPÍTULOS Y ENLACES DIRECTOS A CADA MODELO:';
   const chaptersBody = selection.timestamps.map(t => `${t.time} - #${t.index} ${t.title} (${t.link})`).join('\n');
   const hashtagsLine = tags.slice(0, 10).map(t => `#${String(t).replace(/[#\s]+/g, '')}`).join(' ');
 
   const finalDescription = `${intro.trim()}\n\n${chaptersHeader}\n${chaptersBody}\n\n${outro.trim()}\n\n${hashtagsLine}`;
 
   return {
+    language: currentLang,
     title: finalTitle,
     description: finalDescription,
     intro,
     outro,
     tags,
-    timestamps: selection.timestamps,
-    pinterest: {
-      title: aiResult?.pinterestTitle || `Top 20 Figuras 3D: ${heroName} & Modelos STL Premium | STLGratis`,
-      description: aiResult?.pinterestDescription || `🔥 Descubre los mejores 20 modelos 3D y archivos STL para imprimir en resina y filamento. ¡Descarga directa en stlgratis.com! #3DPrinting #STL #STLGratis #Impresion3D`
-    }
+    timestamps: selection.timestamps
   };
 }
 
@@ -305,21 +384,28 @@ export async function getHorizontalStatus() {
   ensureDirs();
   const channels = await getChannelSchedule();
   const todayChannel = channels.find(c => c.status === 'today')?.name || ROTATION_ORDER[0];
+  const currentLang = await getNextLanguage();
 
   const totalModels = await prisma.reelPost.count({ where: { approved: true } });
-  const selection = await getUpcomingSelection();
+  const selection = await getUpcomingSelection(null, currentLang);
 
   const heroTitle = selection.hero?.assetTitle || selection.hero?.title || '';
   const cleanHeroTitle = heroTitle ? heroTitle.replace(/^STL\s*[-–:]\s*/i, '') : '';
-  const title = cleanHeroTitle 
-    ? `🔥 TOP 20 Mejores Modelos 3D de Acción & Anime: ${cleanHeroTitle} y Más | Archivos STL Premium`
-    : (totalModels > 0 ? '🔥 TOP 20 Mejores Modelos 3D de Acción & Anime | Archivos STL Premium' : '');
-  const description = selection.allSelected.length ? buildDescription(selection.timestamps) : '';
+  const title = currentLang === 'en'
+    ? (cleanHeroTitle 
+        ? `🔥 TOP 20 Best 3D Printable Models: ${cleanHeroTitle} & More | Premium STL Files`
+        : '🔥 TOP 20 Best 3D Printable Models | Premium STL Files')
+    : (cleanHeroTitle 
+        ? `🔥 TOP 20 Mejores Modelos 3D de Acción & Anime: ${cleanHeroTitle} y Más | Archivos STL Premium`
+        : '🔥 TOP 20 Mejores Modelos 3D de Acción & Anime | Archivos STL Premium');
+
+  const description = selection.allSelected.length ? buildDescription(selection.timestamps, currentLang) : '';
 
   // KPIs
   const kpis = {
-    nextPublish: totalModels > 0 ? 'Hoy 17:30 (+2h 30m tras Short)' : 'Sin reels programados',
+    nextPublish: totalModels > 0 ? await nextAutoPublishLabel() : 'Sin reels programados',
     channelToday: todayChannel,
+    languageToday: currentLang,
     googleQuota: { used: 6650, total: 10000, safe: true },
     catalog: {
       total: totalModels,
@@ -332,6 +418,17 @@ export async function getHorizontalStatus() {
     orderBy: { id: 'desc' }
   });
 
+  const tags = currentLang === 'en' ? [
+    'STL', '3D Printing', '3D Print', 'Anime STL', 'Action Figures', 
+    cleanHeroTitle.split(' ')[0] || 'Anime', 'STLGratis', '3D Models', 
+    'Resin Print', 'FDM 3D', '3D File'
+  ].filter(Boolean) : [
+    'STL', '3D Printing', 'Modelos 3D', 'Impresión 3D', 
+    cleanHeroTitle.split(' ')[0] || 'Anime', 'Anime STL', 
+    'Marvel STL', 'Dragon Ball STL', 'Figuras Coleccionables', 
+    'Archivos STL Gratis', 'Resina 3D', 'Filamento PLA', 'STLGratis'
+  ].filter(Boolean);
+
   return {
     kpis,
     channels,
@@ -339,28 +436,22 @@ export async function getHorizontalStatus() {
       title,
       description,
       channel: todayChannel,
+      language: currentLang,
+      languageLabel: currentLang === 'en' ? 'Inglés (🇬🇧 EN)' : 'Español (🇪🇸 ES)',
       hero: selection.hero,
       modelsCount: selection.allSelected.length,
       durationSec: selection.totalDurationSec,
       timestamps: selection.timestamps,
       videoPath: latestCompilation?.videoPath || null,
-      tags: [
-        'STL', '3D Printing', 'Modelos 3D', 'Impresión 3D', 
-        cleanHeroTitle.split(' ')[0] || 'Anime', 'Anime STL', 
-        'Marvel STL', 'Dragon Ball STL', 'Figuras Coleccionables', 
-        'Archivos STL Gratis', 'Resina 3D', 'Filamento PLA', 'STLGratis'
-      ].filter(Boolean),
-      pinterest: {
-        title: cleanHeroTitle ? `Top 20 Figuras 3D: ${cleanHeroTitle} & Modelos STL` : 'Top 20 Figuras 3D STL',
-        description: `🔥 Descubre los mejores 20 modelos 3D y archivos STL para imprimir en resina y filamento. ¡Descárgalos en https://stlgratis.com/! #3DPrinting #STL #STLGratis #Impresion3D`
-      }
+      tags
     }
   };
 }
 
 // Obtener lista completa de modelos con su estado de rotación
 export async function getHorizontalModels(filter = 'all') {
-  const selection = await getUpcomingSelection();
+  const currentLang = await getNextLanguage();
+  const selection = await getUpcomingSelection(null, currentLang);
   const turnIds = new Set(selection.allSelected.map(m => m.id));
 
   const allPosts = await prisma.reelPost.findMany({
@@ -415,8 +506,7 @@ export async function getHorizontalHistory() {
     videoPath: item.videoPath,
     youtubeUrl: item.youtubeUrl || (item.youtubeVideoId ? `https://youtube.com/watch?v=${item.youtubeVideoId}` : null),
     fbSynced: item.fbSynced,
-    pinterestSynced: Boolean(item.tags && typeof item.tags === 'object' && item.tags.pinterest?.synced),
-    pinterestUrl: (item.tags && typeof item.tags === 'object' && item.tags.pinterest?.pinUrl) || null,
+    language: (item.tags && typeof item.tags === 'object' && item.tags.language) || 'es',
     tags: Array.isArray(item.tags) ? item.tags : (item.tags?.tags || []),
     modelsCount: Array.isArray(item.modelIds) ? item.modelIds.length : 20,
     fileSize: item.fileSizeB ? `${(item.fileSizeB / (1024 * 1024)).toFixed(1)} MB` : '42.0 MB'
@@ -485,13 +575,17 @@ export async function renderHorizontalVideo(models) {
 }
 
 // Ejecuta la creación y registro de una recopilación
-export async function createCompilation({ heroId = null, channelName = null, title = null, description = null, tags = null, render = false }) {
-  const selection = await getUpcomingSelection(heroId);
+export async function createCompilation({ heroId = null, channelName = null, title = null, description = null, tags = null, language = null, render = false }) {
+  const currentLang = language || await getNextLanguage();
+  const selection = await getUpcomingSelection(heroId, currentLang);
   const channels = await getChannelSchedule();
   const targetChannel = channelName || channels.find(c => c.status === 'today')?.name || ROTATION_ORDER[0];
 
-  const finalTitle = title || `🔥 TOP 20 Mejores Modelos 3D de Acción & Anime: ${(selection.hero?.assetTitle || selection.hero?.title || '').replace(/^STL\s*[-–:]\s*/i, '')} y Más | Archivos STL Premium`;
-  const finalDescription = description || buildDescription(selection.timestamps);
+  const heroName = (selection.hero?.assetTitle || selection.hero?.title || '').replace(/^STL\s*[-–:]\s*/i, '');
+  const finalTitle = title || (currentLang === 'en'
+    ? `🔥 TOP 20 Best 3D Printable Models: ${heroName} & More | Premium STL Files`
+    : `🔥 TOP 20 Mejores Modelos 3D de Acción & Anime: ${heroName} y Más | Archivos STL Premium`);
+  const finalDescription = description || buildDescription(selection.timestamps, currentLang);
 
   let videoData = { relPath: null, sizeB: 0, durationSec: selection.totalDurationSec };
 
@@ -499,12 +593,18 @@ export async function createCompilation({ heroId = null, channelName = null, tit
     videoData = await renderHorizontalVideo(selection.allSelected);
   }
 
+  // Preparamos los tags y guardamos el idioma
+  const tagsObj = {
+    ...(tags && typeof tags === 'object' ? tags : { tags: Array.isArray(tags) ? tags : [] }),
+    language: currentLang
+  };
+
   // Crear registro en la BD
   const record = await prisma.horizontalCompilation.create({
     data: {
       title: finalTitle,
       description: finalDescription,
-      tags: tags ? (typeof tags === 'object' ? tags : { tags }) : null,
+      tags: tagsObj,
       channelId: targetChannel.toLowerCase(),
       channelName: targetChannel,
       heroPostId: selection.hero?.id || null,
@@ -533,6 +633,13 @@ export async function createCompilation({ heroId = null, channelName = null, tit
     update: { value: targetChannel }
   });
 
+  // Guardar último idioma usado para alternar el siguiente (ES <-> EN)
+  await prisma.systemSetting.upsert({
+    where: { key: SETTINGS.LAST_LANGUAGE },
+    create: { key: SETTINGS.LAST_LANGUAGE, value: currentLang, description: 'Último idioma en que se generó un video horizontal (es / en)' },
+    update: { value: currentLang }
+  });
+
   return record;
 }
 
@@ -544,12 +651,6 @@ export async function publishToYouTube(compilationId) {
   let videoAbsPath = null;
   if (record.videoPath) {
     videoAbsPath = path.resolve('uploads', record.videoPath);
-  }
-
-  // Fallback para pruebas si no se renderizó archivo pesado aún
-  if (!videoAbsPath || !fs.existsSync(videoAbsPath)) {
-    const demo = path.resolve('uploads', 'reels', 'demo_single_con_logo.mp4');
-    if (fs.existsSync(demo)) videoAbsPath = demo;
   }
 
   if (!videoAbsPath || !fs.existsSync(videoAbsPath)) {
@@ -582,97 +683,118 @@ export async function publishToYouTube(compilationId) {
   return updated;
 }
 
-// Publica un Pin a Pinterest con el Hero o portada de la recopilación
-export async function publishToPinterest(compilationId) {
-  const record = await prisma.horizontalCompilation.findUnique({ where: { id: Number(compilationId) } });
-  if (!record) throw new Error('Recopilación no encontrada');
+// ─── Publicación automática: cada reel publicado dispara un video horizontal X minutos después ───
 
-  const { default: pinterestPublisher } = await import('./pinterestPublisher.service.js');
-  const { default: pinterestService } = await import('./pinterest.service.js');
-
-  const status = await pinterestService.testConnection();
-  if (!status.connected) {
-    throw new Error('Pinterest no está conectado. Conecta tu cuenta de Pinterest en el panel.');
-  }
-
-  // Buscar el asset del hero o primer modelo
-  let assetId = null;
-  if (record.heroPostId) {
-    const post = await prisma.reelPost.findUnique({ where: { id: record.heroPostId } });
-    assetId = post?.assetId;
-  }
-  if (!assetId && Array.isArray(record.modelIds) && record.modelIds.length > 0) {
-    const post = await prisma.reelPost.findUnique({ where: { id: record.modelIds[0] } });
-    assetId = post?.assetId;
-  }
-
-  let imageUrl = null;
-  let targetLink = record.youtubeUrl || 'https://stlgratis.com/';
-
-  if (assetId) {
-    const asset = await prisma.asset.findUnique({ where: { id: Number(assetId) } });
-    if (asset?.images) {
-      const imgs = Array.isArray(asset.images) ? asset.images : [asset.images];
-      if (imgs.length > 0) {
-        const first = imgs[0];
-        imageUrl = String(first).startsWith('http') ? first : `https://stlgratis.com/uploads/${String(first).replace(/^\/+/, '')}`;
-      }
-    }
-    if (asset) {
-      targetLink = `https://stlgratis.com/stl/${asset.id}`;
-    }
-  }
-
-  if (!imageUrl) {
-    throw new Error('No se encontró una imagen de portada del modelo para publicar en Pinterest');
-  }
-
-  const pinTitle = (record.title || 'TOP 20 Modelos 3D STL').slice(0, 100);
-  const pinDescription = `🔥 Recopilación de los mejores modelos 3D y archivos STL listos para imprimir en resina y filamento. Descárgalos en https://stlgratis.com/ #3DPrinting #STL #STLGratis #Impresion3D`;
-
-  const pinResult = await pinterestPublisher.publishPin(
-    imageUrl,
-    'auto',
-    pinTitle,
-    pinDescription,
-    targetLink,
-    {},
-    assetId
-  );
-
-  const prevTags = (record.tags && typeof record.tags === 'object') ? record.tags : {};
-  const updatedTags = {
-    ...prevTags,
-    pinterest: {
-      synced: true,
-      pinId: pinResult?.id || pinResult?.data?.id || null,
-      pinUrl: pinResult?.id ? `https://pinterest.com/pin/${pinResult.id}` : null,
-      syncedAt: new Date().toISOString()
-    }
-  };
-
-  const updated = await prisma.horizontalCompilation.update({
-    where: { id: record.id },
-    data: { tags: updatedTags }
-  });
-
+async function autoSettings() {
+  const rows = await prisma.systemSetting.findMany({ where: { key: { in: [SETTINGS.AUTO_ENABLED, SETTINGS.SPACING_MINUTES, SETTINGS.LAST_AUTO_REEL] } } });
+  const byKey = Object.fromEntries(rows.map(r => [r.key, r.value]));
+  const spacing = Number(byKey[SETTINGS.SPACING_MINUTES]);
   return {
-    success: true,
-    pinId: updatedTags.pinterest.pinId,
-    pinUrl: updatedTags.pinterest.pinUrl,
-    compilation: updated
+    enabled: String(byKey[SETTINGS.AUTO_ENABLED] ?? 'true').toLowerCase() !== 'false',
+    spacingMin: Number.isFinite(spacing) && spacing > 0 ? spacing : DEFAULT_SPACING_MINUTES,
+    lastReelId: Number(byKey[SETTINGS.LAST_AUTO_REEL]) || 0,
+    hasMarker: byKey[SETTINGS.LAST_AUTO_REEL] != null,
   };
+}
+
+// Solo cuentan los reels publicados en las últimas horas: si el servidor estuvo caído mucho tiempo, ese reel se salta
+const AUTO_WINDOW_MS = 6 * 3600 * 1000;
+
+/** Reel publicado que aún no tiene su video horizontal (el más reciente), o null. */
+async function pendingTriggerReel({ spacingMin, lastReelId }) {
+  return prisma.reelPost.findFirst({
+    where: {
+      id: { gt: lastReelId },
+      status: 'PUBLISHED',
+      publishedAt: { gte: new Date(Date.now() - AUTO_WINDOW_MS - spacingMin * 60000) },
+    },
+    orderBy: { publishedAt: 'desc' },
+  });
+}
+
+const fmtBogota = (date) => new Date(date).toLocaleString('es-CO', {
+  timeZone: 'America/Bogota', weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+});
+const spacingText = (min) => (min % 60 === 0 ? `${min / 60} h` : `${min} min`);
+
+let autoRunning = false;
+
+/** Texto del panel con la hora real del próximo video horizontal. */
+export async function nextAutoPublishLabel() {
+  const cfg = await autoSettings();
+  if (!cfg.enabled) return 'Automático apagado';
+  if (autoRunning) return 'Generando y publicando ahora…';
+  const pending = cfg.hasMarker ? await pendingTriggerReel(cfg) : null;
+  const base = pending
+    ? new Date(pending.publishedAt)
+    : (await prisma.reelPost.findFirst({
+      where: { status: 'PENDING', approved: true, scheduledAt: { gte: new Date() } },
+      orderBy: { scheduledAt: 'asc' },
+    }))?.scheduledAt;
+  if (!base) return 'Sin reels programados';
+  return `${fmtBogota(new Date(base).getTime() + cfg.spacingMin * 60000)} (${spacingText(cfg.spacingMin)} tras el reel)`;
+}
+
+/**
+ * Lo llama el worker de reels cada minuto. Cuando pasan los minutos configurados desde que se publicó un reel,
+ * genera la recopilación (con ese reel de protagonista) y la sube a YouTube. Cada reel dispara un solo intento:
+ * si falla, avisa en el panel y se puede publicar a mano desde "Videos Horizontales".
+ */
+export async function publishDueHorizontal({ notify } = {}) {
+  if (autoRunning) return;
+  const cfg = await autoSettings();
+  if (!cfg.enabled) return;
+  // Primera vez: se toma como punto de partida el último reel ya publicado (no se publica nada por reels viejos)
+  if (!cfg.hasMarker) {
+    const last = await prisma.reelPost.findFirst({ where: { status: 'PUBLISHED' }, orderBy: { id: 'desc' }, select: { id: true } });
+    await prisma.systemSetting.create({
+      data: { key: SETTINGS.LAST_AUTO_REEL, value: String(last?.id || 0), description: 'Último reel que disparó un video horizontal automático' },
+    });
+    return;
+  }
+  const reel = await pendingTriggerReel(cfg);
+  if (!reel || Date.now() < new Date(reel.publishedAt).getTime() + cfg.spacingMin * 60000) return;
+
+  autoRunning = true;
+  let record = null;
+  try {
+    // Se marca antes de empezar: si algo falla no se reintenta en bucle cada minuto
+    await prisma.systemSetting.upsert({
+      where: { key: SETTINGS.LAST_AUTO_REEL },
+      create: { key: SETTINGS.LAST_AUTO_REEL, value: String(reel.id), description: 'Último reel que disparó un video horizontal automático' },
+      update: { value: String(reel.id) },
+    });
+    console.log(`[HORIZONTAL] Reel ${reel.id}: generando la recopilación automática…`);
+    record = await createCompilation({ heroId: reel.id, render: true });
+    if (!record.videoPath) throw new Error('No se generó el archivo de video de la recopilación');
+    const published = await publishToYouTube(record.id);
+    console.log(`[HORIZONTAL] Reel ${reel.id}: publicado en ${published.channelName} → ${published.youtubeUrl}`);
+  } catch (e) {
+    console.error(`[HORIZONTAL] Reel ${reel.id}: falló la publicación automática:`, e.message);
+    if (record) {
+      await prisma.horizontalCompilation.update({ where: { id: record.id }, data: { status: 'FAILED', errorMessage: e.message } }).catch(() => {});
+    }
+    await notify?.({
+      post: reel,
+      title: 'Video horizontal: no se pudo publicar',
+      detail: `La recopilación automática (${spacingText(cfg.spacingMin)} tras el reel) falló.\n\nError: ${e.message}\n\nPuedes publicarla a mano desde "Videos Horizontales".`,
+    });
+  } finally {
+    autoRunning = false;
+  }
 }
 
 export default {
   ensureDirs,
+  publishDueHorizontal,
+  nextAutoPublishLabel,
   getChannelSchedule,
+  getNextLanguage,
   getUpcomingSelection,
   generateAiMetadata,
   getHorizontalStatus,
   getHorizontalModels,
   getHorizontalHistory,
   createCompilation,
-  publishToYouTube,
-  publishToPinterest
+  publishToYouTube
 };

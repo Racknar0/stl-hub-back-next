@@ -50,13 +50,14 @@ router.post('/regenerate-metadata', requireAuth, requireAdmin, async (req, res) 
 router.post('/generate', requireAuth, requireAdmin, async (req, res) => {
   if (req.setTimeout) req.setTimeout(600000); // 10 minutos para FFmpeg
   try {
-    const { heroId, channelName, title, description, tags, render } = req.body || {};
+    const { heroId, channelName, title, description, tags, language, render } = req.body || {};
     const result = await horizontalService.createCompilation({
       heroId,
       channelName,
       title,
       description,
       tags,
+      language,
       render: render !== false
     });
     res.json({ success: true, compilation: result });
@@ -72,7 +73,7 @@ router.post('/publish', requireAuth, requireAdmin, async (req, res) => {
     let id = compilationId;
     if (!id) {
       // Si no viene id, crea una y publícala
-      const created = await horizontalService.createCompilation({ render: false });
+      const created = await horizontalService.createCompilation({ render: true });
       id = created.id;
     }
     const result = await horizontalService.publishToYouTube(id);
@@ -94,17 +95,6 @@ router.post('/:id/sync-facebook', requireAuth, requireAdmin, async (req, res) =>
       data: { fbSynced: true }
     });
     res.json({ success: true, compilation: updated });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 8. Publicación / Sincronización a Pinterest
-router.post('/:id/sync-pinterest', requireAuth, requireAdmin, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const result = await horizontalService.publishToPinterest(id);
-    res.json({ success: true, ...result });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

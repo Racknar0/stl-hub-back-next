@@ -8,6 +8,7 @@ import { uploadShort, connectionStatus as youtubeStatus, listChannels as youtube
 import { publishVideo as publishTiktokVideo, connectionStatus as tiktokStatus, tiktokOptionsProblem } from './tiktok.service.js';
 import { publishVideo as publishThreadsVideo, connectionStatus as threadsStatus, threadsText } from './threads.service.js';
 import { getChannelVariantVideo, cleanVariants } from './reelsVideoVariants.service.js';
+import { publishDueHorizontal } from './horizontalShowcase.service.js';
 
 const prisma = new PrismaClient();
 
@@ -806,6 +807,8 @@ export function startReelsWorker(intervalMs = 60000) {
   workerTimer = setInterval(() => {
     publishDueReels().catch(e => console.error('[REELS] Worker:', e.message));
     runResultTasks();
+    // Video horizontal automático unas horas después de cada reel (render largo: no bloquea el resto)
+    publishDueHorizontal({ notify: dispatchReelNotification }).catch(e => console.error('[HORIZONTAL] Worker:', e.message));
   }, intervalMs);
 }
 
