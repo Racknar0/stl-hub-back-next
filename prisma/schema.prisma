@@ -962,6 +962,25 @@ model HorizontalCompilation {
   @@map("horizontalcompilation")
 }
 
+/// Enlace corto propio (stlgratis.com/v/<code>): redirige al destino y cuenta los clics
+model ShortLink {
+  id          Int       @id @default(autoincrement())
+  code        String    @unique @db.VarChar(32) // código de la URL corta (aleatorio, o fijo como "hoy")
+  targetUrl   String    @db.Text                // URL de destino completa (con UTM)
+  source      String    @db.VarChar(40)         // dónde se publica: youtube_horizontal, facebook, youtube_short, threads, instagram_bio
+  label       String?   @db.VarChar(255)        // descripción legible (modelo, canal, página…)
+  refType     String?   @db.VarChar(30)         // a qué pertenece: reel, horizontal
+  refId       Int?                              // id del reel o de la recopilación
+  clicks      Int       @default(0)             // clics de personas (sin bots)
+  lastClickAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([source])
+  @@index([refType, refId])
+  @@map("shortlink")
+}
+
 model TelegramChannel {
   id              Int       @id @default(autoincrement())
   name            String    @unique

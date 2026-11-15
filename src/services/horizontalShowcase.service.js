@@ -4,6 +4,7 @@ import { exec } from 'child_process';
 import util from 'util';
 import { PrismaClient } from '@prisma/client';
 import youtube, { listChannels as youtubeChannels } from './youtube.service.js';
+import { createShortLink } from './shortLinks.service.js';
 
 const execAsync = util.promisify(exec);
 const prisma = new PrismaClient();
@@ -81,6 +82,37 @@ export async function getNextLanguage() {
   return lastLang === 'en' ? 'es' : 'en';
 }
 
+/** Destino final de un capítulo: la URL del modelo con el canal como campaña UTM. */
+function channelTarget(link, channel) {
+  try {
+    const url = new URL(link);
+    if (url.searchParams.has('utm_source')) url.searchParams.set('utm_campaign', String(channel || 'horizontal').toLowerCase());
+    return url.toString();
+  } catch {
+    return link;
+  }
+}
+
+/**
+ * Cambia en la descripción cada enlace de modelo por su enlace corto. Si no se puede acortar uno, se deja el largo.
+ */
+async function shortenChapterLinks(description, timestamps, channel) {
+  let text = String(description || '');
+  for (const t of timestamps) {
+    if (!t.link || !text.includes(t.link)) continue;
+    try {
+      const short = await createShortLink({
+        targetUrl: channelTarget(t.link, channel), source: 'youtube_horizontal',
+        label: `${channel} · #${t.index} ${t.title}`, refType: 'horizontal',
+      });
+      if (short) text = text.split(t.link).join(short);
+    } catch (e) {
+      console.warn(`[HORIZONTAL] No se pudo acortar el enlace de #${t.index}:`, e.message);
+    }
+  }
+  return text;
+}
+
 // Segundos que dura cada modelo en la recopilación (YouTube exige capítulos de 10 s como mínimo)
 const CLIP_SECONDS = 10;
 
@@ -98,8 +130,8 @@ function modelLink(asset, reel, language) {
   try {
     const url = new URL(base);
     url.searchParams.set('utm_source', 'youtube');
-    url.searchParams.set('utm_medium', 'horizontal');
-    url.searchParams.set('utm_campaign', 'recopilacion');
+    url.searchParams.set('utm_medium', 'video');
+    url.searchParams.set('utm_campaign', 'horizontal');
     base = url.toString();
   } catch {}
   return base;
@@ -642,7 +674,9 @@ export async function createCompilation({ heroId = null, channelName = null, tit
   const finalTitle = title || (currentLang === 'en'
     ? `🔥 TOP 20 Best 3D Printable Models: ${heroName} & More | Premium STL Files`
     : `🔥 TOP 20 Mejores Modelos 3D de Acción & Anime: ${heroName} y Más | Archivos STL Premium`);
-  const finalDescription = description || buildDescription(selection.timestamps, currentLang);
+  let finalDescription = description || buildDescription(selection.timestamps, currentLang);
+  // Enlaces cortos propios en los capítulos (stlgratis.com/v/xxxxx), con el canal en la campaña UTM
+  finalDescription = await shortenChapterLinks(finalDescription, selection.timestamps, targetChannel);
 
   let videoData = { relPath: null, sizeB: 0, durationSec: selection.totalDurationSec };
 

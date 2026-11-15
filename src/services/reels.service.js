@@ -9,6 +9,7 @@ import { publishVideo as publishTiktokVideo, connectionStatus as tiktokStatus, t
 import { publishVideo as publishThreadsVideo, connectionStatus as threadsStatus, threadsText } from './threads.service.js';
 import { getChannelVariantVideo, cleanVariants } from './reelsVideoVariants.service.js';
 import { publishDueHorizontal } from './horizontalShowcase.service.js';
+import { shortOrLong, setFixedLink, BIO_CODE } from './shortLinks.service.js';
 
 const prisma = new PrismaClient();
 
@@ -478,7 +479,8 @@ async function publishToPlatform(platform, post, { now = false } = {}) {
     if (!target) throw new Error('Esa Página de Facebook ya no está asignada al usuario del sistema');
     const info = { pageId: target.pageId, pageName: target.pageName };
     if (target.delayMin > 0 && !now) return deferredResult(target, info);
-    const firstComment = link ? `🔗 ${link}` : null;
+    const short = link ? await shortOrLong({ targetUrl: link, source: 'facebook', label: `Reel ${post.id} · ${target.pageName}`, refType: 'reel', refId: post.id }) : null;
+    const firstComment = short ? `🔗 ${short}` : null;
     const video = await accountVideo(post, target, `Facebook ${target.pageName}`);
     const result = await publishFacebookReel({
       pageId: target.pageId, videoAbsPath: video.abs, videoUrl: video.url,
@@ -492,7 +494,8 @@ async function publishToPlatform(platform, post, { now = false } = {}) {
     if (!target) throw new Error('Ese canal de YouTube ya no está conectado');
     const info = { channelId: target.channelId, channelTitle: target.channelTitle };
     if (target.delayMin > 0 && !now) return deferredResult(target, info);
-    const description = [String(target.description || '').trim(), link].filter(Boolean).join(' ');
+    const short = link ? await shortOrLong({ targetUrl: link, source: 'youtube_short', label: `Reel ${post.id} · ${target.channelTitle || 'YouTube'}`, refType: 'reel', refId: post.id }) : null;
+    const description = [String(target.description || '').trim(), short].filter(Boolean).join(' ');
 
     const originalAbsPath = toAbsVideoPath(post.videoPath);
     const videoAbsPath = await getChannelVariantVideo({
@@ -509,7 +512,8 @@ async function publishToPlatform(platform, post, { now = false } = {}) {
     return { ...result, ...info };
   }
   if (platform === 'threads') {
-    return publishThreadsVideo({ videoUrl: publicVideoUrl(post.videoPath), text: threadsText(captionBody(post.caption), link) });
+    const short = link ? await shortOrLong({ targetUrl: link, source: 'threads', label: `Reel ${post.id} · Threads`, refType: 'reel', refId: post.id }) : null;
+    return publishThreadsVideo({ videoUrl: publicVideoUrl(post.videoPath), text: threadsText(captionBody(post.caption), short) });
   }
   if (platform === 'tiktok') {
     return publishTiktokVideo({ videoAbsPath: toAbsVideoPath(post.videoPath), caption: withHashtags(post.tiktokCaption || post.caption, post), options: post.tiktokOptions });
@@ -570,6 +574,13 @@ export async function publishReel(post) {
     const done = (p) => (results[p]?.id && !results[p].simulated) || results[p]?.deferred;
     const allDone = targets.length > 0 && targets.every(done);
     const published = targets.filter(p => results[p]?.id && !results[p].simulated);
+    // Bio de Instagram: stlgratis.com/v/hoy pasa a llevar al modelo de este reel en cuanto sale en Instagram
+    if (published.includes('instagram') && post.link) {
+      await setFixedLink(BIO_CODE, {
+        targetUrl: platformLink(post.link, 'instagram_bio', post.id), source: 'instagram_bio',
+        label: `Bio de Instagram · reel ${post.id}`, refType: 'reel', refId: post.id,
+      }).catch(e => console.warn('[SHORT] No se pudo actualizar el enlace de la bio:', e.message));
+    }
     const publishedLinks = published.map(p => ({ label: `Publicado en ${nameOf(p)}`, url: results[p].url }));
     if (errors.length) {
       dispatchReelNotification({
