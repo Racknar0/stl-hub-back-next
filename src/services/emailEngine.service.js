@@ -12,7 +12,7 @@
 import crypto from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 import brevo from './brevo.service.js';
-import { scheduleStep } from '../utils/emailSchedule.js';
+import { scheduleStep, zonedParts, clampToSendWindow, timezoneForCountry } from '../utils/emailSchedule.js';
 
 const prisma = new PrismaClient();
 
@@ -73,6 +73,44 @@ export const getConfig = () => buildConfig(process.env);
 
 // Correo de reenganche (plantilla 19). No es del embudo: lo lanza el admin por tandas.
 export const REENGAGE_STEP = { kind: 'REENGAGE', templateId: 19, sales: false };
+
+// Avisos de Premium. Las suscripciones son períodos prepagados que no se renuevan solos.
+//  - EXPIRING: faltan pocos días para que termine.
+//  - EXPIRED: terminó hace unos días y no renovó.
+export const PREMIUM_STEPS = {
+  PREMIUM_EXPIRING: { kind: 'PREMIUM_EXPIRING', templateId: 22, sales: false, daysBefore: 3 },
+  PREMIUM_EXPIRED: { kind: 'PREMIUM_EXPIRED', templateId: 23, sales: false, daysAfter: 2, maxAgeDays: 7 },
+};
+
+const DAY_KEY_TZ = 'America/Bogota';
+
+/** Día (AAAA-MM-DD) en que termina un período, visto desde Colombia. Va en la clave anti-duplicados. */
+export function endDayKey(date) {
+  const p = zonedParts(new Date(date), DAY_KEY_TZ);
+  return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
+}
+
+/** Fecha legible del fin de período, en el idioma de la persona. */
+export function formatExpiryDate(dayKey, language = 'es') {
+  const [y, m, d] = dayKey.split('-').map(Number);
+  return new Intl.DateTimeFormat(language === 'en' ? 'en-US' : 'es-ES', {
+    day: 'numeric',
+    month: 'long',
+    timeZone: 'UTC',
+  }).format(new Date(Date.UTC(y, m - 1, d)));
+}
+
+/**
+ * ¿Hay que descartar un aviso de Premium justo antes de enviarlo?
+ * `currentEnd` es el fin de período vigente del usuario hoy.
+ */
+export function premiumNoticeSkip({ kind, dedupeKey, currentEnd, now }) {
+  const keyDay = String(dedupeKey || '').split(':')[2];
+  const renewed = currentEnd && endDayKey(currentEnd) !== keyDay && new Date(currentEnd) > now;
+  if (kind === 'PREMIUM_EXPIRING') return renewed ? 'renovó' : null;
+  if (kind === 'PREMIUM_EXPIRED') return currentEnd && new Date(currentEnd) > now ? 'ya es Premium' : null;
+  return null;
+}
 
 /**
  * Valida lo que llega del panel. Devuelve { values, error }.
@@ -239,9 +277,96 @@ export async function planFunnel(now = new Date()) {
   return { planned, skipped, users: users.length };
 }
 
+/** Último fin de período por usuario (un usuario puede tener más de una fila). */
+async function latestEndByUser(where) {
+  const subs = await prisma.subscription.findMany({ where, select: { userId: true, currentPeriodEnd: true } });
+  const map = new Map();
+  for (const s of subs) {
+    const prev = map.get(s.userId);
+    if (!prev || s.currentPeriodEnd > prev) map.set(s.userId, s.currentPeriodEnd);
+  }
+  return map;
+}
+
+/**
+ * Programa los avisos de Premium: uno cuando faltan pocos días para vencer y otro unos días
+ * después de vencer. La clave incluye el día de fin de período: si renueva, el siguiente
+ * período genera avisos nuevos, y el mismo período nunca recibe dos veces el mismo aviso.
+ */
+export async function planPremiumNotices(now = new Date()) {
+  const cfg = await loadConfig();
+  if (!cfg.start) return { planned: 0, reason: 'EMAIL_ENGINE_START no configurado' };
+
+  const exp = PREMIUM_STEPS.PREMIUM_EXPIRING;
+  const gone = PREMIUM_STEPS.PREMIUM_EXPIRED;
+  const rows = [];
+
+  const candidates = await prisma.subscription.findMany({
+    where: {
+      currentPeriodEnd: {
+        gt: new Date(now.getTime() - gone.maxAgeDays * DAY_MS),
+        lte: new Date(now.getTime() + (exp.daysBefore + 1) * DAY_MS),
+      },
+    },
+    select: {
+      userId: true,
+      currentPeriodEnd: true,
+      user: {
+        select: {
+          isActive: true,
+          roleId: true,
+          registerCountry: true,
+          emailContact: { select: { id: true, optedOutAt: true } },
+        },
+      },
+    },
+  });
+
+  // Solo cuenta el período más reciente de cada usuario.
+  const latest = new Map();
+  for (const s of candidates) {
+    const prev = latest.get(s.userId);
+    if (!prev || s.currentPeriodEnd > prev.currentPeriodEnd) latest.set(s.userId, s);
+  }
+  const newest = await latestEndByUser({ userId: { in: [...latest.keys()] } });
+
+  for (const s of latest.values()) {
+    if (!s.user.isActive || s.user.roleId === 2) continue;
+    if (s.currentPeriodEnd.getTime() !== newest.get(s.userId)?.getTime()) continue; // ya hay uno posterior
+
+    const end = s.currentPeriodEnd;
+    const tz = timezoneForCountry(s.user.registerCountry);
+    const step = end > now ? exp : gone;
+    const base = end > now ? end.getTime() - exp.daysBefore * DAY_MS : end.getTime() + gone.daysAfter * DAY_MS;
+    const scheduledFor = clampToSendWindow(new Date(Math.max(base, now.getTime())), tz, cfg.window);
+
+    const contact =
+      s.user.emailContact ||
+      (await prisma.emailContact.upsert({
+        where: { userId: s.userId },
+        create: { userId: s.userId, stage: 'ACTIVE' },
+        update: {},
+        select: { id: true, optedOutAt: true },
+      }));
+
+    rows.push({
+      contactId: contact.id,
+      kind: step.kind,
+      templateId: step.templateId,
+      status: contact.optedOutAt ? 'SKIPPED' : 'QUEUED',
+      scheduledFor,
+      dedupeKey: `${step.kind}:${s.userId}:${endDayKey(end)}`,
+    });
+  }
+
+  const result = rows.length ? await prisma.emailLog.createMany({ data: rows, skipDuplicates: true }) : { count: 0 };
+  return { planned: result.count };
+}
+
 // ---------------------------------------------------------------- Envío
 
-const stepOf = (kind) => [...FUNNEL, REENGAGE_STEP].find((s) => s.kind === kind);
+const stepOf = (kind) =>
+  [...FUNNEL, REENGAGE_STEP, ...Object.values(PREMIUM_STEPS)].find((s) => s.kind === kind);
 
 /** Envía los correos vencidos respetando el cupo diario. */
 export async function sendDue(now = new Date()) {
@@ -287,6 +412,12 @@ export async function sendDue(now = new Date()) {
     : [];
   const premium = new Set(premiumRows.map((r) => r.userId));
 
+  // Para los avisos de Premium se comprueba el fin de período vigente justo antes de enviar.
+  const noticeUserIds = due.filter((d) => PREMIUM_STEPS[d.kind]).map((d) => d.contact.user.id);
+  const endByUser = noticeUserIds.length
+    ? await latestEndByUser({ userId: { in: noticeUserIds } })
+    : new Map();
+
   let sent = 0;
   let skipped = 0;
   let failed = 0;
@@ -295,12 +426,21 @@ export async function sendDue(now = new Date()) {
     const { user } = log.contact;
     const step = stepOf(log.kind);
 
-    const reason = skipReason({
-      step,
-      user,
-      contact: log.contact,
-      isPremium: premium.has(user.id),
-    });
+    const reason =
+      skipReason({
+        step,
+        user,
+        contact: log.contact,
+        isPremium: premium.has(user.id),
+      }) ||
+      (PREMIUM_STEPS[log.kind]
+        ? premiumNoticeSkip({
+            kind: log.kind,
+            dedupeKey: log.dedupeKey,
+            currentEnd: endByUser.get(user.id),
+            now,
+          })
+        : null);
     if (reason) {
       await prisma.emailLog.update({
         where: { id: log.id },
@@ -316,8 +456,15 @@ export async function sendDue(now = new Date()) {
       const res = await brevo.sendTemplate({
         templateId: log.templateId,
         to: user.email,
-        params: { LANGUAGE: user.language || 'es', UNSUBSCRIBE_URL: unsubscribeUrl },
-        tags: [log.kind === 'REENGAGE' ? 'reengage' : 'funnel', log.kind],
+        params: {
+          LANGUAGE: user.language || 'es',
+          UNSUBSCRIBE_URL: unsubscribeUrl,
+          // Solo los avisos de Premium la usan: el día en que termina el período.
+          ...(PREMIUM_STEPS[log.kind]
+            ? { EXPIRY_DATE: formatExpiryDate(String(log.dedupeKey).split(':')[2], user.language || 'es') }
+            : {}),
+        },
+        tags: [log.kind === 'REENGAGE' ? 'reengage' : PREMIUM_STEPS[log.kind] ? 'premium' : 'funnel', log.kind],
         headers: {
           'List-Unsubscribe': `<${unsubscribeUrl}>`,
           'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
@@ -388,7 +535,14 @@ export async function sendTestEmail({ kind, userId }) {
   const res = await brevo.sendTemplate({
     templateId: step.templateId,
     to: user.email,
-    params: { LANGUAGE: user.language || 'es', UNSUBSCRIBE_URL: unsubscribeUrl },
+    params: {
+      LANGUAGE: user.language || 'es',
+      UNSUBSCRIBE_URL: unsubscribeUrl,
+      // En la prueba de los avisos de Premium se usa una fecha de ejemplo: dentro de 3 días.
+      ...(PREMIUM_STEPS[step.kind]
+        ? { EXPIRY_DATE: formatExpiryDate(endDayKey(new Date(Date.now() + 3 * DAY_MS)), user.language || 'es') }
+        : {}),
+    },
     tags: ['funnel-test', step.kind],
     headers: {
       'List-Unsubscribe': `<${unsubscribeUrl}>`,
@@ -430,8 +584,9 @@ export async function tick() {
   running = true;
   try {
     const plan = await planFunnel();
+    const premium = await planPremiumNotices();
     const send = await sendDue();
-    return { plan, send };
+    return { plan, premium, send };
   } finally {
     running = false;
   }
@@ -448,7 +603,7 @@ export function startEmailEngine(intervalMs = 5 * 60 * 1000) {
       const out = await tick();
       const sent = out?.send?.sent ?? 0;
       const would = out?.send?.wouldSend ?? 0;
-      if (out?.plan?.planned || sent || would) {
+      if (out?.plan?.planned || out?.premium?.planned || sent || would) {
         console.log('[email-engine]', JSON.stringify(out));
       }
     } catch (e) {
@@ -464,6 +619,11 @@ export function startEmailEngine(intervalMs = 5 * 60 * 1000) {
 export default {
   FUNNEL,
   REENGAGE_STEP,
+  PREMIUM_STEPS,
+  planPremiumNotices,
+  endDayKey,
+  formatExpiryDate,
+  premiumNoticeSkip,
   SETTING_KEYS,
   buildConfig,
   loadConfig,

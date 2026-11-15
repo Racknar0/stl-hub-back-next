@@ -1050,6 +1050,8 @@ enum EmailKind {
   WELCOME_3
   WELCOME_4
   REENGAGE
+  PREMIUM_EXPIRING // aviso: tu Premium vence en pocos días
+  PREMIUM_EXPIRED // aviso: tu Premium venció y no renovaste
   NEWSLETTER
   OTHER
 }

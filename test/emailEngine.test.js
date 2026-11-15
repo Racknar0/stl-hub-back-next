@@ -82,6 +82,23 @@ test('ajustes del panel: validaciones', () => {
   assert.equal(engine.parseEngineSettings({ dailyLimit: 250 }, ok).values.EMAIL_DAILY_LIMIT, '250');
 });
 
+test('avisos de Premium: día de fin, fecha legible y descartes', () => {
+  // 2026-11-20 03:00Z es todavía el 19 en Colombia
+  assert.equal(engine.endDayKey('2026-11-20T03:00:00Z'), '2026-11-19');
+  assert.equal(engine.formatExpiryDate('2026-11-19', 'es'), '19 de noviembre');
+  assert.equal(engine.formatExpiryDate('2026-11-19', 'en'), 'November 19');
+
+  const now = new Date('2026-11-17T15:00:00Z');
+  const key = 'PREMIUM_EXPIRING:7:2026-11-19';
+  // mismo período: se envía; período renovado: se descarta
+  assert.equal(engine.premiumNoticeSkip({ kind: 'PREMIUM_EXPIRING', dedupeKey: key, currentEnd: '2026-11-20T03:00:00Z', now }), null);
+  assert.equal(engine.premiumNoticeSkip({ kind: 'PREMIUM_EXPIRING', dedupeKey: key, currentEnd: '2026-12-19T15:00:00Z', now }), 'renovó');
+  // vencido: si ya volvió a ser Premium, se descarta
+  const keyGone = 'PREMIUM_EXPIRED:7:2026-11-10';
+  assert.equal(engine.premiumNoticeSkip({ kind: 'PREMIUM_EXPIRED', dedupeKey: keyGone, currentEnd: '2026-11-11T00:00:00Z', now }), null);
+  assert.equal(engine.premiumNoticeSkip({ kind: 'PREMIUM_EXPIRED', dedupeKey: keyGone, currentEnd: '2026-12-10T00:00:00Z', now }), 'ya es Premium');
+});
+
 test('token de baja: válido, manipulado y sin secreto', () => {
   const token = engine.buildUnsubscribeToken(42);
   assert.equal(engine.verifyUnsubscribeToken(token), 42);
