@@ -26,11 +26,14 @@ export function ensureDirs() {
   fs.mkdirSync(BRANDING_DIR, { recursive: true });
 }
 
-// Función para barajar aleatoriamente un array (Fisher-Yates)
-function shuffle(array) {
+// Barajado pseudo-aleatorio determinista con semilla (genera el mismo orden durante el día)
+function seededShuffle(array, seed = 12345) {
   const arr = [...array];
+  let s = Number(seed) || 12345;
   for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    s = (s * 9301 + 49297) % 233280;
+    const rnd = s / 233280;
+    const j = Math.floor(rnd * (i + 1));
     [arr[i], arr[j]] = [arr[j], arr[i]];
   }
   return arr;
@@ -118,9 +121,10 @@ export async function getUpcomingSelection(heroId = null) {
     },
     orderBy: [
       { horizontalUsesCount: 'asc' },
-      { lastUsedInHorizontal: 'asc' }
+      { lastUsedInHorizontal: 'asc' },
+      { id: 'desc' }
     ],
-    take: 35
+    take: 45
   });
 
   // Si hay menos de 19 publicados, completar con otros reels aprobados del catálogo
@@ -133,19 +137,34 @@ export async function getUpcomingSelection(heroId = null) {
       },
       orderBy: [
         { horizontalUsesCount: 'asc' },
-        { lastUsedInHorizontal: 'asc' }
+        { lastUsedInHorizontal: 'asc' },
+        { id: 'desc' }
       ],
       take: 19 - candidatePool.length
     });
     candidatePool = [...candidatePool, ...additional];
   }
 
-  // BARAJAR los 19 restantes para que el video NUNCA sea igual
-  const shuffledCandidates = shuffle(candidatePool);
+  // Deduplicar por personaje (assetId o título) para que ningún personaje salga repetido
+  const seenCharacters = new Set();
+  const heroKey = hero?.assetId ? `asset_${hero.assetId}` : (hero?.assetTitle || '').toLowerCase().trim();
+  if (heroKey) seenCharacters.add(heroKey);
+
+  const uniqueCandidates = [];
+  for (const m of candidatePool) {
+    const key = m.assetId ? `asset_${m.assetId}` : (m.assetTitle || m.title || `id_${m.id}`).toLowerCase().trim();
+    if (key && seenCharacters.has(key)) continue;
+    if (key) seenCharacters.add(key);
+    uniqueCandidates.push(m);
+  }
+
+  // Semilla fija del día (año + mes + día + heroId) para consistencia absoluta en todo el día
+  const daySeed = (now.getFullYear() * 10000) + ((now.getMonth() + 1) * 100) + now.getDate() + (hero?.id || 0);
+  const shuffledCandidates = seededShuffle(uniqueCandidates, daySeed);
   const restingModels = shuffledCandidates.slice(0, 19);
 
   // El Hero va SIEMPRE de #1 (apertura con el último reel del día)
-  // y los 19 restantes van completamente barajados
+  // y los 19 restantes van barajados sin repetir personajes
   const allSelected = hero ? [hero, ...restingModels] : restingModels;
 
   // Construir los timestamps (asegurando >= 10s por modelo para compatibilidad de capítulos YouTube)
