@@ -3,7 +3,7 @@ import path from 'path';
 import { exec } from 'child_process';
 import util from 'util';
 import { PrismaClient } from '@prisma/client';
-import youtube from './youtube.service.js';
+import youtube, { listChannels as youtubeChannels } from './youtube.service.js';
 
 const execAsync = util.promisify(exec);
 const prisma = new PrismaClient();
@@ -401,12 +401,26 @@ export async function getHorizontalStatus() {
 
   const description = selection.allSelected.length ? buildDescription(selection.timestamps, currentLang) : '';
 
-  // KPIs
+  // KPIs (todos reales)
+  const next = totalModels > 0 ? await nextAutoPublishInfo() : { label: 'Sin reels programados', note: '' };
+  const connected = await youtubeChannels().catch(() => []);
+  const norm = (v) => String(v || '').trim().replace(/^@/, '').toLowerCase();
+  const channelConnected = connected.some(c => [c.title, c.handle, c.id].some(v => v && norm(v) === norm(todayChannel)));
+  const lastPublished = await prisma.horizontalCompilation.findFirst({
+    where: { status: 'PUBLISHED', publishedAt: { not: null } },
+    orderBy: { publishedAt: 'desc' },
+  });
   const kpis = {
-    nextPublish: totalModels > 0 ? await nextAutoPublishLabel() : 'Sin reels programados',
+    nextPublish: next.label,
+    nextPublishNote: next.note,
     channelToday: todayChannel,
+    channelConnected,
     languageToday: currentLang,
-    googleQuota: { used: 6650, total: 10000, safe: true },
+    lastPublished: lastPublished ? {
+      date: fmtBogota(lastPublished.publishedAt),
+      channel: lastPublished.channelName || lastPublished.channelId,
+      url: lastPublished.youtubeUrl || (lastPublished.youtubeVideoId ? `https://youtube.com/watch?v=${lastPublished.youtubeVideoId}` : null),
+    } : null,
     catalog: {
       total: totalModels,
       inTurn: selection.allSelected.length,
@@ -506,6 +520,8 @@ export async function getHorizontalHistory() {
     videoPath: item.videoPath,
     youtubeUrl: item.youtubeUrl || (item.youtubeVideoId ? `https://youtube.com/watch?v=${item.youtubeVideoId}` : null),
     fbSynced: item.fbSynced,
+    status: item.status,
+    errorMessage: item.errorMessage || null,
     language: (item.tags && typeof item.tags === 'object' && item.tags.language) || 'es',
     tags: Array.isArray(item.tags) ? item.tags : (item.tags?.tags || []),
     modelsCount: Array.isArray(item.modelIds) ? item.modelIds.length : 20,
@@ -647,6 +663,7 @@ export async function createCompilation({ heroId = null, channelName = null, tit
 export async function publishToYouTube(compilationId) {
   const record = await prisma.horizontalCompilation.findUnique({ where: { id: Number(compilationId) } });
   if (!record) throw new Error('Recopilación no encontrada');
+  if (record.status === 'PUBLISHED' && record.youtubeVideoId) throw new Error('Esta recopilación ya está publicada en YouTube');
 
   let videoAbsPath = null;
   if (record.videoPath) {
@@ -681,6 +698,14 @@ export async function publishToYouTube(compilationId) {
   });
 
   return updated;
+}
+
+/** Última recopilación generada con video que aún no se ha publicado (la que sube el botón "Publicar"). */
+export async function latestReadyCompilation() {
+  return prisma.horizontalCompilation.findFirst({
+    where: { status: 'READY', videoPath: { not: null } },
+    orderBy: { id: 'desc' },
+  });
 }
 
 // ─── Publicación automática: cada reel publicado dispara un video horizontal X minutos después ───
@@ -719,11 +744,11 @@ const spacingText = (min) => (min % 60 === 0 ? `${min / 60} h` : `${min} min`);
 
 let autoRunning = false;
 
-/** Texto del panel con la hora real del próximo video horizontal. */
-export async function nextAutoPublishLabel() {
+/** Hora real del próximo video horizontal (label) y de dónde sale (note), en hora de Colombia. */
+export async function nextAutoPublishInfo() {
   const cfg = await autoSettings();
-  if (!cfg.enabled) return 'Automático apagado';
-  if (autoRunning) return 'Generando y publicando ahora…';
+  if (!cfg.enabled) return { label: 'Automático apagado', note: 'No se publican solos' };
+  if (autoRunning) return { label: 'Publicando ahora…', note: 'Generando la recopilación y subiéndola a YouTube' };
   const pending = cfg.hasMarker ? await pendingTriggerReel(cfg) : null;
   const base = pending
     ? new Date(pending.publishedAt)
@@ -731,8 +756,8 @@ export async function nextAutoPublishLabel() {
       where: { status: 'PENDING', approved: true, scheduledAt: { gte: new Date() } },
       orderBy: { scheduledAt: 'asc' },
     }))?.scheduledAt;
-  if (!base) return 'Sin reels programados';
-  return `${fmtBogota(new Date(base).getTime() + cfg.spacingMin * 60000)} (${spacingText(cfg.spacingMin)} tras el reel)`;
+  if (!base) return { label: 'Sin reels programados', note: `Sale ${spacingText(cfg.spacingMin)} después del próximo reel` };
+  return { label: fmtBogota(new Date(base).getTime() + cfg.spacingMin * 60000), note: '' };
 }
 
 /**
@@ -787,7 +812,8 @@ export async function publishDueHorizontal({ notify } = {}) {
 export default {
   ensureDirs,
   publishDueHorizontal,
-  nextAutoPublishLabel,
+  nextAutoPublishInfo,
+  latestReadyCompilation,
   getChannelSchedule,
   getNextLanguage,
   getUpcomingSelection,

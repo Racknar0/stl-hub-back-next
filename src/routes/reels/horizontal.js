@@ -68,11 +68,12 @@ router.post('/generate', requireAuth, requireAdmin, async (req, res) => {
 
 // 6. Publicación inmediata a YouTube
 router.post('/publish', requireAuth, requireAdmin, async (req, res) => {
+  if (req.setTimeout) req.setTimeout(600000); // la subida (o el render si no hay video) puede tardar minutos
   try {
     const { compilationId } = req.body || {};
-    let id = compilationId;
+    // Sin id: publica la última recopilación ya generada; solo si no hay ninguna, genera una nueva
+    let id = compilationId || (await horizontalService.latestReadyCompilation())?.id;
     if (!id) {
-      // Si no viene id, crea una y publícala
       const created = await horizontalService.createCompilation({ render: true });
       id = created.id;
     }
