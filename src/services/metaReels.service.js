@@ -49,8 +49,13 @@ export async function listFacebookPages({ fresh = false } = {}) {
   const primaryId = String(process.env.META_PAGE_ID);
   let pages = [];
   try {
-    const data = await graph('GET', 'me/accounts', { fields: 'id,name', limit: '50' });
-    pages = (data.data || []).map(p => ({ id: String(p.id), name: p.name }));
+    const data = await graph('GET', 'me/accounts', { fields: 'id,name,instagram_business_account{id,username}', limit: '50' });
+    pages = (data.data || []).map(p => ({
+      id: String(p.id),
+      name: p.name,
+      // Cuenta de Instagram vinculada a la Página (la "pareja" de Business Suite)
+      ...(p.instagram_business_account && { igId: String(p.instagram_business_account.id), igUsername: p.instagram_business_account.username }),
+    }));
   } catch (e) {
     console.warn('[REELS][FB] No se pudieron listar las Páginas:', e.message);
   }
@@ -60,9 +65,23 @@ export async function listFacebookPages({ fresh = false } = {}) {
   return pages;
 }
 
+/**
+ * Cuentas de Instagram donde se puede publicar: la principal (META_IG_USER_ID) primero y luego las vinculadas
+ * a las demás Páginas asignadas al usuario del sistema.
+ */
+export async function listInstagramAccounts(opts) {
+  if (!metaConfigured()) return [];
+  const primaryId = String(process.env.META_IG_USER_ID);
+  const pages = await listFacebookPages(opts);
+  const accounts = pages.filter(p => p.igId).map(p => ({ id: p.igId, username: p.igUsername, pageName: p.name }));
+  if (!accounts.some(a => a.id === primaryId)) accounts.unshift({ id: primaryId, username: 'Instagram principal' });
+  accounts.sort((a, b) => (a.id === primaryId ? -1 : b.id === primaryId ? 1 : 0));
+  return accounts;
+}
+
 /** Instagram Reel: contenedor → esperar a que Instagram procese el video → publicar. */
-export async function publishInstagramReel({ videoUrl, caption }) {
-  const igUser = process.env.META_IG_USER_ID;
+export async function publishInstagramReel({ igUserId, videoUrl, caption }) {
+  const igUser = igUserId || process.env.META_IG_USER_ID;
   const container = await graph('POST', `${igUser}/media`, {
     media_type: 'REELS', video_url: videoUrl, caption, share_to_feed: 'true',
   });
@@ -157,4 +176,4 @@ export async function commentOnPublishedReel({ pageId, videoId, message }) {
   return { published: true, commentId: id };
 }
 
-export default { metaConfigured, listFacebookPages, publishInstagramReel, publishFacebookReel, commentOnPublishedReel };
+export default { metaConfigured, listFacebookPages, listInstagramAccounts, publishInstagramReel, publishFacebookReel, commentOnPublishedReel };

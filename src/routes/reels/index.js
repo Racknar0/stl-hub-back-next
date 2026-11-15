@@ -8,7 +8,7 @@ import reels, { PLATFORMS, assetLink, dayKey, defaultPlatforms } from '../../ser
 import youtube from '../../services/youtube.service.js';
 import tiktok, { PRIVACY_LEVELS } from '../../services/tiktok.service.js';
 import threads from '../../services/threads.service.js';
-import { listFacebookPages } from '../../services/metaReels.service.js';
+import { listFacebookPages, listInstagramAccounts } from '../../services/metaReels.service.js';
 import horizontalRoutes from './horizontal.js';
 
 const router = express.Router();
@@ -213,7 +213,8 @@ router.get('/connection-status', requireAuth, requireAdmin, async (req, res) => 
     threads.connectionStatus().catch(() => ({ configured: false, connected: false })),
   ]);
   res.json({
-    instagram: { configured: meta },
+    // Cuentas vinculadas a las Páginas asignadas (la principal primero)
+    instagram: { configured: meta, accounts: meta ? await listInstagramAccounts().catch(() => []) : [] },
     // Páginas asignadas al usuario del sistema (la principal primero)
     facebook: { configured: meta, pages: meta ? await listFacebookPages({ fresh: req.query.fresh === '1' }).catch(() => []) : [] },
     youtube: { ...yt, appConfigured: youtube.youtubeConfigured() },
@@ -365,6 +366,8 @@ router.put('/:id', requireAuth, requireAdmin, async (req, res) => {
       ...(b.youtubeDescription !== undefined && { youtubeDescription: text(b.youtubeDescription) }),
       ...(b.facebookPages !== undefined && { facebookPages: Array.isArray(b.facebookPages) ? b.facebookPages.map(String).slice(0, 10) : null }),
       ...(b.facebookVariants !== undefined && { facebookVariants: normalizeFacebookVariants(b.facebookVariants) }),
+      ...(b.instagramAccounts !== undefined && { instagramAccounts: Array.isArray(b.instagramAccounts) ? b.instagramAccounts.map(String).slice(0, 10) : null }),
+      ...(b.instagramVariants !== undefined && { instagramVariants: normalizeFacebookVariants(b.instagramVariants) }),
       ...(b.youtubeChannels !== undefined && { youtubeChannels: Array.isArray(b.youtubeChannels) ? b.youtubeChannels.map(String).slice(0, 10) : null }),
       ...(b.youtubeVariants !== undefined && { youtubeVariants: normalizeYoutubeVariants(b.youtubeVariants) }),
       ...(b.onScreenText !== undefined && { onScreenText: text(b.onScreenText)?.slice(0, 120) ?? null }),

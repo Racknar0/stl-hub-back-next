@@ -1,8 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import { PrismaClient } from '@prisma/client';
-import { generateReelTexts, generateYoutubeVariant, generateFacebookVariant, mockReelTexts, isMockAi, captionBody } from './reelsAi.service.js';
-import { metaConfigured, listFacebookPages, publishInstagramReel, publishFacebookReel, commentOnPublishedReel } from './metaReels.service.js';
+import { generateReelTexts, generateYoutubeVariant, generateFacebookVariant, generateInstagramVariant, mockReelTexts, isMockAi, captionBody } from './reelsAi.service.js';
+import { metaConfigured, listFacebookPages, listInstagramAccounts, publishInstagramReel, publishFacebookReel, commentOnPublishedReel } from './metaReels.service.js';
 import { dispatchReelNotification } from '../utils/reelsNotifications.js';
 import { uploadShort, connectionStatus as youtubeStatus, listChannels as youtubeChannels } from './youtube.service.js';
 import { publishVideo as publishTiktokVideo, connectionStatus as tiktokStatus, tiktokOptionsProblem } from './tiktok.service.js';
@@ -171,6 +171,7 @@ export async function processReelAi(postId, { notes, language } = {}) {
         youtubeDescription: texts.youtubeDescription || null,
         youtubeVariants: await youtubeVariantsFor(asset, texts, lang),
         facebookVariants: await facebookVariantsFor(asset, texts, lang),
+        instagramVariants: await instagramVariantsFor(asset, texts, lang),
         language: lang,
         aiGenerated: true,
         aiStatus: 'READY',
@@ -208,6 +209,21 @@ async function facebookVariantsFor(asset, texts, language) {
       variants[pg.id] = { caption: await generateFacebookVariant({ asset, language, base: texts.facebookCaption, avoid: Object.values(variants).map(v => v.caption) }) };
     } catch (e) {
       console.warn(`[REELS][AI] Variante de Facebook para ${pg.name}: ${e.message}`);
+    }
+  }
+  return Object.keys(variants).length ? variants : null;
+}
+
+/** Caption distinto para cada cuenta de Instagram que no es la principal. */
+async function instagramVariantsFor(asset, texts, language) {
+  const accounts = (await listInstagramAccounts().catch(() => [])).slice(1);
+  if (!accounts.length || isMockAi()) return null;
+  const variants = {};
+  for (const acc of accounts) {
+    try {
+      variants[acc.id] = { caption: await generateInstagramVariant({ asset, language, base: texts.instagramCaption, avoid: Object.values(variants).map(v => v.caption) }) };
+    } catch (e) {
+      console.warn(`[REELS][AI] Variante de Instagram para @${acc.username}: ${e.message}`);
     }
   }
   return Object.keys(variants).length ? variants : null;
@@ -254,14 +270,15 @@ export function enqueueAi(ids) {
  * Devuelve [{ id, missing: [channelId], missingFb: [pageId] }].
  */
 export async function reelsMissingYoutubeVariants() {
-  const [extra, extraPages] = await Promise.all([
+  const [extra, extraPages, extraIg] = await Promise.all([
     youtubeChannels().then(c => c.slice(1)).catch(() => []),
     listFacebookPages().then(p => p.slice(1)).catch(() => []),
+    listInstagramAccounts().then(a => a.slice(1)).catch(() => []),
   ]);
-  if (!extra.length && !extraPages.length) return [];
+  if (!extra.length && !extraPages.length && !extraIg.length) return [];
   const posts = await prisma.reelPost.findMany({
     where: { status: { not: 'PUBLISHED' }, aiGenerated: true },
-    select: { id: true, platforms: true, youtubeChannels: true, youtubeVariants: true, facebookPages: true, facebookVariants: true },
+    select: { id: true, platforms: true, youtubeChannels: true, youtubeVariants: true, facebookPages: true, facebookVariants: true, instagramAccounts: true, instagramVariants: true },
   });
   const obj = (v) => (v && typeof v === 'object' ? v : {});
   return posts
@@ -273,9 +290,12 @@ export async function reelsMissingYoutubeVariants() {
         id: p.id,
         missing: p.platforms.includes('youtube') ? extra.filter(c => chosen.includes(c.id) && !obj(p.youtubeVariants)[c.id]?.title).map(c => c.id) : [],
         missingFb: p.platforms.includes('facebook') ? extraPages.filter(pg => chosenPages.includes(pg.id) && !obj(p.facebookVariants)[pg.id]?.caption).map(pg => pg.id) : [],
+        missingIg: p.platforms.includes('instagram')
+          ? extraIg.filter(a => (Array.isArray(p.instagramAccounts) ? p.instagramAccounts : extraIg.map(x => x.id)).includes(a.id) && !obj(p.instagramVariants)[a.id]?.caption).map(a => a.id)
+          : [],
       };
     })
-    .filter(p => p.missing.length || p.missingFb.length);
+    .filter(p => p.missing.length || p.missingFb.length || p.missingIg.length);
 }
 
 let variantsRunning = false;
@@ -286,7 +306,7 @@ export async function fillMissingYoutubeVariants() {
   if (!pending.length) return { queued: 0 };
   variantsRunning = true;
   (async () => {
-    for (const { id, missing, missingFb } of pending) {
+    for (const { id, missing, missingFb, missingIg } of pending) {
       try {
         const post = await prisma.reelPost.findUnique({ where: { id } });
         if (!post || post.status === 'PUBLISHED' || post.publishing) continue;
@@ -303,7 +323,13 @@ export async function fillMissingYoutubeVariants() {
             asset, language: post.language, base: post.facebookCaption || post.caption, avoid: Object.values(fbVariants).map(v => v.caption),
           }) };
         }
-        await prisma.reelPost.update({ where: { id }, data: { youtubeVariants: variants, facebookVariants: fbVariants } });
+        const igVariants = { ...(post.instagramVariants && typeof post.instagramVariants === 'object' ? post.instagramVariants : {}) };
+        for (const igId of missingIg) {
+          igVariants[igId] = { caption: await generateInstagramVariant({
+            asset, language: post.language, base: post.caption, avoid: Object.values(igVariants).map(v => v.caption),
+          }) };
+        }
+        await prisma.reelPost.update({ where: { id }, data: { youtubeVariants: variants, facebookVariants: fbVariants, instagramVariants: igVariants } });
       } catch (e) {
         console.error(`[REELS][AI] Textos de canales extra del reel ${id}:`, e.message);
       }
@@ -387,15 +413,47 @@ async function facebookTargets(post) {
   });
 }
 
+/**
+ * Cuentas de Instagram de un reel: la principal usa la clave "instagram" y el caption del reel; las demás usan
+ * "instagram:<id>" y su propio caption. Instagram no permite programar por API: las cuentas extra quedan
+ * "en espera" y el worker las publica a su hora (~1 h y ~3 h después).
+ */
+async function instagramTargets(post) {
+  const accounts = await listInstagramAccounts().catch(() => []);
+  if (!accounts.length) return [];
+  const chosen = Array.isArray(post.instagramAccounts) ? post.instagramAccounts : accounts.map(a => a.id);
+  const variants = post.instagramVariants && typeof post.instagramVariants === 'object' ? post.instagramVariants : {};
+  let extra = 0;
+  return accounts.filter(a => chosen.includes(a.id)).map((a) => {
+    const primary = a.id === accounts[0].id;
+    const delayMin = primary ? 0 : (2 * (++extra) - 1) * 60 + Math.round((Math.random() * 2 - 1) * 15);
+    return {
+      key: primary ? 'instagram' : `instagram:${a.id}`,
+      igUserId: a.id,
+      username: a.username,
+      caption: (!primary && variants[a.id]?.caption) || post.caption,
+      delayMin,
+    };
+  });
+}
+
 const PLATFORM_NAMES = { instagram: 'Instagram', facebook: 'Facebook', youtube: 'YouTube', tiktok: 'TikTok', threads: 'Threads' };
 
 // Reels que se están subiendo ahora mismo (evita publicar dos veces el mismo si coinciden el worker y "Publicar ahora")
 const inFlight = new Set();
 
-async function publishToPlatform(platform, post) {
+async function publishToPlatform(platform, post, { now = false } = {}) {
   const link = platformLink(post.link, platform, post.id);
-  if (platform === 'instagram') {
-    return publishInstagramReel({ videoUrl: publicVideoUrl(post.videoPath), caption: withHashtags(post.caption, post) });
+  if (platform === 'instagram' || platform.startsWith('instagram:')) {
+    const target = (await instagramTargets(post)).find(t => t.key === platform);
+    if (!target) throw new Error('Esa cuenta de Instagram ya no está vinculada a una Página asignada');
+    const info = { igUserId: target.igUserId, username: target.username };
+    // Cuenta extra: queda en espera y el worker la publica a su hora
+    if (target.delayMin > 0 && !now) {
+      return { ...info, deferred: true, publishAt: new Date(Date.now() + target.delayMin * 60000).toISOString() };
+    }
+    const result = await publishInstagramReel({ igUserId: target.igUserId, videoUrl: publicVideoUrl(post.videoPath), caption: withHashtags(target.caption, post) });
+    return { ...result, ...info };
   }
   if (platform === 'facebook' || platform.startsWith('facebook:')) {
     const target = (await facebookTargets(post)).find(t => t.key === platform);
@@ -458,16 +516,23 @@ export async function publishReel(post) {
     // Igual con Facebook: cada Página elegida es un destino aparte
     const ytTargets = platforms.includes('youtube') ? await youtubeTargets(post) : [];
     const fbTargets = platforms.includes('facebook') ? await facebookTargets(post) : [];
-    const targets = platforms.flatMap(p => (p === 'youtube' ? ytTargets.map(t => t.key) : p === 'facebook' ? fbTargets.map(t => t.key) : [p]));
+    // E Instagram: cada cuenta vinculada elegida es un destino aparte
+    const igTargets = platforms.includes('instagram') ? await instagramTargets(post) : [];
+    const targets = platforms.flatMap(p => (
+      p === 'youtube' ? ytTargets.map(t => t.key)
+        : p === 'facebook' ? fbTargets.map(t => t.key)
+          : p === 'instagram' ? igTargets.map(t => t.key) : [p]));
     const nameOf = (key) => {
+      if (key.startsWith('instagram:')) return `Instagram (@${igTargets.find(t => t.key === key)?.username || 'cuenta'})`;
       if (key.startsWith('youtube:')) return `YouTube (${ytTargets.find(t => t.key === key)?.channelTitle || 'canal'})`;
       if (key.startsWith('facebook:')) return `Facebook (${fbTargets.find(t => t.key === key)?.pageName || 'página'})`;
       return PLATFORM_NAMES[key] || key;
     };
     for (const p of targets) {
-      if (results[p]?.id && !results[p].simulated) continue;
+      if ((results[p]?.id && !results[p].simulated) || results[p]?.deferred) continue;
       try {
-        results[p] = { ...(await publishToPlatform(p, post)), publishedAt: new Date().toISOString(), simulated: false };
+        // Si una cuenta en espera falló antes, al reintentar se publica ya
+        results[p] = { ...(await publishToPlatform(p, post, { now: !!results[p]?.failed })), publishedAt: new Date().toISOString(), simulated: false };
         console.log(`[REELS] Reel ${post.id} publicado en ${p}: ${results[p].url || results[p].id}`);
       } catch (e) {
         delete results[p];
@@ -476,7 +541,8 @@ export async function publishReel(post) {
       }
     }
 
-    const allDone = targets.length > 0 && targets.every(p => results[p]?.id && !results[p].simulated);
+    const done = (p) => (results[p]?.id && !results[p].simulated) || results[p]?.deferred;
+    const allDone = targets.length > 0 && targets.every(done);
     const published = targets.filter(p => results[p]?.id && !results[p].simulated);
     const publishedLinks = published.map(p => ({ label: `Publicado en ${nameOf(p)}`, url: results[p].url }));
     if (errors.length) {
@@ -600,6 +666,54 @@ export async function commentScheduledFacebookReels() {
   }
 }
 
+let deferredRunning = false;
+/** Publica las cuentas de Instagram extra que quedaron en espera cuando les llega su hora. */
+export async function publishDeferredInstagram() {
+  if (deferredRunning) return;
+  deferredRunning = true;
+  try {
+    const posts = await prisma.reelPost.findMany({
+      where: { updatedAt: { gte: new Date(Date.now() - 3 * 24 * 3600 * 1000) }, publishing: false },
+    });
+    for (const post of posts) {
+      const results = post.results && typeof post.results === 'object' ? { ...post.results } : null;
+      if (!results || inFlight.has(post.id)) continue;
+      const due = Object.entries(results).filter(([key, r]) => key.startsWith('instagram:') && r?.deferred && new Date(r.publishAt).getTime() <= Date.now());
+      if (!due.length) continue;
+      inFlight.add(post.id);
+      const errors = [];
+      try {
+        for (const [key, r] of due) {
+          try {
+            const res = await publishToPlatform(key, post, { now: true });
+            results[key] = { ...res, publishAt: r.publishAt, publishedAt: new Date().toISOString(), simulated: false };
+            console.log(`[REELS] Reel ${post.id} publicado en ${key}: ${res.url || res.id}`);
+          } catch (e) {
+            results[key] = { ...r, deferred: false, failed: true, error: e.message };
+            errors.push(`Instagram (@${r.username || 'cuenta'}): ${e.message}`);
+            console.error(`[REELS] Reel ${post.id} falló en ${key}:`, e.message);
+          }
+        }
+        await prisma.reelPost.update({
+          where: { id: post.id },
+          data: { results, ...(errors.length && { status: 'FAILED', errorMessage: errors.join(' | ') }) },
+        });
+        if (errors.length) {
+          dispatchReelNotification({
+            post,
+            title: 'Instagram: no se pudo publicar en una cuenta',
+            detail: `${errors.join('\n')}\n\nUsa "Reintentar publicación": se publicará al momento en esa cuenta.`,
+          });
+        }
+      } finally {
+        inFlight.delete(post.id);
+      }
+    }
+  } finally {
+    deferredRunning = false;
+  }
+}
+
 let workerTimer = null;
 export function startReelsWorker(intervalMs = 60000) {
   if (workerTimer) return;
@@ -616,6 +730,7 @@ export function startReelsWorker(intervalMs = 60000) {
   workerTimer = setInterval(() => {
     publishDueReels().catch(e => console.error('[REELS] Worker:', e.message));
     commentScheduledFacebookReels().catch(e => console.error('[REELS] Comentarios FB:', e.message));
+    publishDeferredInstagram().catch(e => console.error('[REELS] Instagram en espera:', e.message));
   }, intervalMs);
 }
 

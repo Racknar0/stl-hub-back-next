@@ -207,4 +207,39 @@ export async function generateFacebookVariant({ asset, language = 'es', base, av
   return composeCaption('facebook', body);
 }
 
-export default { generateReelTexts, generateYoutubeVariant, generateFacebookVariant };
+/**
+ * Otro caption de Instagram para el mismo modelo (para otra cuenta): mismo formato (2-3 líneas con emoji)
+ * y redacción distinta. Devuelve el caption completo (encabezado + texto + CTA).
+ */
+export async function generateInstagramVariant({ asset, language = 'es', base, avoid = [] }) {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
+  const ai = new GoogleGenAI({ apiKey });
+  const lang = LANG_NAMES[language] || 'Spanish';
+  const prompt = [
+    `Write a NEW Instagram Reel description in ${lang} for a short video of this 3D printable STL model: "${asset?.titleEn || asset?.title || ''}".`,
+    'Format: 2-3 short lines separated by \\n, each line starts with ONE fitting emoji, max ~70 characters per line. Line 1 names the character and franchise.',
+    'The STL files are PAID: never say "free"/"gratis". No URLs, no hashtags, no call to action.',
+    'It must be clearly different (wording, angle, emojis) from these existing versions, which must NOT be repeated or paraphrased closely:',
+    JSON.stringify([captionBody(base), ...avoid.map(captionBody)].filter(Boolean)),
+    'Return ONLY JSON: {"body": "..."}',
+  ].join('\n');
+  const response = await ai.models.generateContent({
+    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+    contents: [prompt],
+    config: { responseMimeType: 'application/json', temperature: 1.2 },
+  });
+  const rawText = String(response?.text || '').trim();
+  let parsed;
+  try { parsed = JSON.parse(rawText); }
+  catch {
+    const match = rawText.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error('No se pudo leer el resultado de la revisión');
+    parsed = JSON.parse(match[0]);
+  }
+  const body = String(parsed.body || '').trim();
+  if (!body) throw new Error('Texto vacío');
+  return composeCaption('instagram', body);
+}
+
+export default { generateReelTexts, generateYoutubeVariant, generateFacebookVariant, generateInstagramVariant };
