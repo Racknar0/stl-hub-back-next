@@ -88,10 +88,11 @@ export async function getUpcomingSelection(heroId = null) {
   // Construir los timestamps (asegurando >= 10s por modelo para compatibilidad de capítulos YouTube)
   let currentSec = 0;
   const timestamps = allSelected.map((m, idx) => {
-    const mins = Math.floor(currentSec / 60);
-    const secs = String(currentSec % 60).padStart(2, '0');
+    const totalSecRounded = Math.floor(currentSec);
+    const mins = Math.floor(totalSecRounded / 60);
+    const secs = String(totalSecRounded % 60).padStart(2, '0');
     const timeStr = `${mins}:${secs}`;
-    const rawDur = Math.max(m.durationSec || 10, 10); // Mínimo 10s para capítulos oficiales
+    const rawDur = Math.max(Math.round(m.durationSec || 10), 10); // Mínimo 10s para capítulos oficiales
     currentSec += rawDur;
     return {
       index: idx + 1,
@@ -135,14 +136,16 @@ export async function getHorizontalStatus() {
   const totalModels = await prisma.reelPost.count({ where: { approved: true } });
   const selection = await getUpcomingSelection();
 
-  const heroTitle = selection.hero?.assetTitle || selection.hero?.title || 'Modelos Épicos';
-  const cleanHeroTitle = heroTitle.replace(/^STL\s*[-–:]\s*/i, '');
-  const title = `🔥 TOP 20 Mejores Modelos 3D de Acción & Anime: ${cleanHeroTitle} y Más | Archivos STL Premium`;
-  const description = buildDescription(selection.timestamps);
+  const heroTitle = selection.hero?.assetTitle || selection.hero?.title || '';
+  const cleanHeroTitle = heroTitle ? heroTitle.replace(/^STL\s*[-–:]\s*/i, '') : '';
+  const title = cleanHeroTitle 
+    ? `🔥 TOP 20 Mejores Modelos 3D de Acción & Anime: ${cleanHeroTitle} y Más | Archivos STL Premium`
+    : (totalModels > 0 ? '🔥 TOP 20 Mejores Modelos 3D de Acción & Anime | Archivos STL Premium' : '');
+  const description = selection.allSelected.length ? buildDescription(selection.timestamps) : '';
 
   // KPIs
   const kpis = {
-    nextPublish: 'Hoy 17:30 (+2h 30m tras Short)',
+    nextPublish: totalModels > 0 ? 'Hoy 17:30 (+2h 30m tras Short)' : 'Sin reels programados',
     channelToday: todayChannel,
     googleQuota: { used: 6650, total: 10000, safe: true },
     catalog: {
@@ -185,6 +188,8 @@ export async function getHorizontalModels(filter = 'all') {
 
     return {
       id: p.id,
+      assetId: p.assetId,
+      videoPath: p.videoPath,
       title: p.assetTitle || p.title || `Modelo ${p.id}`,
       duration: Math.round(p.durationSec || 9),
       isHero,
