@@ -466,8 +466,11 @@ export async function getHorizontalStatus() {
     where: { status: 'PUBLISHED', publishedAt: { not: null } },
     orderBy: { publishedAt: 'desc' },
   });
-  // Facebook: Página en turno (rotan todas las Páginas asignadas) y último video horizontal publicado allí
-  const fbPage = metaConfigured() ? await nextFacebookPage().catch(() => null) : null;
+  // Facebook: Página en turno (rotan todas las Páginas asignadas) y último video horizontal publicado allí.
+  // Cada turno de la rotación lleva su canal de YouTube y su Página de Facebook (ambos avanzan con cada video)
+  const fbPages = metaConfigured() ? await facebookSchedule(channels.length).catch(() => []) : [];
+  channels.forEach((ch, i) => { ch.facebookPage = fbPages[i]?.name || null; });
+  const fbPage = fbPages[0] || null;
   const lastFb = await prisma.horizontalCompilation.findFirst({ where: { fbSynced: true }, orderBy: { updatedAt: 'desc' } });
   const lastFbInfo = lastFb ? facebookInfo(lastFb) : null;
   const kpis = {
@@ -827,11 +830,16 @@ function facebookState(record) {
 
 /** Página de Facebook en turno: la siguiente a la última usada (empieza por la principal). */
 export async function nextFacebookPage() {
+  return (await facebookSchedule(1))[0] || null;
+}
+
+/** Las próximas `count` Páginas de la rotación de Facebook (hoy, mañana, en 2 días…), empezando por la de turno. */
+async function facebookSchedule(count) {
   const pages = await listFacebookPages();
-  if (!pages.length) return null;
+  if (!pages.length) return [];
   const last = (await prisma.systemSetting.findUnique({ where: { key: SETTINGS.LAST_FB_PAGE } }))?.value;
   const idx = pages.findIndex(p => p.id === String(last));
-  return pages[(idx + 1) % pages.length];
+  return Array.from({ length: count }, (_, i) => pages[(idx + 1 + i) % pages.length]);
 }
 
 const slugify = (v) => String(v || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
