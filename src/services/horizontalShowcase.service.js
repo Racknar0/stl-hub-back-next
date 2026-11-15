@@ -88,12 +88,13 @@ const hasVideoFile = (m) => Boolean(m?.videoPath) && fs.existsSync(path.resolve(
 
 // Link a la página del modelo en stlgratis.com (/es/asset/<slug> o /en/asset/<slug>), con UTM para medir el tráfico
 function modelLink(asset, reel, language) {
-  const lang = language === 'en' ? 'en' : 'es';
-  // Las páginas van por slug (por id dan 404); sin slug se usa el link del reel en el idioma del video
+  // Páginas por slug (por id dan 404): español en /asset/<slug> e inglés en /en/asset/<slug>.
+  // Sin slug se usa el link del reel, pasado al idioma del video
+  const prefix = language === 'en' ? 'https://stlgratis.com/en/' : 'https://stlgratis.com/';
   let base = asset?.slug
-    ? `https://stlgratis.com/${lang}/asset/${asset.slug}`
-    : (reel.link ? String(reel.link).replace(/stlgratis\.com\/(es|en)\//, `stlgratis.com/${lang}/`) : null);
-  if (!base) return `https://stlgratis.com/${lang === 'en' ? 'en' : ''}`;
+    ? `${prefix}asset/${asset.slug}`
+    : (reel.link ? String(reel.link).replace(/https:\/\/stlgratis\.com\/((es|en)\/)?/, prefix) : null);
+  if (!base) return prefix;
   try {
     const url = new URL(base);
     url.searchParams.set('utm_source', 'youtube');
