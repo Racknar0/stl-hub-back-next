@@ -35,16 +35,28 @@ router.get('/history', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-// 4. Generación / Ensamble de una recopilación
+// 4. Regenerar metadata con IA (Gemini) respetando los capítulos
+router.post('/regenerate-metadata', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { heroId, channelName, language } = req.body || {};
+    const metadata = await horizontalService.generateAiMetadata({ heroId, channelName, language });
+    res.json({ success: true, ...metadata });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 5. Generación / Ensamble de una recopilación
 router.post('/generate', requireAuth, requireAdmin, async (req, res) => {
   if (req.setTimeout) req.setTimeout(600000); // 10 minutos para FFmpeg
   try {
-    const { heroId, channelName, title, description, render } = req.body || {};
+    const { heroId, channelName, title, description, tags, render } = req.body || {};
     const result = await horizontalService.createCompilation({
       heroId,
       channelName,
       title,
       description,
+      tags,
       render: render !== false
     });
     res.json({ success: true, compilation: result });
@@ -53,7 +65,7 @@ router.post('/generate', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-// 5. Publicación inmediata a YouTube
+// 6. Publicación inmediata a YouTube
 router.post('/publish', requireAuth, requireAdmin, async (req, res) => {
   try {
     const { compilationId } = req.body || {};
@@ -70,7 +82,7 @@ router.post('/publish', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-// 6. Sincronización a Facebook
+// 7. Sincronización a Facebook
 router.post('/:id/sync-facebook', requireAuth, requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -82,6 +94,17 @@ router.post('/:id/sync-facebook', requireAuth, requireAdmin, async (req, res) =>
       data: { fbSynced: true }
     });
     res.json({ success: true, compilation: updated });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 8. Publicación / Sincronización a Pinterest
+router.post('/:id/sync-pinterest', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await horizontalService.publishToPinterest(id);
+    res.json({ success: true, ...result });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

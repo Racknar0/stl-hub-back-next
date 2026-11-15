@@ -190,7 +190,7 @@ export async function getUpcomingSelection(heroId = null) {
   return { hero, restingModels, allSelected, timestamps, totalDurationSec: currentSec };
 }
 
-// Redacta la descripción completa optimizada para YouTube
+// Redacta la descripción completa optimizada para YouTube (base estándar con capítulos intactos)
 export function buildDescription(timestamps) {
   const intro = `🔥 ¡Descubre la recopilación definitiva de los 20 mejores modelos 3D y archivos STL listos para imprimir en resina y filamento!
 
@@ -207,6 +207,97 @@ Desde figuras de acción icónicas y anime hasta los coleccionables más detalla
 #STL #3DPrinting #Impresion3D #AnimeSTL #MarvelSTL #ActionFigures #STLGratis #Miniaturas3D #Coleccionables3D`;
 
   return `${intro}\n${chapters}\n\n${footer}`;
+}
+
+// Genera metadata optimizada con Inteligencia Artificial (Gemini) para YouTube y Pinterest
+export async function generateAiMetadata({ heroId = null, channelName = null, language = 'es' } = {}) {
+  const selection = await getUpcomingSelection(heroId);
+  const hero = selection.hero;
+  const models = selection.allSelected;
+
+  const heroName = (hero?.assetTitle || hero?.title || 'Figura Destacada').replace(/^STL\s*[-–:]\s*/i, '');
+  const modelNames = models.map(m => (m.assetTitle || m.title || `Modelo ${m.id}`).replace(/^STL\s*[-–:]\s*/i, ''));
+  const sampleNotable = modelNames.slice(0, 10).join(', ');
+
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  let aiResult = null;
+
+  if (apiKey) {
+    try {
+      const { GoogleGenAI } = await import('@google/genai');
+      const ai = new GoogleGenAI({ apiKey });
+      const model = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
+
+      const prompt = `You are a high-level YouTube & Pinterest SEO expert and copywriter for "STLFREE / STL GRATIS" (stlgratis.com), a premier platform for 3D printing STL files (figures, anime, comics, gaming, resin & filament).
+
+We are creating the metadata for a TOP 20 3D Models compilation video (Horizontal 16:9 Showcase, ~3 minutes).
+- Opening / Hero Model (#1): "${heroName}"
+- Other notable models in this showcase: ${sampleNotable}
+- Target language: Spanish.
+
+Generate the following in JSON:
+1. "title": A catchy, high-CTR YouTube title (MAX 95 chars). Start with an emoji (🔥, ⚡, ⚔️). It MUST highlight "${heroName}" and mention other top characters or anime/action figures. End with "| Archivos STL Premium" or similar.
+2. "intro": 2-3 engaging, well-written paragraphs (in Spanish) introducing today's showcase. Emphasize the detail of the 3D sculpts, printing in resin (SLA) and filament (FDM), painting, and collecting. Mention that all files are ready for direct download at https://stlgratis.com/.
+3. "outro": 1-2 paragraphs closing the video. Ask viewers which figure was their favorite, remind them to subscribe for daily releases and like the video.
+4. "tags": An array of 15-20 specific YouTube SEO tags. Include the main character names, franchises present, and 3D printing terms ("Impresion3D", "Modelos3D", "STLGratis", "Resina3D", "ActionFigures", "AnimeSTL").
+5. "pinterestTitle": A Pinterest-optimized pin title (max 95 chars) highlighting "${heroName} & Top 20 3D Print Figures".
+6. "pinterestDescription": A compelling 2-line Pinterest pin description with emojis and hashtags highlighting 3D printing STL files with link to stlgratis.com.
+
+Respond ONLY with valid JSON in this structure:
+{
+  "title": "...",
+  "intro": "...",
+  "outro": "...",
+  "tags": ["..."],
+  "pinterestTitle": "...",
+  "pinterestDescription": "..."
+}`;
+
+      const resp = await ai.models.generateContent({
+        model,
+        contents: [prompt],
+        config: { responseMimeType: 'application/json', temperature: 1.05 }
+      });
+
+      const raw = String(resp.text || '').trim();
+      try {
+        aiResult = JSON.parse(raw);
+      } catch {
+        const m = raw.match(/\{[\s\S]*\}/);
+        if (m) aiResult = JSON.parse(m[0]);
+      }
+    } catch (err) {
+      console.warn('[Horizontal] Error generando metadata con Gemini:', err.message);
+    }
+  }
+
+  // Fallbacks si falla la IA
+  const finalTitle = aiResult?.title || `🔥 TOP 20 Mejores Modelos 3D de Acción & Anime: ${heroName} y Más | Archivos STL Premium`;
+  const intro = aiResult?.intro || `¡Eleva tu taller de impresión al siguiente nivel! Te presentamos la recopilación definitiva con los 20 mejores modelos 3D y archivos STL listos para imprimir en resina y filamento.\n\nDesde figuras icónicas y anime hasta los coleccionables más detallados de la comunidad. Todos los archivos están optimizados para un acabado profesional y disponibles para descarga directa en nuestra plataforma oficial.\n\n🔗 DESCARGA TODOS LOS MODELOS EN: https://stlgratis.com/`;
+  const outro = aiResult?.outro || `⭐ ¿Cuál de estas figuras será tu próximo proyecto de impresión y pintura? Déjanos tu favorita en los comentarios y suscríbete al canal para no perderte las recopilaciones diarias con nuevos lanzamientos exclusivos.`;
+  const tags = Array.isArray(aiResult?.tags) && aiResult.tags.length > 0 
+    ? aiResult.tags 
+    : ['STL', '3D Printing', 'Modelos 3D', 'Impresión 3D', 'Anime STL', 'Marvel STL', 'Dragon Ball STL', 'Figuras Coleccionables', 'Archivos STL Gratis', 'Resina 3D', 'Filamento PLA', 'STLGratis'];
+
+  // RESPETAR EL TEMA DE LOS CAPITULOS AL 100%
+  const chaptersHeader = '⏱️ CAPÍTULOS Y ENLACES DIRECTOS A CADA MODELO:';
+  const chaptersBody = selection.timestamps.map(t => `${t.time} - #${t.index} ${t.title} (${t.link})`).join('\n');
+  const hashtagsLine = tags.slice(0, 10).map(t => `#${String(t).replace(/[#\s]+/g, '')}`).join(' ');
+
+  const finalDescription = `${intro.trim()}\n\n${chaptersHeader}\n${chaptersBody}\n\n${outro.trim()}\n\n${hashtagsLine}`;
+
+  return {
+    title: finalTitle,
+    description: finalDescription,
+    intro,
+    outro,
+    tags,
+    timestamps: selection.timestamps,
+    pinterest: {
+      title: aiResult?.pinterestTitle || `Top 20 Figuras 3D: ${heroName} & Modelos STL Premium | STLGratis`,
+      description: aiResult?.pinterestDescription || `🔥 Descubre los mejores 20 modelos 3D y archivos STL para imprimir en resina y filamento. ¡Descarga directa en stlgratis.com! #3DPrinting #STL #STLGratis #Impresion3D`
+    }
+  };
 }
 
 // Estado general del panel de videos horizontales
@@ -252,7 +343,17 @@ export async function getHorizontalStatus() {
       modelsCount: selection.allSelected.length,
       durationSec: selection.totalDurationSec,
       timestamps: selection.timestamps,
-      videoPath: latestCompilation?.videoPath || null
+      videoPath: latestCompilation?.videoPath || null,
+      tags: [
+        'STL', '3D Printing', 'Modelos 3D', 'Impresión 3D', 
+        cleanHeroTitle.split(' ')[0] || 'Anime', 'Anime STL', 
+        'Marvel STL', 'Dragon Ball STL', 'Figuras Coleccionables', 
+        'Archivos STL Gratis', 'Resina 3D', 'Filamento PLA', 'STLGratis'
+      ].filter(Boolean),
+      pinterest: {
+        title: cleanHeroTitle ? `Top 20 Figuras 3D: ${cleanHeroTitle} & Modelos STL` : 'Top 20 Figuras 3D STL',
+        description: `🔥 Descubre los mejores 20 modelos 3D y archivos STL para imprimir en resina y filamento. ¡Descárgalos en https://stlgratis.com/! #3DPrinting #STL #STLGratis #Impresion3D`
+      }
     }
   };
 }
@@ -314,6 +415,9 @@ export async function getHorizontalHistory() {
     videoPath: item.videoPath,
     youtubeUrl: item.youtubeUrl || (item.youtubeVideoId ? `https://youtube.com/watch?v=${item.youtubeVideoId}` : null),
     fbSynced: item.fbSynced,
+    pinterestSynced: Boolean(item.tags && typeof item.tags === 'object' && item.tags.pinterest?.synced),
+    pinterestUrl: (item.tags && typeof item.tags === 'object' && item.tags.pinterest?.pinUrl) || null,
+    tags: Array.isArray(item.tags) ? item.tags : (item.tags?.tags || []),
     modelsCount: Array.isArray(item.modelIds) ? item.modelIds.length : 20,
     fileSize: item.fileSizeB ? `${(item.fileSizeB / (1024 * 1024)).toFixed(1)} MB` : '42.0 MB'
   }));
@@ -381,7 +485,7 @@ export async function renderHorizontalVideo(models) {
 }
 
 // Ejecuta la creación y registro de una recopilación
-export async function createCompilation({ heroId = null, channelName = null, title = null, description = null, render = false }) {
+export async function createCompilation({ heroId = null, channelName = null, title = null, description = null, tags = null, render = false }) {
   const selection = await getUpcomingSelection(heroId);
   const channels = await getChannelSchedule();
   const targetChannel = channelName || channels.find(c => c.status === 'today')?.name || ROTATION_ORDER[0];
@@ -400,6 +504,7 @@ export async function createCompilation({ heroId = null, channelName = null, tit
     data: {
       title: finalTitle,
       description: finalDescription,
+      tags: tags ? (typeof tags === 'object' ? tags : { tags }) : null,
       channelId: targetChannel.toLowerCase(),
       channelName: targetChannel,
       heroPostId: selection.hero?.id || null,
@@ -451,11 +556,16 @@ export async function publishToYouTube(compilationId) {
     throw new Error('El archivo de video renderizado no se encuentra en el servidor.');
   }
 
+  const tagsToSend = Array.isArray(record.tags) 
+    ? record.tags 
+    : (record.tags?.tags || ['STL', '3D Printing', 'Modelos 3D', 'Impresion 3D', 'STLGratis']);
+
   const result = await youtube.uploadHorizontalVideo({
     channelId: record.channelId,
     videoAbsPath,
     title: record.title,
     description: record.description,
+    tags: tagsToSend,
     privacyStatus: 'public'
   });
 
@@ -472,13 +582,97 @@ export async function publishToYouTube(compilationId) {
   return updated;
 }
 
+// Publica un Pin a Pinterest con el Hero o portada de la recopilación
+export async function publishToPinterest(compilationId) {
+  const record = await prisma.horizontalCompilation.findUnique({ where: { id: Number(compilationId) } });
+  if (!record) throw new Error('Recopilación no encontrada');
+
+  const { default: pinterestPublisher } = await import('./pinterestPublisher.service.js');
+  const { default: pinterestService } = await import('./pinterest.service.js');
+
+  const status = await pinterestService.testConnection();
+  if (!status.connected) {
+    throw new Error('Pinterest no está conectado. Conecta tu cuenta de Pinterest en el panel.');
+  }
+
+  // Buscar el asset del hero o primer modelo
+  let assetId = null;
+  if (record.heroPostId) {
+    const post = await prisma.reelPost.findUnique({ where: { id: record.heroPostId } });
+    assetId = post?.assetId;
+  }
+  if (!assetId && Array.isArray(record.modelIds) && record.modelIds.length > 0) {
+    const post = await prisma.reelPost.findUnique({ where: { id: record.modelIds[0] } });
+    assetId = post?.assetId;
+  }
+
+  let imageUrl = null;
+  let targetLink = record.youtubeUrl || 'https://stlgratis.com/';
+
+  if (assetId) {
+    const asset = await prisma.asset.findUnique({ where: { id: Number(assetId) } });
+    if (asset?.images) {
+      const imgs = Array.isArray(asset.images) ? asset.images : [asset.images];
+      if (imgs.length > 0) {
+        const first = imgs[0];
+        imageUrl = String(first).startsWith('http') ? first : `https://stlgratis.com/uploads/${String(first).replace(/^\/+/, '')}`;
+      }
+    }
+    if (asset) {
+      targetLink = `https://stlgratis.com/stl/${asset.id}`;
+    }
+  }
+
+  if (!imageUrl) {
+    throw new Error('No se encontró una imagen de portada del modelo para publicar en Pinterest');
+  }
+
+  const pinTitle = (record.title || 'TOP 20 Modelos 3D STL').slice(0, 100);
+  const pinDescription = `🔥 Recopilación de los mejores modelos 3D y archivos STL listos para imprimir en resina y filamento. Descárgalos en https://stlgratis.com/ #3DPrinting #STL #STLGratis #Impresion3D`;
+
+  const pinResult = await pinterestPublisher.publishPin(
+    imageUrl,
+    'auto',
+    pinTitle,
+    pinDescription,
+    targetLink,
+    {},
+    assetId
+  );
+
+  const prevTags = (record.tags && typeof record.tags === 'object') ? record.tags : {};
+  const updatedTags = {
+    ...prevTags,
+    pinterest: {
+      synced: true,
+      pinId: pinResult?.id || pinResult?.data?.id || null,
+      pinUrl: pinResult?.id ? `https://pinterest.com/pin/${pinResult.id}` : null,
+      syncedAt: new Date().toISOString()
+    }
+  };
+
+  const updated = await prisma.horizontalCompilation.update({
+    where: { id: record.id },
+    data: { tags: updatedTags }
+  });
+
+  return {
+    success: true,
+    pinId: updatedTags.pinterest.pinId,
+    pinUrl: updatedTags.pinterest.pinUrl,
+    compilation: updated
+  };
+}
+
 export default {
   ensureDirs,
   getChannelSchedule,
   getUpcomingSelection,
+  generateAiMetadata,
   getHorizontalStatus,
   getHorizontalModels,
   getHorizontalHistory,
   createCompilation,
-  publishToYouTube
+  publishToYouTube,
+  publishToPinterest
 };
