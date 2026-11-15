@@ -1,8 +1,9 @@
-// Novedades semanales: un correo con los modelos más recientes para quienes están Activos.
+// Novedades semanales: un correo con los modelos más descargados de la semana para quienes están Activos.
 //
 // Cada semana (el día de NEWSLETTER_WEEKDAY, hora de Colombia) el motor pone en cola un correo
-// por contacto Activo. El contenido se arma justo al enviar: los modelos publicados en los
-// últimos días que ese usuario todavía no descargó. Si no hay modelos nuevos, no sale nada.
+// por contacto Activo. El contenido se arma justo al enviar: los modelos más descargados de la
+// semana que ese usuario todavía no descargó. Si faltan descargas de la semana se completa con
+// los más descargados de siempre.
 //
 // La plantilla de Brevo (NEWSLETTER_STEP.templateId) recibe la lista en `params.MODELS`,
 // cada elemento con { title, image, url }, y la repite con un bucle.
@@ -22,9 +23,9 @@ export const NEWSLETTER_WEEKDAY = 2;
 // Cuántos modelos lleva cada correo y cuántos hacen falta como mínimo para que valga la pena.
 export const NEWSLETTER_MODELS = 4;
 export const NEWSLETTER_MIN_MODELS = 2;
-// Se consideran novedades los modelos publicados en los últimos días.
-export const NEWSLETTER_FRESH_DAYS = 8;
-// Un correo en cola que lleva más de estos días sin salir ya no es una novedad: se descarta.
+// Ventana para contar descargas: los más descargados de los últimos días.
+export const NEWSLETTER_TOP_DAYS = 7;
+// Un correo en cola que lleva más de estos días sin salir ya quedó viejo: se descarta.
 export const NEWSLETTER_MAX_AGE_DAYS = 3;
 
 // ---------------------------------------------------------------- Funciones puras
@@ -76,7 +77,7 @@ export function pickImagePath(images, thumbExists = () => true) {
 
 /**
  * Elige los modelos de un correo: los más recientes que el usuario no descargó, en su idioma.
- * `assets` llega ordenado del más nuevo al más viejo.
+ * `assets` llega ordenado del más descargado al menos.
  */
 export function buildModels({
   assets,
@@ -107,14 +108,35 @@ export function buildModels({
 const uploadsDir = () => process.env.UPLOADS_DIR || path.resolve('uploads');
 const thumbOnDisk = (rel) => fs.existsSync(path.join(uploadsDir(), rel));
 
-/** Modelos publicados en los últimos `days` días, del más nuevo al más viejo. */
-export async function loadFreshAssets(now = new Date(), days = NEWSLETTER_FRESH_DAYS) {
-  return prisma.asset.findMany({
-    where: { status: 'PUBLISHED', createdAt: { gte: new Date(now.getTime() - days * DAY_MS) } },
-    orderBy: { createdAt: 'desc' },
-    take: 40,
-    select: { id: true, title: true, titleEn: true, slug: true, images: true },
+const ASSET_SELECT = { id: true, title: true, titleEn: true, slug: true, images: true };
+
+/**
+ * Modelos publicados más descargados en los últimos `days` días. Si no alcanzan, se completa
+ * con los más descargados de todos los tiempos. Orden: del más descargado al menos.
+ */
+export async function loadTopAssets(now = new Date(), days = NEWSLETTER_TOP_DAYS, limit = 40) {
+  const grouped = await prisma.downloadHistory.groupBy({
+    by: ['assetId'],
+    where: { downloadedAt: { gte: new Date(now.getTime() - days * DAY_MS) } },
+    _count: { assetId: true },
+    orderBy: { _count: { assetId: 'desc' } },
+    take: limit,
   });
+  const ids = grouped.map((g) => g.assetId);
+  const rows = ids.length
+    ? await prisma.asset.findMany({ where: { id: { in: ids }, status: 'PUBLISHED' }, select: ASSET_SELECT })
+    : [];
+  const byId = new Map(rows.map((a) => [a.id, a]));
+  const weekly = ids.map((id) => byId.get(id)).filter(Boolean);
+  if (weekly.length >= limit) return weekly;
+
+  const fill = await prisma.asset.findMany({
+    where: { status: 'PUBLISHED', id: { notIn: weekly.map((a) => a.id) } },
+    orderBy: { downloads: 'desc' },
+    take: limit - weekly.length,
+    select: ASSET_SELECT,
+  });
+  return [...weekly, ...fill];
 }
 
 /** Qué modelos de la lista ya descargó cada usuario. */
@@ -137,7 +159,7 @@ export const modelsForUser = ({ assets, downloaded, language, publicUrl }) =>
 
 /**
  * Pone en cola la edición de la semana para los contactos Activos. Solo actúa el día de envío
- * y solo si hay modelos nuevos que mostrar. La clave lleva la semana: una edición no se repite.
+ * y solo si hay modelos que mostrar. La clave lleva la semana: una edición no se repite.
  */
 export async function planNewsletter(cfg, now = new Date()) {
   if (!cfg.newsletterEnabled) return { planned: 0, reason: 'apagado' };
@@ -150,9 +172,9 @@ export async function planNewsletter(cfg, now = new Date()) {
   });
   if (already) return { planned: 0, reason: 'edición ya planificada' };
 
-  const fresh = await loadFreshAssets(now);
-  if (fresh.filter((a) => pickImagePath(a.images, thumbOnDisk)).length < NEWSLETTER_MIN_MODELS) {
-    return { planned: 0, reason: 'sin novedades' };
+  const top = await loadTopAssets(now);
+  if (top.filter((a) => pickImagePath(a.images, thumbOnDisk)).length < NEWSLETTER_MIN_MODELS) {
+    return { planned: 0, reason: 'sin modelos' };
   }
 
   const contacts = await prisma.emailContact.findMany({
@@ -185,7 +207,7 @@ export default {
   newsletterSkip,
   pickImagePath,
   buildModels,
-  loadFreshAssets,
+  loadTopAssets,
   loadDownloadedByUser,
   modelsForUser,
   planNewsletter,

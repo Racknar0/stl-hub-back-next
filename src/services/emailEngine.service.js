@@ -434,7 +434,7 @@ export async function sendDue(now = new Date()) {
 
   // Novedades: los modelos recientes se leen una vez por vuelta y se reparten por usuario.
   const newsletterDue = due.filter((d) => d.kind === NEWSLETTER_STEP.kind);
-  const freshAssets = newsletterDue.length ? await newsletter.loadFreshAssets(now) : [];
+  const freshAssets = newsletterDue.length ? await newsletter.loadTopAssets(now) : [];
   const downloadedBy = newsletterDue.length
     ? await newsletter.loadDownloadedByUser(
         newsletterDue.map((d) => d.contact.user.id),
@@ -476,7 +476,7 @@ export async function sendDue(now = new Date()) {
             publicUrl: cfg.publicUrl,
           })
         : null;
-    const finalReason = reason || (models && models.length < NEWSLETTER_MIN_MODELS ? 'sin novedades' : null);
+    const finalReason = reason || (models && models.length < NEWSLETTER_MIN_MODELS ? 'sin modelos' : null);
 
     if (finalReason) {
       await prisma.emailLog.update({
@@ -568,10 +568,10 @@ export async function sendTestEmail({ kind, userId }) {
   });
   if (!user) return { error: 'Usuario no encontrado' };
 
-  // En la prueba de novedades se usan los modelos más recientes aunque no sean de esta semana.
+  // En la prueba de novedades se usan los mismos modelos que saldrían hoy, sin filtrar por usuario.
   let models = null;
   if (step.kind === NEWSLETTER_STEP.kind) {
-    const assets = await newsletter.loadFreshAssets(new Date(), 3650);
+    const assets = await newsletter.loadTopAssets(new Date());
     models = newsletter.modelsForUser({
       assets,
       language: user.language || 'es',
