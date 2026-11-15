@@ -981,6 +981,18 @@ model ShortLink {
   @@map("shortlink")
 }
 
+/// Cada clic de una persona en un enlace corto (para la gráfica de clics por día)
+model ShortLinkClick {
+  id          Int      @id @default(autoincrement())
+  shortLinkId Int                      // enlace corto (sin FK, como el resto de métricas)
+  source      String   @db.VarChar(40) // red del enlace, copiada para agrupar sin join
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([shortLinkId])
+  @@map("shortlinkclick")
+}
+
 model TelegramChannel {
   id              Int       @id @default(autoincrement())
   name            String    @unique

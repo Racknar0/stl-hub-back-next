@@ -11,6 +11,7 @@ import { recordCampaignVisit } from '../../controllers/metrics.controller.js'
 import { getSalesMetrics, getTrafficSources } from '../../controllers/metrics.controller.js'
 import { requireAuth, requireAdmin } from '../../middlewares/auth.js'
 import { getFreebieRollTimeseries } from '../../controllers/freebieMetrics.controller.js'
+import { getShortLinkClicksTimeseries } from '../../controllers/shortLinkMetrics.controller.js'
 
 const router = express.Router()
 
@@ -44,5 +45,7 @@ router.get('/search-insights', getSearchInsights)
 router.get('/recent-searches', getRecentSearches)
 router.get('/plan-clicks/timeseries', getPlanClickTimeseries)
 router.get('/freebie-rolls/timeseries', getFreebieRollTimeseries)
+// Clics en los enlaces cortos (stlgratis.com/v/…) por día
+router.get('/short-links/timeseries', getShortLinkClicksTimeseries)
 
 export default router

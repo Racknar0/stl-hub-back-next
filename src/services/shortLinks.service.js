@@ -71,10 +71,10 @@ export async function resolveShortLink(code, { userAgent = '' } = {}) {
   const link = await prisma.shortLink.findUnique({ where: { code: clean } });
   if (!link) return null;
   if (!BOT_UA.test(String(userAgent))) {
-    await prisma.shortLink.update({
-      where: { id: link.id },
-      data: { clicks: { increment: 1 }, lastClickAt: new Date() },
-    }).catch(() => {});
+    await prisma.$transaction([
+      prisma.shortLink.update({ where: { id: link.id }, data: { clicks: { increment: 1 }, lastClickAt: new Date() } }),
+      prisma.shortLinkClick.create({ data: { shortLinkId: link.id, source: link.source } }),
+    ]).catch(e => console.warn('[SHORT] No se pudo registrar el clic:', e.message));
   }
   return link.targetUrl;
 }
