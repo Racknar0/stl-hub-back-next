@@ -26,6 +26,7 @@ import notesRoutes from './notes/index.js';
 import pinterestRoutes from './pinterest/index.js';
 import reelsRoutes from './reels/index.js';
 import shortLinksRoutes from './shortLinks/index.js';
+import adminShortLinksRoutes from './shortLinks/admin.js';
 import heroBannersRoutes, { publicHeroBannersRouter } from './heroBanners/index.js';
 import { requireAuth, requireAdmin, requireAuthOrQueryToken } from '../middlewares/auth.js';
 import {
@@ -67,6 +68,7 @@ router.use('/file-explorer', requireAuthOrQueryToken, requireAdmin, fileExplorer
 router.use('/pinterest', pinterestRoutes);
 // Enlaces cortos propios: /api/s/<code> (público, lo usa la ruta /v/<code> del front)
 router.use('/s', shortLinksRoutes);
+router.use('/admin/short-links', adminShortLinksRoutes);
 router.use('/reels', reelsRoutes);
 router.use('/', telegramRoutes);
 

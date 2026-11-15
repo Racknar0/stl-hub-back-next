@@ -79,4 +79,37 @@ export async function resolveShortLink(code, { userAgent = '' } = {}) {
   return link.targetUrl;
 }
 
-export default { createShortLink, shortOrLong, setFixedLink, resolveShortLink, shortUrl, BIO_CODE };
+const SOURCES = ['youtube_horizontal', 'facebook', 'youtube_short', 'threads', 'instagram_bio'];
+
+/** Enlaces cortos con sus clics (para el panel), más los totales por origen. */
+export async function listShortLinks({ source = null, q = '', limit = 300 } = {}) {
+  const where = {
+    ...(source && SOURCES.includes(source) ? { source } : {}),
+    ...(q ? { OR: [{ label: { contains: String(q) } }, { targetUrl: { contains: String(q) } }, { code: { contains: String(q).toLowerCase() } }] } : {}),
+  };
+  const [rows, grouped] = await Promise.all([
+    prisma.shortLink.findMany({
+      where,
+      orderBy: [{ clicks: 'desc' }, { createdAt: 'desc' }],
+      take: Math.min(Math.max(Number(limit) || 300, 1), 1000),
+    }),
+    prisma.shortLink.groupBy({ by: ['source'], where: { source: { in: SOURCES } }, _count: { _all: true }, _sum: { clicks: true } }),
+  ]);
+  const bySource = SOURCES.map((s) => {
+    const g = grouped.find(x => x.source === s);
+    return { source: s, links: g?._count?._all || 0, clicks: g?._sum?.clicks || 0 };
+  });
+  return {
+    totals: {
+      links: bySource.reduce((a, b) => a + b.links, 0),
+      clicks: bySource.reduce((a, b) => a + b.clicks, 0),
+      bySource,
+    },
+    links: rows.map(r => ({
+      id: r.id, code: r.code, shortUrl: shortUrl(r.code), targetUrl: r.targetUrl, source: r.source, label: r.label,
+      refType: r.refType, refId: r.refId, clicks: r.clicks, lastClickAt: r.lastClickAt, createdAt: r.createdAt,
+    })),
+  };
+}
+
+export default { createShortLink, shortOrLong, setFixedLink, resolveShortLink, listShortLinks, shortUrl, BIO_CODE };
