@@ -26,15 +26,38 @@ async function graph(method, path, params = {}, token = process.env.META_SYSTEM_
   return data;
 }
 
-// El token de la Página caduca con el del usuario del sistema (nunca): se cachea mientras corre el servidor
-let pageTokenCache = null;
-async function pageToken() {
-  if (!pageTokenCache) {
-    const page = await graph('GET', process.env.META_PAGE_ID, { fields: 'access_token' });
+// El token de cada Página caduca con el del usuario del sistema (nunca): se cachea mientras corre el servidor
+const pageTokenCache = new Map();
+async function pageToken(pageId) {
+  if (!pageTokenCache.has(pageId)) {
+    const page = await graph('GET', pageId, { fields: 'access_token' });
     if (!page.access_token) throw new Error('Meta: no se obtuvo el token de la Página (¿está asignada al usuario del sistema?)');
-    pageTokenCache = page.access_token;
+    pageTokenCache.set(pageId, page.access_token);
   }
-  return pageTokenCache;
+  return pageTokenCache.get(pageId);
+}
+
+// Páginas de Facebook asignadas al usuario del sistema en el portafolio (se cachean 10 min)
+let pagesCache = { at: 0, list: [] };
+/**
+ * Lista las Páginas donde se puede publicar: la principal (META_PAGE_ID) primero y luego las demás
+ * que estén asignadas al usuario del sistema "stlhub-publisher" en Meta Business.
+ */
+export async function listFacebookPages({ fresh = false } = {}) {
+  if (!metaConfigured()) return [];
+  if (!fresh && Date.now() - pagesCache.at < 10 * 60 * 1000 && pagesCache.list.length) return pagesCache.list;
+  const primaryId = String(process.env.META_PAGE_ID);
+  let pages = [];
+  try {
+    const data = await graph('GET', 'me/accounts', { fields: 'id,name', limit: '50' });
+    pages = (data.data || []).map(p => ({ id: String(p.id), name: p.name }));
+  } catch (e) {
+    console.warn('[REELS][FB] No se pudieron listar las Páginas:', e.message);
+  }
+  if (!pages.some(p => p.id === primaryId)) pages.unshift({ id: primaryId, name: 'Página principal' });
+  pages.sort((a, b) => (a.id === primaryId ? -1 : b.id === primaryId ? 1 : a.name.localeCompare(b.name)));
+  pagesCache = { at: Date.now(), list: pages };
+  return pages;
 }
 
 /** Instagram Reel: contenedor → esperar a que Instagram procese el video → publicar. */
@@ -59,9 +82,8 @@ export async function publishInstagramReel({ videoUrl, caption }) {
 }
 
 /** Facebook Reel: iniciar subida → Meta descarga el video de la URL → publicar → primer comentario con el link. */
-export async function publishFacebookReel({ videoAbsPath, videoUrl, caption, firstComment }) {
-  const pageId = process.env.META_PAGE_ID;
-  const token = await pageToken();
+export async function publishFacebookReel({ pageId = process.env.META_PAGE_ID, videoAbsPath, videoUrl, caption, firstComment }) {
+  const token = await pageToken(pageId);
 
   const { video_id: videoId } = await graph('POST', `${pageId}/video_reels`, { upload_phase: 'start' }, token);
   // Se sube el archivo directamente: el descargador de Facebook recibe 403 de la web (protección antibots),
@@ -115,4 +137,4 @@ export async function publishFacebookReel({ videoAbsPath, videoUrl, caption, fir
   };
 }
 
-export default { metaConfigured, publishInstagramReel, publishFacebookReel };
+export default { metaConfigured, listFacebookPages, publishInstagramReel, publishFacebookReel };

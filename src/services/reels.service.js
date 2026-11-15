@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { PrismaClient } from '@prisma/client';
 import { generateReelTexts, generateYoutubeVariant, mockReelTexts, isMockAi, captionBody } from './reelsAi.service.js';
-import { metaConfigured, publishInstagramReel, publishFacebookReel } from './metaReels.service.js';
+import { metaConfigured, listFacebookPages, publishInstagramReel, publishFacebookReel } from './metaReels.service.js';
 import { dispatchReelNotification } from '../utils/reelsNotifications.js';
 import { uploadShort, connectionStatus as youtubeStatus, listChannels as youtubeChannels } from './youtube.service.js';
 import { publishVideo as publishTiktokVideo, connectionStatus as tiktokStatus, tiktokOptionsProblem } from './tiktok.service.js';
@@ -333,6 +333,21 @@ async function youtubeTargets(post) {
   });
 }
 
+/**
+ * Páginas de Facebook de un reel: la principal usa la clave "facebook"; las demás páginas asignadas al usuario
+ * del sistema usan "facebook:<id>". Todas llevan el mismo caption.
+ */
+async function facebookTargets(post) {
+  const pages = await listFacebookPages().catch(() => []);
+  if (!pages.length) return [];
+  const chosen = Array.isArray(post.facebookPages) ? post.facebookPages : pages.map(p => p.id);
+  return pages.filter(p => chosen.includes(p.id)).map(p => ({
+    key: p.id === pages[0].id ? 'facebook' : `facebook:${p.id}`,
+    pageId: p.id,
+    pageName: p.name,
+  }));
+}
+
 const PLATFORM_NAMES = { instagram: 'Instagram', facebook: 'Facebook', youtube: 'YouTube', tiktok: 'TikTok', threads: 'Threads' };
 
 // Reels que se están subiendo ahora mismo (evita publicar dos veces el mismo si coinciden el worker y "Publicar ahora")
@@ -343,8 +358,11 @@ async function publishToPlatform(platform, post) {
   if (platform === 'instagram') {
     return publishInstagramReel({ videoUrl: publicVideoUrl(post.videoPath), caption: withHashtags(post.caption, post) });
   }
-  if (platform === 'facebook') {
-    return publishFacebookReel({ videoAbsPath: toAbsVideoPath(post.videoPath), videoUrl: publicVideoUrl(post.videoPath), caption: withHashtags(post.facebookCaption || post.caption, post), firstComment: link ? `🔗 ${link}` : null });
+  if (platform === 'facebook' || platform.startsWith('facebook:')) {
+    const target = (await facebookTargets(post)).find(t => t.key === platform);
+    if (!target) throw new Error('Esa Página de Facebook ya no está asignada al usuario del sistema');
+    const result = await publishFacebookReel({ pageId: target.pageId, videoAbsPath: toAbsVideoPath(post.videoPath), videoUrl: publicVideoUrl(post.videoPath), caption: withHashtags(post.facebookCaption || post.caption, post), firstComment: link ? `🔗 ${link}` : null });
+    return { ...result, pageId: target.pageId, pageName: target.pageName };
   }
   if (platform === 'youtube' || platform.startsWith('youtube:')) {
     const { youtubePrivacy } = await getSettings();
@@ -393,9 +411,15 @@ export async function publishReel(post) {
     const results = { ...(post.results && typeof post.results === 'object' ? post.results : {}) };
     const errors = [];
     // YouTube se publica en cada canal elegido: cada uno es un destino aparte
+    // Igual con Facebook: cada Página elegida es un destino aparte
     const ytTargets = platforms.includes('youtube') ? await youtubeTargets(post) : [];
-    const targets = platforms.flatMap(p => (p === 'youtube' ? ytTargets.map(t => t.key) : [p]));
-    const nameOf = (key) => (key.startsWith('youtube:') ? `YouTube (${ytTargets.find(t => t.key === key)?.channelTitle || 'canal'})` : PLATFORM_NAMES[key] || key);
+    const fbTargets = platforms.includes('facebook') ? await facebookTargets(post) : [];
+    const targets = platforms.flatMap(p => (p === 'youtube' ? ytTargets.map(t => t.key) : p === 'facebook' ? fbTargets.map(t => t.key) : [p]));
+    const nameOf = (key) => {
+      if (key.startsWith('youtube:')) return `YouTube (${ytTargets.find(t => t.key === key)?.channelTitle || 'canal'})`;
+      if (key.startsWith('facebook:')) return `Facebook (${fbTargets.find(t => t.key === key)?.pageName || 'página'})`;
+      return PLATFORM_NAMES[key] || key;
+    };
     for (const p of targets) {
       if (results[p]?.id && !results[p].simulated) continue;
       try {

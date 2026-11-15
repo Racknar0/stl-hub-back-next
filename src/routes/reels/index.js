@@ -8,6 +8,7 @@ import reels, { PLATFORMS, assetLink, dayKey, defaultPlatforms } from '../../ser
 import youtube from '../../services/youtube.service.js';
 import tiktok, { PRIVACY_LEVELS } from '../../services/tiktok.service.js';
 import threads from '../../services/threads.service.js';
+import { listFacebookPages } from '../../services/metaReels.service.js';
 import horizontalRoutes from './horizontal.js';
 
 const router = express.Router();
@@ -202,7 +203,8 @@ router.get('/connection-status', requireAuth, requireAdmin, async (req, res) => 
   ]);
   res.json({
     instagram: { configured: meta },
-    facebook: { configured: meta },
+    // Páginas asignadas al usuario del sistema (la principal primero)
+    facebook: { configured: meta, pages: meta ? await listFacebookPages({ fresh: req.query.fresh === '1' }).catch(() => []) : [] },
     youtube: { ...yt, appConfigured: youtube.youtubeConfigured() },
     tiktok: { ...tt, appConfigured: tiktok.tiktokConfigured() },
     threads: { ...th, appConfigured: threads.threadsConfigured() },
@@ -350,6 +352,7 @@ router.put('/:id', requireAuth, requireAdmin, async (req, res) => {
       ...(b.tiktokOptions !== undefined && { tiktokOptions: normalizeTiktokOptions(b.tiktokOptions) }),
       ...(b.title !== undefined && { title: text(b.title) }),
       ...(b.youtubeDescription !== undefined && { youtubeDescription: text(b.youtubeDescription) }),
+      ...(b.facebookPages !== undefined && { facebookPages: Array.isArray(b.facebookPages) ? b.facebookPages.map(String).slice(0, 10) : null }),
       ...(b.youtubeChannels !== undefined && { youtubeChannels: Array.isArray(b.youtubeChannels) ? b.youtubeChannels.map(String).slice(0, 10) : null }),
       ...(b.youtubeVariants !== undefined && { youtubeVariants: normalizeYoutubeVariants(b.youtubeVariants) }),
       ...(b.onScreenText !== undefined && { onScreenText: text(b.onScreenText)?.slice(0, 120) ?? null }),
