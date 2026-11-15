@@ -364,7 +364,8 @@ const publicVideoUrl = (videoPath) => `${PUBLIC_UPLOADS_BASE}/${String(videoPath
 
 /**
  * Canales de YouTube de un reel: el principal (el primero conectado) usa la clave "youtube" y el título/descripción
- * del reel; los demás usan "youtube:<id>", su propio texto y se programan unas horas después para no salir a la vez.
+ * del reel; los demás usan "youtube:<id>" y su propio texto. Los canales extra quedan "en espera" y el worker
+ * los publica a su hora (~2 h, ~4 h después) para no salir a la vez.
  */
 async function youtubeTargets(post) {
   const channels = await youtubeChannels().catch(() => []);
@@ -384,14 +385,15 @@ async function youtubeTargets(post) {
       channelIndex: primary ? 0 : extra,
       title: (!primary && v.title) || post.title,
       description: (!primary && v.description) || post.youtubeDescription,
-      publishAt: delayMin > 0 ? new Date(Date.now() + delayMin * 60000).toISOString() : null,
+      delayMin,
     };
   });
 }
 
 /**
  * Páginas de Facebook de un reel: la principal usa la clave "facebook" y el caption del reel; las demás páginas
- * asignadas al usuario del sistema usan "facebook:<id>", su propio caption y se programan unas horas después.
+ * asignadas al usuario del sistema usan "facebook:<id>" y su propio caption. Las Páginas extra quedan "en espera"
+ * y el worker las publica a su hora (~2 h, ~4 h después), con el comentario del link al momento.
  */
 async function facebookTargets(post) {
   const pages = await listFacebookPages().catch(() => []);
@@ -407,8 +409,9 @@ async function facebookTargets(post) {
       key: primary ? 'facebook' : `facebook:${p.id}`,
       pageId: p.id,
       pageName: p.name,
+      channelIndex: primary ? 0 : extra,
       caption: (!primary && variants[p.id]?.caption) || post.facebookCaption || post.caption,
-      publishAt: delayMin > 0 ? new Date(Date.now() + delayMin * 60000).toISOString() : null,
+      delayMin,
     };
   });
 }
@@ -431,6 +434,7 @@ async function instagramTargets(post) {
       key: primary ? 'instagram' : `instagram:${a.id}`,
       igUserId: a.id,
       username: a.username,
+      channelIndex: primary ? 0 : extra,
       caption: (!primary && variants[a.id]?.caption) || post.caption,
       delayMin,
     };
@@ -442,34 +446,51 @@ const PLATFORM_NAMES = { instagram: 'Instagram', facebook: 'Facebook', youtube: 
 // Reels que se están subiendo ahora mismo (evita publicar dos veces el mismo si coinciden el worker y "Publicar ahora")
 const inFlight = new Set();
 
+// Cuenta extra (Instagram, Página de Facebook o canal de YouTube): no se publica aún; el worker la publica a su hora
+const deferredResult = (target, info) => ({ ...info, deferred: true, publishAt: new Date(Date.now() + target.delayMin * 60000).toISOString() });
+
+/**
+ * Video de una cuenta: la principal usa el original y las extra la misma variante con filtros (espejo, zoom/giro)
+ * que los canales de YouTube, para que no salga idéntico en todas. Devuelve la ruta local y la URL pública.
+ */
+async function accountVideo(post, target, label) {
+  const abs = await getChannelVariantVideo({
+    postId: post.id, originalAbsPath: toAbsVideoPath(post.videoPath), channelIndex: target.channelIndex || 0, channelTitle: label,
+  });
+  const rel = path.relative(path.resolve('uploads'), abs).split(path.sep).join('/');
+  return { abs, url: publicVideoUrl(rel) };
+}
+
 async function publishToPlatform(platform, post, { now = false } = {}) {
   const link = platformLink(post.link, platform, post.id);
   if (platform === 'instagram' || platform.startsWith('instagram:')) {
     const target = (await instagramTargets(post)).find(t => t.key === platform);
     if (!target) throw new Error('Esa cuenta de Instagram ya no está vinculada a una Página asignada');
     const info = { igUserId: target.igUserId, username: target.username };
-    // Cuenta extra: queda en espera y el worker la publica a su hora
-    if (target.delayMin > 0 && !now) {
-      return { ...info, deferred: true, publishAt: new Date(Date.now() + target.delayMin * 60000).toISOString() };
-    }
-    const result = await publishInstagramReel({ igUserId: target.igUserId, videoUrl: publicVideoUrl(post.videoPath), caption: withHashtags(target.caption, post) });
+    if (target.delayMin > 0 && !now) return deferredResult(target, info);
+    const video = await accountVideo(post, target, `Instagram @${target.username}`);
+    const result = await publishInstagramReel({ igUserId: target.igUserId, videoUrl: video.url, caption: withHashtags(target.caption, post) });
     return { ...result, ...info };
   }
   if (platform === 'facebook' || platform.startsWith('facebook:')) {
     const target = (await facebookTargets(post)).find(t => t.key === platform);
     if (!target) throw new Error('Esa Página de Facebook ya no está asignada al usuario del sistema');
+    const info = { pageId: target.pageId, pageName: target.pageName };
+    if (target.delayMin > 0 && !now) return deferredResult(target, info);
     const firstComment = link ? `🔗 ${link}` : null;
+    const video = await accountVideo(post, target, `Facebook ${target.pageName}`);
     const result = await publishFacebookReel({
-      pageId: target.pageId, videoAbsPath: toAbsVideoPath(post.videoPath), videoUrl: publicVideoUrl(post.videoPath),
-      caption: withHashtags(target.caption, post), firstComment, publishAt: target.publishAt,
+      pageId: target.pageId, videoAbsPath: video.abs, videoUrl: video.url,
+      caption: withHashtags(target.caption, post), firstComment,
     });
-    // Programado: el worker pone el comentario con el link en cuanto Facebook lo publique
-    return { ...result, pageId: target.pageId, pageName: target.pageName, ...(target.publishAt && firstComment && { pendingComment: firstComment }) };
+    return { ...result, ...info };
   }
   if (platform === 'youtube' || platform.startsWith('youtube:')) {
     const { youtubePrivacy } = await getSettings();
     const target = (await youtubeTargets(post)).find(t => t.key === platform);
     if (!target) throw new Error('Ese canal de YouTube ya no está conectado');
+    const info = { channelId: target.channelId, channelTitle: target.channelTitle };
+    if (target.delayMin > 0 && !now) return deferredResult(target, info);
     const description = [String(target.description || '').trim(), link].filter(Boolean).join(' ');
 
     const originalAbsPath = toAbsVideoPath(post.videoPath);
@@ -480,10 +501,11 @@ async function publishToPlatform(platform, post, { now = false } = {}) {
       channelTitle: target.channelTitle,
     });
 
-    return uploadShort({
+    const result = await uploadShort({
       channelId: target.channelId, videoAbsPath, title: target.title, description,
-      tags: Array.isArray(post.hashtags) ? post.hashtags : [], privacyStatus: youtubePrivacy, publishAt: target.publishAt,
+      tags: Array.isArray(post.hashtags) ? post.hashtags : [], privacyStatus: youtubePrivacy,
     });
+    return { ...result, ...info };
   }
   if (platform === 'threads') {
     return publishThreadsVideo({ videoUrl: publicVideoUrl(post.videoPath), text: threadsText(captionBody(post.caption), link) });
@@ -532,8 +554,11 @@ export async function publishReel(post) {
       if ((results[p]?.id && !results[p].simulated) || results[p]?.deferred) continue;
       try {
         // Si una cuenta en espera falló antes, al reintentar se publica ya
-        results[p] = { ...(await publishToPlatform(p, post, { now: !!results[p]?.failed })), publishedAt: new Date().toISOString(), simulated: false };
-        console.log(`[REELS] Reel ${post.id} publicado en ${p}: ${results[p].url || results[p].id}`);
+        const res = await publishToPlatform(p, post, { now: !!results[p]?.failed });
+        results[p] = { ...res, ...(!res.deferred && { publishedAt: new Date().toISOString() }), simulated: false };
+        console.log(res.deferred
+          ? `[REELS] Reel ${post.id}: ${p} en espera hasta ${res.publishAt}`
+          : `[REELS] Reel ${post.id} publicado en ${p}: ${res.url || res.id}`);
       } catch (e) {
         delete results[p];
         errors.push(`${nameOf(p)}: ${e.message}`);
@@ -666,49 +691,100 @@ export async function commentScheduledFacebookReels() {
   }
 }
 
+const DEFERRED_PREFIXES = ['instagram:', 'facebook:', 'youtube:'];
+// Plataforma y lista de cuentas elegidas del reel para cada tipo de cuenta extra
+const DEFERRED_CHOICE = { instagram: 'instagramAccounts', facebook: 'facebookPages', youtube: 'youtubeChannels' };
+
+function deferredName(key, r) {
+  if (key.startsWith('instagram:')) return `Instagram (@${r.username || 'cuenta'})`;
+  if (key.startsWith('facebook:')) return `Facebook (${r.pageName || 'página'})`;
+  return `YouTube (${r.channelTitle || 'canal'})`;
+}
+
+/** true si el usuario quitó esa cuenta (o su red) del reel después de que quedara en espera. */
+function deferredUnselected(key, post) {
+  const [platform, id] = key.split(':');
+  if (!(Array.isArray(post.platforms) ? post.platforms : []).includes(platform)) return true;
+  const chosen = post[DEFERRED_CHOICE[platform]];
+  return Array.isArray(chosen) && !chosen.includes(id);
+}
+
 let deferredRunning = false;
-/** Publica las cuentas de Instagram extra que quedaron en espera cuando les llega su hora. */
-export async function publishDeferredInstagram() {
+/**
+ * Publica las cuentas extra (Instagram, Páginas de Facebook y canales de YouTube) que quedaron en espera cuando les
+ * llega su hora. Si una falla, el reel queda en error y se avisa en el panel; "Reintentar" la publica al momento.
+ */
+export async function publishDeferredTargets() {
+  const posts = await prisma.reelPost.findMany({
+    where: { updatedAt: { gte: new Date(Date.now() - 3 * 24 * 3600 * 1000) }, publishing: false },
+  });
+  for (const post of posts) {
+    const results = post.results && typeof post.results === 'object' ? { ...post.results } : null;
+    if (!results || inFlight.has(post.id)) continue;
+    const due = Object.entries(results).filter(([key, r]) => DEFERRED_PREFIXES.some(pre => key.startsWith(pre))
+      && r?.deferred && new Date(r.publishAt).getTime() <= Date.now());
+    if (!due.length) continue;
+    inFlight.add(post.id);
+    const errors = [];
+    const warnings = [];
+    const failedNames = [];
+    try {
+      for (const [key, r] of due) {
+        // La cuenta se quitó del reel mientras esperaba: no se publica
+        if (deferredUnselected(key, post)) {
+          delete results[key];
+          console.log(`[REELS] Reel ${post.id}: ${key} se quitó del reel, no se publica`);
+          continue;
+        }
+        try {
+          const res = await publishToPlatform(key, post, { now: true });
+          results[key] = { ...res, publishAt: r.publishAt, publishedAt: new Date().toISOString(), simulated: false };
+          console.log(`[REELS] Reel ${post.id} publicado en ${key}: ${res.url || res.id}`);
+          if (res.commentError) warnings.push({ key, res });
+        } catch (e) {
+          results[key] = { ...r, deferred: false, failed: true, error: e.message };
+          failedNames.push(deferredName(key, r));
+          errors.push(`${deferredName(key, r)}: ${e.message}`);
+          console.error(`[REELS] Reel ${post.id} falló en ${key}:`, e.message);
+        }
+      }
+      await prisma.reelPost.update({
+        where: { id: post.id },
+        data: { results, ...(errors.length && { status: 'FAILED', errorMessage: errors.join(' | ') }) },
+      });
+      if (errors.length) {
+        dispatchReelNotification({
+          post,
+          title: failedNames.length === 1 ? `No se pudo publicar en ${failedNames[0]}` : 'No se pudo publicar en varias cuentas',
+          detail: `${errors.join('\n')}\n\nUsa "Reintentar publicación": se publicará al momento en esas cuentas.`,
+        });
+      }
+      for (const { key, res } of warnings) {
+        dispatchReelNotification({
+          post,
+          level: 'WARNING',
+          title: `${deferredName(key, res)}: reel sin comentario con el link`,
+          detail: `El reel se publicó, pero no se pudo poner el primer comentario con el link.\n\nError: ${res.commentError}\n\nPuedes añadir el comentario a mano en Facebook.`,
+          links: [{ label: 'Reel de Facebook', url: res.url }, { label: 'Link a comentar', url: platformLink(post.link, 'facebook', post.id) }],
+        });
+      }
+    } finally {
+      inFlight.delete(post.id);
+    }
+  }
+}
+
+/**
+ * Tareas que tocan los resultados de reels ya publicados: van una detrás de otra para que ninguna pise lo que
+ * guardó la otra.
+ */
+async function runResultTasks() {
   if (deferredRunning) return;
   deferredRunning = true;
   try {
-    const posts = await prisma.reelPost.findMany({
-      where: { updatedAt: { gte: new Date(Date.now() - 3 * 24 * 3600 * 1000) }, publishing: false },
-    });
-    for (const post of posts) {
-      const results = post.results && typeof post.results === 'object' ? { ...post.results } : null;
-      if (!results || inFlight.has(post.id)) continue;
-      const due = Object.entries(results).filter(([key, r]) => key.startsWith('instagram:') && r?.deferred && new Date(r.publishAt).getTime() <= Date.now());
-      if (!due.length) continue;
-      inFlight.add(post.id);
-      const errors = [];
-      try {
-        for (const [key, r] of due) {
-          try {
-            const res = await publishToPlatform(key, post, { now: true });
-            results[key] = { ...res, publishAt: r.publishAt, publishedAt: new Date().toISOString(), simulated: false };
-            console.log(`[REELS] Reel ${post.id} publicado en ${key}: ${res.url || res.id}`);
-          } catch (e) {
-            results[key] = { ...r, deferred: false, failed: true, error: e.message };
-            errors.push(`Instagram (@${r.username || 'cuenta'}): ${e.message}`);
-            console.error(`[REELS] Reel ${post.id} falló en ${key}:`, e.message);
-          }
-        }
-        await prisma.reelPost.update({
-          where: { id: post.id },
-          data: { results, ...(errors.length && { status: 'FAILED', errorMessage: errors.join(' | ') }) },
-        });
-        if (errors.length) {
-          dispatchReelNotification({
-            post,
-            title: 'Instagram: no se pudo publicar en una cuenta',
-            detail: `${errors.join('\n')}\n\nUsa "Reintentar publicación": se publicará al momento en esa cuenta.`,
-          });
-        }
-      } finally {
-        inFlight.delete(post.id);
-      }
-    }
+    // Solo para reels antiguos que quedaron programados en Facebook antes de pasar todo a "en espera"
+    await commentScheduledFacebookReels().catch(e => console.error('[REELS] Comentarios FB:', e.message));
+    await publishDeferredTargets().catch(e => console.error('[REELS] Cuentas en espera:', e.message));
   } finally {
     deferredRunning = false;
   }
@@ -729,8 +805,7 @@ export function startReelsWorker(intervalMs = 60000) {
     .catch(e => console.error('[REELS] Worker:', e.message));
   workerTimer = setInterval(() => {
     publishDueReels().catch(e => console.error('[REELS] Worker:', e.message));
-    commentScheduledFacebookReels().catch(e => console.error('[REELS] Comentarios FB:', e.message));
-    publishDeferredInstagram().catch(e => console.error('[REELS] Instagram en espera:', e.message));
+    runResultTasks();
   }, intervalMs);
 }
 

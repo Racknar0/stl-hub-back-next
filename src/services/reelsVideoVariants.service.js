@@ -27,7 +27,7 @@ function runFfmpeg(args) {
 }
 
 /**
- * Resuelve o genera la variante de video específica para un canal de YouTube:
+ * Resuelve o genera la variante de video de una cuenta extra (canal de YouTube, Página de Facebook o cuenta de Instagram):
  * - Canal 0 (Principal - Ozaru_art): devuelve el video original sin tocar.
  * - Canal 1 (stlgratis): efecto espejo horizontal (hflip).
  * - Canal 2 (stl-gratis): espejo horizontal + ligero zoom e inclinación (1.5°).
