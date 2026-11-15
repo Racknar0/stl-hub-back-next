@@ -12,6 +12,7 @@
 import crypto from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 import brevo from './brevo.service.js';
+import newsletter, { NEWSLETTER_STEP, NEWSLETTER_MIN_MODELS } from './emailNewsletter.service.js';
 import { scheduleStep, zonedParts, clampToSendWindow, timezoneForCountry } from '../utils/emailSchedule.js';
 
 const prisma = new PrismaClient();
@@ -33,6 +34,7 @@ export const SETTING_KEYS = {
   start: 'EMAIL_ENGINE_START',
   dailyLimit: 'EMAIL_DAILY_LIMIT',
   dailyReserve: 'EMAIL_DAILY_RESERVE',
+  newsletter: 'EMAIL_NEWSLETTER_ENABLED',
 };
 
 const toDate = (value) => {
@@ -46,6 +48,8 @@ export function buildConfig(env = process.env, overrides = {}) {
   const pick = (key) => (overrides[key] !== undefined && overrides[key] !== '' ? overrides[key] : env[key]);
   return {
     enabled: pick(SETTING_KEYS.enabled) === 'true',
+    // Novedades semanales: apagadas hasta que se encienden desde el panel.
+    newsletterEnabled: pick(SETTING_KEYS.newsletter) === 'true',
     start: toDate(pick(SETTING_KEYS.start)),
     dailyLimit: Number(pick(SETTING_KEYS.dailyLimit) || 300),
     // Cupo que se deja libre para los correos de activación y contraseña, que cuentan igual.
@@ -127,6 +131,12 @@ export function parseEngineSettings(body = {}, { current, hasSecret }) {
     next.enabled = body.enabled;
   }
 
+  if (body.newsletterEnabled !== undefined) {
+    if (typeof body.newsletterEnabled !== 'boolean') return { error: 'newsletterEnabled debe ser verdadero o falso' };
+    values[SETTING_KEYS.newsletter] = String(body.newsletterEnabled);
+    next.newsletterEnabled = body.newsletterEnabled;
+  }
+
   if (body.start !== undefined) {
     if (body.start === null || body.start === '') {
       values[SETTING_KEYS.start] = '';
@@ -155,6 +165,7 @@ export function parseEngineSettings(body = {}, { current, hasSecret }) {
 
   if (next.dailyReserve >= next.dailyLimit) return { error: 'La reserva debe ser menor que el límite diario' };
   if (next.enabled && !next.start) return { error: 'Para encender el motor define antes la fecha de corte' };
+  if (next.newsletterEnabled && !next.start) return { error: 'Para encender las novedades define antes la fecha de corte' };
   if (next.enabled && !hasSecret) return { error: 'Falta EMAIL_UNSUBSCRIBE_SECRET en el servidor' };
 
   return { values };
@@ -365,8 +376,11 @@ export async function planPremiumNotices(now = new Date()) {
 
 // ---------------------------------------------------------------- Envío
 
+const tagOf = (kind) =>
+  kind === 'REENGAGE' ? 'reengage' : kind === NEWSLETTER_STEP.kind ? 'newsletter' : PREMIUM_STEPS[kind] ? 'premium' : 'funnel';
+
 const stepOf = (kind) =>
-  [...FUNNEL, REENGAGE_STEP, ...Object.values(PREMIUM_STEPS)].find((s) => s.kind === kind);
+  [...FUNNEL, REENGAGE_STEP, ...Object.values(PREMIUM_STEPS), NEWSLETTER_STEP].find((s) => s.kind === kind);
 
 /** Envía los correos vencidos respetando el cupo diario. */
 export async function sendDue(now = new Date()) {
@@ -418,6 +432,16 @@ export async function sendDue(now = new Date()) {
     ? await latestEndByUser({ userId: { in: noticeUserIds } })
     : new Map();
 
+  // Novedades: los modelos recientes se leen una vez por vuelta y se reparten por usuario.
+  const newsletterDue = due.filter((d) => d.kind === NEWSLETTER_STEP.kind);
+  const freshAssets = newsletterDue.length ? await newsletter.loadFreshAssets(now) : [];
+  const downloadedBy = newsletterDue.length
+    ? await newsletter.loadDownloadedByUser(
+        newsletterDue.map((d) => d.contact.user.id),
+        freshAssets
+      )
+    : new Map();
+
   let sent = 0;
   let skipped = 0;
   let failed = 0;
@@ -440,11 +464,24 @@ export async function sendDue(now = new Date()) {
             currentEnd: endByUser.get(user.id),
             now,
           })
-        : null);
-    if (reason) {
+        : null) ||
+      (log.kind === NEWSLETTER_STEP.kind ? newsletter.newsletterSkip({ scheduledFor: log.scheduledFor, now }) : null);
+
+    const models =
+      !reason && log.kind === NEWSLETTER_STEP.kind
+        ? newsletter.modelsForUser({
+            assets: freshAssets,
+            downloaded: downloadedBy.get(user.id),
+            language: user.language || 'es',
+            publicUrl: cfg.publicUrl,
+          })
+        : null;
+    const finalReason = reason || (models && models.length < NEWSLETTER_MIN_MODELS ? 'sin novedades' : null);
+
+    if (finalReason) {
       await prisma.emailLog.update({
         where: { id: log.id },
-        data: { status: 'SKIPPED', lastError: reason },
+        data: { status: 'SKIPPED', lastError: finalReason },
       });
       skipped += 1;
       continue;
@@ -463,8 +500,9 @@ export async function sendDue(now = new Date()) {
           ...(PREMIUM_STEPS[log.kind]
             ? { EXPIRY_DATE: formatExpiryDate(String(log.dedupeKey).split(':')[2], user.language || 'es') }
             : {}),
+          ...(models ? { MODELS: models } : {}),
         },
-        tags: [log.kind === 'REENGAGE' ? 'reengage' : PREMIUM_STEPS[log.kind] ? 'premium' : 'funnel', log.kind],
+        tags: [tagOf(log.kind), log.kind],
         headers: {
           'List-Unsubscribe': `<${unsubscribeUrl}>`,
           'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
@@ -530,6 +568,18 @@ export async function sendTestEmail({ kind, userId }) {
   });
   if (!user) return { error: 'Usuario no encontrado' };
 
+  // En la prueba de novedades se usan los modelos más recientes aunque no sean de esta semana.
+  let models = null;
+  if (step.kind === NEWSLETTER_STEP.kind) {
+    const assets = await newsletter.loadFreshAssets(new Date(), 3650);
+    models = newsletter.modelsForUser({
+      assets,
+      language: user.language || 'es',
+      publicUrl: getConfig().publicUrl,
+    });
+    if (!models.length) return { error: 'No hay modelos publicados con imagen' };
+  }
+
   const cfg = getConfig();
   const unsubscribeUrl = buildUnsubscribeUrl(user.id, cfg.publicUrl);
   const res = await brevo.sendTemplate({
@@ -542,6 +592,7 @@ export async function sendTestEmail({ kind, userId }) {
       ...(PREMIUM_STEPS[step.kind]
         ? { EXPIRY_DATE: formatExpiryDate(endDayKey(new Date(Date.now() + 3 * DAY_MS)), user.language || 'es') }
         : {}),
+      ...(models ? { MODELS: models } : {}),
     },
     tags: ['funnel-test', step.kind],
     headers: {
@@ -585,8 +636,9 @@ export async function tick() {
   try {
     const plan = await planFunnel();
     const premium = await planPremiumNotices();
+    const news = await newsletter.planNewsletter(await loadConfig());
     const send = await sendDue();
-    return { plan, premium, send };
+    return { plan, premium, news, send };
   } finally {
     running = false;
   }
@@ -603,7 +655,7 @@ export function startEmailEngine(intervalMs = 5 * 60 * 1000) {
       const out = await tick();
       const sent = out?.send?.sent ?? 0;
       const would = out?.send?.wouldSend ?? 0;
-      if (out?.plan?.planned || out?.premium?.planned || sent || would) {
+      if (out?.plan?.planned || out?.premium?.planned || out?.news?.planned || sent || would) {
         console.log('[email-engine]', JSON.stringify(out));
       }
     } catch (e) {

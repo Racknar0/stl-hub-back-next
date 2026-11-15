@@ -208,6 +208,7 @@ const engineState = async () => {
       email: l.contact?.user?.email || null,
     })),
     enabled: config.enabled,
+    newsletterEnabled: config.newsletterEnabled,
     start: config.start,
     dailyLimit: config.dailyLimit,
     dailyReserve: config.dailyReserve,
