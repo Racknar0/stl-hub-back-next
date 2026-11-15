@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { PrismaClient } from '@prisma/client';
+import { buildNsfwWhere } from '../middlewares/nsfwFilter.js';
 import { clampToSendWindow, timezoneForCountry, zonedParts, DEFAULT_TIMEZONE } from '../utils/emailSchedule.js';
 
 const prisma = new PrismaClient();
@@ -114,6 +115,10 @@ const ASSET_SELECT = { id: true, title: true, titleEn: true, slug: true, images:
  * Modelos publicados más descargados en los últimos `days` días. Si no alcanzan, se completa
  * con los más descargados de todos los tiempos. Orden: del más descargado al menos.
  */
+// Los correos llegan a todos: se aplica el mismo filtro que ve un visitante anónimo del sitio,
+// así nunca salen modelos para adultos (ni armas, sangre, etc.).
+const SAFE_WHERE = buildNsfwWhere(null);
+
 export async function loadTopAssets(now = new Date(), days = NEWSLETTER_TOP_DAYS, limit = 40) {
   const grouped = await prisma.downloadHistory.groupBy({
     by: ['assetId'],
@@ -124,14 +129,14 @@ export async function loadTopAssets(now = new Date(), days = NEWSLETTER_TOP_DAYS
   });
   const ids = grouped.map((g) => g.assetId);
   const rows = ids.length
-    ? await prisma.asset.findMany({ where: { id: { in: ids }, status: 'PUBLISHED' }, select: ASSET_SELECT })
+    ? await prisma.asset.findMany({ where: { id: { in: ids }, status: 'PUBLISHED', ...SAFE_WHERE }, select: ASSET_SELECT })
     : [];
   const byId = new Map(rows.map((a) => [a.id, a]));
   const weekly = ids.map((id) => byId.get(id)).filter(Boolean);
   if (weekly.length >= limit) return weekly;
 
   const fill = await prisma.asset.findMany({
-    where: { status: 'PUBLISHED', id: { notIn: weekly.map((a) => a.id) } },
+    where: { status: 'PUBLISHED', id: { notIn: weekly.map((a) => a.id) }, ...SAFE_WHERE },
     orderBy: { downloads: 'desc' },
     take: limit - weekly.length,
     select: ASSET_SELECT,
