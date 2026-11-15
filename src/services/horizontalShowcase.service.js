@@ -81,6 +81,29 @@ export async function getNextLanguage() {
   return lastLang === 'en' ? 'es' : 'en';
 }
 
+// Segundos que dura cada modelo en la recopilación (YouTube exige capítulos de 10 s como mínimo)
+const CLIP_SECONDS = 10;
+
+const hasVideoFile = (m) => Boolean(m?.videoPath) && fs.existsSync(path.resolve('uploads', String(m.videoPath).replace(/^\/+/, '')));
+
+// Link a la página del modelo en stlgratis.com (/es/asset/<slug> o /en/asset/<slug>), con UTM para medir el tráfico
+function modelLink(asset, reel, language) {
+  const lang = language === 'en' ? 'en' : 'es';
+  // Las páginas van por slug (por id dan 404); sin slug se usa el link del reel en el idioma del video
+  let base = asset?.slug
+    ? `https://stlgratis.com/${lang}/asset/${asset.slug}`
+    : (reel.link ? String(reel.link).replace(/stlgratis\.com\/(es|en)\//, `stlgratis.com/${lang}/`) : null);
+  if (!base) return `https://stlgratis.com/${lang === 'en' ? 'en' : ''}`;
+  try {
+    const url = new URL(base);
+    url.searchParams.set('utm_source', 'youtube');
+    url.searchParams.set('utm_medium', 'horizontal');
+    url.searchParams.set('utm_campaign', 'recopilacion');
+    base = url.toString();
+  } catch {}
+  return base;
+}
+
 // Obtiene los 20 modelos para la próxima recopilación (1 Hero + 19 en descanso)
 export async function getUpcomingSelection(heroId = null, language = 'es') {
   let hero = null;
@@ -123,6 +146,8 @@ export async function getUpcomingSelection(heroId = null, language = 'es') {
     });
   }
 
+  // Solo entran reels cuyo video está en el servidor: si faltara uno, el render lo saltaría y los capítulos se desfasarían
+  if (hero && !hasVideoFile(hero)) hero = null;
   const heroExcludeId = hero?.id || 0;
 
   // Pool de candidatos en descanso (menor uso en horizontal primero)
@@ -160,6 +185,7 @@ export async function getUpcomingSelection(heroId = null, language = 'es') {
     });
     candidatePool = [...candidatePool, ...additional];
   }
+  candidatePool = candidatePool.filter(hasVideoFile);
 
   // Deduplicar por personaje (assetId o título) para que ningún personaje salga repetido
   const seenCharacters = new Set();
@@ -183,32 +209,26 @@ export async function getUpcomingSelection(heroId = null, language = 'es') {
   // y los 19 restantes van barajados sin repetir personajes
   const allSelected = hero ? [hero, ...restingModels] : restingModels;
 
-  // Si el idioma es inglés, buscar títulos en inglés si están disponibles en la tabla asset
-  let assetMap = new Map();
+  // Datos de cada asset: título en inglés y slug para el link a su página
+  const assetMap = new Map();
   const assetIds = allSelected.map(m => m.assetId).filter(Boolean);
-  if (language === 'en' && assetIds.length > 0) {
+  if (assetIds.length > 0) {
     try {
       const assets = await prisma.asset.findMany({
         where: { id: { in: assetIds } },
-        select: { id: true, titleEn: true, title: true }
+        select: { id: true, titleEn: true, title: true, slug: true }
       });
-      for (const a of assets) {
-        assetMap.set(a.id, a.titleEn || a.title);
-      }
+      for (const a of assets) assetMap.set(a.id, a);
     } catch {}
   }
 
-  // Construir los timestamps (asegurando >= 10s por modelo para compatibilidad de capítulos YouTube)
-  let currentSec = 0;
+  // Capítulos: cada modelo dura exactamente CLIP_SECONDS en el video (el render recorta o repite el reel)
   const timestamps = allSelected.map((m, idx) => {
-    const totalSecRounded = Math.floor(currentSec);
-    const mins = Math.floor(totalSecRounded / 60);
-    const secs = String(totalSecRounded % 60).padStart(2, '0');
-    const timeStr = `${mins}:${secs}`;
-    const rawDur = Math.max(Math.round(m.durationSec || 10), 10); // Mínimo 10s para capítulos oficiales
-    currentSec += rawDur;
-    const rawTitle = (language === 'en' && m.assetId && assetMap.has(m.assetId))
-      ? assetMap.get(m.assetId)
+    const startSec = idx * CLIP_SECONDS;
+    const timeStr = `${Math.floor(startSec / 60)}:${String(startSec % 60).padStart(2, '0')}`;
+    const asset = m.assetId ? assetMap.get(m.assetId) : null;
+    const rawTitle = (language === 'en' && asset)
+      ? (asset.titleEn || asset.title)
       : (m.assetTitle || m.title || `Modelo ${m.id}`);
 
     return {
@@ -216,11 +236,12 @@ export async function getUpcomingSelection(heroId = null, language = 'es') {
       time: timeStr,
       id: m.id,
       assetId: m.assetId,
-      title: rawTitle.replace(/^STL\s*[-–:]\s*/i, ''),
-      link: `https://stlgratis.com/stl/${m.assetId || m.id}`,
+      title: String(rawTitle).replace(/^STL\s*[-–:]\s*/i, ''),
+      link: modelLink(asset, m, language),
       isHero: idx === 0
     };
   });
+  const currentSec = allSelected.length * CLIP_SECONDS;
 
   return { hero, restingModels, allSelected, timestamps, totalDurationSec: currentSec };
 }
@@ -443,8 +464,27 @@ export async function getHorizontalStatus() {
     'Archivos STL Gratis', 'Resina 3D', 'Filamento PLA', 'STLGratis'
   ].filter(Boolean);
 
+  // Última recopilación generada: el panel la muestra como "Último publicado" o "Lista para publicar"
+  const latestTags = latestCompilation?.tags && typeof latestCompilation.tags === 'object' ? latestCompilation.tags : {};
+  const latest = latestCompilation ? {
+    id: latestCompilation.id,
+    status: latestCompilation.status,
+    title: latestCompilation.title,
+    description: latestCompilation.description,
+    tags: Array.isArray(latestCompilation.tags) ? latestCompilation.tags : (latestTags.tags || []),
+    language: latestTags.language || 'es',
+    channel: latestCompilation.channelName || latestCompilation.channelId,
+    videoPath: latestCompilation.videoPath,
+    durationSec: latestCompilation.durationSec,
+    modelsCount: Array.isArray(latestCompilation.modelIds) ? latestCompilation.modelIds.length : 0,
+    youtubeUrl: latestCompilation.youtubeUrl || (latestCompilation.youtubeVideoId ? `https://youtube.com/watch?v=${latestCompilation.youtubeVideoId}` : null),
+    publishedAt: latestCompilation.publishedAt ? fmtBogota(latestCompilation.publishedAt) : null,
+    errorMessage: latestCompilation.errorMessage || null,
+  } : null;
+
   return {
     kpis,
+    latest,
     channels,
     upcoming: {
       title,
@@ -549,7 +589,7 @@ export async function renderHorizontalVideo(models) {
 
       // Filtro FFmpeg: fondo desenfocado + figura nítida al centro + logo opcional en top-left
       let filter = `[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,gblur=sigma=30,eq=brightness=-0.15[bg];[0:v]scale=-1:1080[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2[base]`;
-      let inputs = `-i "${rawVideoPath}"`;
+      let inputs = `-stream_loop -1 -i "${rawVideoPath}"`;
 
       if (logoPath) {
         inputs += ` -i "${logoPath}"`;
@@ -559,7 +599,7 @@ export async function renderHorizontalVideo(models) {
       }
 
       // Asegurar mínimo 10 segundos para capítulos nativos de YouTube
-      const cmd = `ffmpeg -y ${inputs} -filter_complex "${filter}" -map "[v]" -map 0:a? -c:v libx264 -preset veryfast -threads 4 -crf 23 -r 24 -c:a aac -ar 48000 -ac 2 -b:a 128k -t 10 "${outClip}"`;
+      const cmd = `ffmpeg -y ${inputs} -filter_complex "${filter}" -map "[v]" -map 0:a? -c:v libx264 -preset veryfast -threads 4 -crf 23 -r 24 -c:a aac -ar 48000 -ac 2 -b:a 128k -t ${CLIP_SECONDS} "${outClip}"`;
       await execAsync(cmd);
       processedClips.push(outClip);
     }
@@ -580,7 +620,7 @@ export async function renderHorizontalVideo(models) {
       filePath: finalOutPath,
       relPath: `horizontal/completed/compilation_${timestamp}.mp4`,
       sizeB: stats.size,
-      durationSec: processedClips.length * 10
+      durationSec: processedClips.length * CLIP_SECONDS
     };
   } finally {
     // Limpieza de clips temporales
