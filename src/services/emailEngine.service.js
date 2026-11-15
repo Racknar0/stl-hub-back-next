@@ -185,9 +185,11 @@ export function initialStatus({ scheduledFor, start, now, optedOut = false, stal
 export const remainingQuota = ({ limit, reserve = 0, sentToday }) =>
   Math.max(0, limit - reserve - sentToday);
 
-/** Inicio del día (UTC) para contar el cupo diario. */
-export const startOfUtcDay = (date = new Date()) =>
-  new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+/**
+ * Desde cuándo se cuentan los envíos del cupo: las últimas 24 horas. Brevo reinicia su límite a
+ * una hora propia que no controlamos; con una ventana móvil nunca se supera, sea cual sea.
+ */
+export const quotaWindowStart = (date = new Date()) => new Date(date.getTime() - DAY_MS);
 
 /** Si el correo debe descartarse justo antes de enviarlo. */
 export function skipReason({ step, user, contact, isPremium }) {
@@ -387,7 +389,7 @@ export async function sendDue(now = new Date()) {
   const cfg = await loadConfig();
 
   const sentToday = await prisma.emailLog.count({
-    where: { status: 'SENT', sentAt: { gte: startOfUtcDay(now) } },
+    where: { status: 'SENT', sentAt: { gte: quotaWindowStart(now) } },
   });
   const quota = remainingQuota({ limit: cfg.dailyLimit, reserve: cfg.dailyReserve, sentToday });
 
@@ -683,7 +685,7 @@ export default {
   parseEngineSettings,
   initialStatus,
   remainingQuota,
-  startOfUtcDay,
+  quotaWindowStart,
   skipReason,
   buildUnsubscribeToken,
   verifyUnsubscribeToken,

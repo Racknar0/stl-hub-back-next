@@ -7,7 +7,7 @@
 // NINGUNA señal, ni de correo ni de web.
 
 import { PrismaClient } from '@prisma/client';
-import { getQueueSummary } from './emailEngine.service.js';
+import { getQueueSummary, quotaWindowStart } from './emailEngine.service.js';
 
 const prisma = new PrismaClient();
 
@@ -200,8 +200,8 @@ export async function listAudience(stage, { page = 1, pageSize = 50 } = {}) {
  */
 export async function getOverview() {
   const since30 = daysAgo(30);
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
+  // Misma ventana que usa el motor para el cupo: las últimas 24 horas.
+  const startOfDay = quotaWindowStart();
 
   const [audience, sentToday, logs30, optOuts30, spam30, queue] = await Promise.all([
     getAudienceCounts(),

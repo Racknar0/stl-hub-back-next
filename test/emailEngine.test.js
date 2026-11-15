@@ -105,3 +105,8 @@ test('token de baja: válido, manipulado y sin secreto', () => {
   assert.equal(engine.verifyUnsubscribeToken(`43.${token.split('.')[1]}`), null);
   assert.equal(engine.verifyUnsubscribeToken('basura'), null);
 });
+
+test('cupo: se cuenta una ventana móvil de 24 horas', () => {
+  const now = new Date('2026-11-15T01:05:00Z');
+  assert.equal(engine.quotaWindowStart(now).toISOString(), '2026-11-14T01:05:00.000Z');
+});
