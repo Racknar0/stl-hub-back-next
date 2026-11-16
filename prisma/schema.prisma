@@ -906,6 +906,8 @@ model ReelPost {
   facebookPages Json?          // ids de las Páginas de Facebook donde se publica (null = todas las asignadas)
   facebookVariants Json?       // { [pageId]: { caption } } para las Páginas que no son la principal
   tiktokCaption String?        @db.Text         // texto para TikTok (vacío = se usa el de Instagram)
+  pinterestTitle       String? @db.VarChar(100) // título del pin de video (IA, en inglés, SEO de Pinterest)
+  pinterestDescription String? @db.Text         // descripción del pin de video (IA, en inglés, máx. 500)
   tiktokOptions Json?          // { privacyLevel, allowComment, allowDuet, allowStitch, commercial, yourBrand, brandedContent }
   onScreenText  String?        @db.VarChar(120) // sugerencia de texto sobre el video (IA)
   hashtags      Json?          // ["tag", ...] sin #

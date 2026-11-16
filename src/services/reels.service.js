@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { PrismaClient } from '@prisma/client';
-import { generateReelTexts, generateYoutubeVariant, generateFacebookVariant, generateInstagramVariant, mockReelTexts, isMockAi, captionBody } from './reelsAi.service.js';
+import { generateReelTexts, generateYoutubeVariant, generateFacebookVariant, generateInstagramVariant, generatePinterestTexts, mockReelTexts, isMockAi, captionBody } from './reelsAi.service.js';
 import { metaConfigured, listFacebookPages, listInstagramAccounts, publishInstagramReel, publishFacebookReel, commentOnPublishedReel } from './metaReels.service.js';
 import { dispatchReelNotification } from '../utils/reelsNotifications.js';
 import { uploadShort, connectionStatus as youtubeStatus, listChannels as youtubeChannels } from './youtube.service.js';
@@ -175,6 +175,7 @@ export async function processReelAi(postId, { notes, language } = {}) {
         youtubeVariants: await youtubeVariantsFor(asset, texts, lang),
         facebookVariants: await facebookVariantsFor(asset, texts, lang),
         instagramVariants: await instagramVariantsFor(asset, texts, lang),
+        ...(await pinterestTextsFor(asset, { title: texts.youtubeTitle, description: texts.youtubeDescription })),
         language: lang,
         aiGenerated: true,
         aiStatus: 'READY',
@@ -184,6 +185,17 @@ export async function processReelAi(postId, { notes, language } = {}) {
   } catch (e) {
     console.error(`[REELS][AI] Reel ${postId}:`, e.message);
     return prisma.reelPost.update({ where: { id: postId }, data: { aiStatus: 'ERROR', aiError: e.message } });
+  }
+}
+
+/** Título y descripción del pin de Pinterest (en inglés). Si la IA falla, quedan vacíos y se generan al publicar. */
+async function pinterestTextsFor(asset, base) {
+  try {
+    const t = await generatePinterestTexts({ asset, base });
+    return { pinterestTitle: t.title, pinterestDescription: t.description };
+  } catch (e) {
+    console.warn(`[REELS][AI] Textos de Pinterest: ${e.message}`);
+    return {};
   }
 }
 
@@ -278,10 +290,9 @@ export async function reelsMissingYoutubeVariants() {
     listFacebookPages().then(p => p.slice(1)).catch(() => []),
     listInstagramAccounts().then(a => a.slice(1)).catch(() => []),
   ]);
-  if (!extra.length && !extraPages.length && !extraIg.length) return [];
   const posts = await prisma.reelPost.findMany({
     where: { status: { not: 'PUBLISHED' }, aiGenerated: true },
-    select: { id: true, platforms: true, youtubeChannels: true, youtubeVariants: true, facebookPages: true, facebookVariants: true, instagramAccounts: true, instagramVariants: true },
+    select: { id: true, platforms: true, youtubeChannels: true, youtubeVariants: true, facebookPages: true, facebookVariants: true, instagramAccounts: true, instagramVariants: true, pinterestTitle: true },
   });
   const obj = (v) => (v && typeof v === 'object' ? v : {});
   return posts
@@ -296,9 +307,11 @@ export async function reelsMissingYoutubeVariants() {
         missingIg: p.platforms.includes('instagram')
           ? extraIg.filter(a => (Array.isArray(p.instagramAccounts) ? p.instagramAccounts : extraIg.map(x => x.id)).includes(a.id) && !obj(p.instagramVariants)[a.id]?.caption).map(a => a.id)
           : [],
+        // Pinterest: su título y descripción propios (en inglés)
+        missingPin: p.platforms.includes('pinterest') && !p.pinterestTitle,
       };
     })
-    .filter(p => p.missing.length || p.missingFb.length || p.missingIg.length);
+    .filter(p => p.missing.length || p.missingFb.length || p.missingIg.length || p.missingPin);
 }
 
 let variantsRunning = false;
@@ -309,7 +322,7 @@ export async function fillMissingYoutubeVariants() {
   if (!pending.length) return { queued: 0 };
   variantsRunning = true;
   (async () => {
-    for (const { id, missing, missingFb, missingIg } of pending) {
+    for (const { id, missing, missingFb, missingIg, missingPin } of pending) {
       try {
         const post = await prisma.reelPost.findUnique({ where: { id } });
         if (!post || post.status === 'PUBLISHED' || post.publishing) continue;
@@ -332,7 +345,8 @@ export async function fillMissingYoutubeVariants() {
             asset, language: post.language, base: post.caption, avoid: Object.values(igVariants).map(v => v.caption),
           }) };
         }
-        await prisma.reelPost.update({ where: { id }, data: { youtubeVariants: variants, facebookVariants: fbVariants, instagramVariants: igVariants } });
+        const pin = missingPin ? await pinterestTextsFor(asset, { title: post.title, description: post.youtubeDescription }) : {};
+        await prisma.reelPost.update({ where: { id }, data: { youtubeVariants: variants, facebookVariants: fbVariants, instagramVariants: igVariants, ...pin } });
       } catch (e) {
         console.error(`[REELS][AI] Textos de canales extra del reel ${id}:`, e.message);
       }
@@ -378,8 +392,14 @@ export function pinterestLink(post) {
   }
 }
 
-/** Título y descripción del pin de video: título de YouTube (o el del modelo) y el caption sin cabecera ni pie. */
+/**
+ * Título y descripción del pin de video: los propios de Pinterest (IA, en inglés) si existen; si no, el título de
+ * YouTube (o el del modelo) y el caption sin cabecera ni pie.
+ */
 export function pinterestTexts(post) {
+  if (post.pinterestTitle?.trim()) {
+    return { title: post.pinterestTitle.trim().slice(0, 100), description: String(post.pinterestDescription || '').trim().slice(0, 500) };
+  }
   const title = String(post.title || post.assetTitle || 'Modelo 3D STL').replace(/#\S+/g, '').replace(/\s+/g, ' ').trim().slice(0, 100);
   const tags = (Array.isArray(post.hashtags) ? post.hashtags : []).map(t => `#${String(t).replace(/^#/, '')}`).join(' ');
   const body = captionBody(post.caption || '') || String(post.youtubeDescription || '').trim();
@@ -543,6 +563,15 @@ async function publishToPlatform(platform, post, { now = false } = {}) {
     return publishThreadsVideo({ videoUrl: publicVideoUrl(post.videoPath), text: threadsText(captionBody(post.caption), short) });
   }
   if (platform === 'pinterest') {
+    // Sin textos propios (reels de antes): se generan ahora con la IA y se guardan
+    if (!post.pinterestTitle?.trim()) {
+      const asset = post.assetId ? await prisma.asset.findUnique({ where: { id: post.assetId }, include: { tags: true, categories: true } }) : null;
+      const pin = await pinterestTextsFor(asset, { title: post.title, description: post.youtubeDescription });
+      if (pin.pinterestTitle) {
+        await prisma.reelPost.update({ where: { id: post.id }, data: pin });
+        post = { ...post, ...pin };
+      }
+    }
     // Pin de video: enlace directo al modelo en inglés y sin UTM (Pinterest rechaza otros formatos; sin acortador)
     return pinterestPublisher.publishVideoPin({
       videoAbsPath: toAbsVideoPath(post.videoPath),

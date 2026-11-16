@@ -376,6 +376,8 @@ router.put('/:id', requireAuth, requireAdmin, async (req, res) => {
       ...(b.tiktokOptions !== undefined && { tiktokOptions: normalizeTiktokOptions(b.tiktokOptions) }),
       ...(b.title !== undefined && { title: text(b.title) }),
       ...(b.youtubeDescription !== undefined && { youtubeDescription: text(b.youtubeDescription) }),
+      ...(b.pinterestTitle !== undefined && { pinterestTitle: text(b.pinterestTitle)?.slice(0, 100) ?? null }),
+      ...(b.pinterestDescription !== undefined && { pinterestDescription: text(b.pinterestDescription)?.slice(0, 500) ?? null }),
       ...(b.facebookPages !== undefined && { facebookPages: Array.isArray(b.facebookPages) ? b.facebookPages.map(String).slice(0, 10) : null }),
       ...(b.facebookVariants !== undefined && { facebookVariants: normalizeFacebookVariants(b.facebookVariants) }),
       ...(b.instagramAccounts !== undefined && { instagramAccounts: Array.isArray(b.instagramAccounts) ? b.instagramAccounts.map(String).slice(0, 10) : null }),

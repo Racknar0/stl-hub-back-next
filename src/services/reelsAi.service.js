@@ -242,4 +242,52 @@ export async function generateInstagramVariant({ asset, language = 'es', base, a
   return composeCaption('instagram', body);
 }
 
-export default { generateReelTexts, generateYoutubeVariant, generateFacebookVariant, generateInstagramVariant };
+/**
+ * Título y descripción del pin de video para Pinterest, siempre en inglés (la audiencia de Pinterest es global y el
+ * pin lleva a la página en inglés). Pinterest funciona como buscador: palabras clave naturales + gancho + invitación.
+ */
+export async function generatePinterestTexts({ asset, base = {} }) {
+  const name = asset?.titleEn || asset?.title || base.title || '3D printable figure';
+  if (isMockAi()) {
+    return {
+      title: `${name} 3D Print STL File`.slice(0, 100),
+      description: `Print your own ${name} in resin or FDM. Detailed, ready-to-print STL file for collectors and painters. Tap to get the STL. #3dprinting #stlfiles #resinprint`,
+    };
+  }
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
+  const ai = new GoogleGenAI({ apiKey });
+  const categories = (asset?.categories || []).map(c => c.nameEn || c.name).filter(Boolean).join(', ');
+  const tags = (asset?.tags || []).map(t => t.nameEn || t.name).filter(Boolean).slice(0, 12).join(', ');
+  const prompt = [
+    `Write the title and description, in ENGLISH, of a Pinterest VIDEO pin showing this 3D printable STL model: "${name}".`,
+    categories ? `Categories: ${categories}.` : '',
+    tags ? `Related keywords: ${tags}.` : '',
+    base.title || base.description ? `Context from other platforms (do not copy, write fresh for Pinterest): ${JSON.stringify(base)}` : '',
+    'Audience: people searching Pinterest for 3D printing projects, figures to print and paint, collectibles, cosplay props, gifts and fan art of this character/franchise.',
+    'Pinterest is a search engine: use the keywords people actually type (character/franchise name, "3D print", "STL file", "resin print", "figure", "statue", "bust", "miniature", "fan art", "collectible"), written naturally, never as a keyword list.',
+    'TITLE: max 95 characters, the character/model name first, attention-grabbing and specific (e.g. "Mikasa Ackerman 3D Print – Detailed Attack on Titan Resin Statue STL"). No emojis, no hashtags, no clickbait in caps.',
+    'DESCRIPTION: 300-480 characters. Open with a vivid hook about the figure/scene, then say what you get (ready-to-print STL for resin or FDM, detail level, great to paint/display/gift), then a clear invitation to click such as "Tap to get the STL and start printing." Up to 1 emoji. End with 3-5 relevant hashtags on a new line.',
+    'The STL files are PAID: never say "free". No URLs, no prices.',
+    'Return ONLY JSON: {"title": "...", "description": "..."}',
+  ].filter(Boolean).join('\n');
+  const response = await ai.models.generateContent({
+    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+    contents: [prompt],
+    config: { responseMimeType: 'application/json', temperature: 0.9 },
+  });
+  const rawText = String(response?.text || '').trim();
+  let parsed;
+  try { parsed = JSON.parse(rawText); }
+  catch {
+    const match = rawText.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error('No se pudo leer el texto de Pinterest generado');
+    parsed = JSON.parse(match[0]);
+  }
+  const title = String(parsed.title || '').replace(/#\S+/g, '').replace(/\s+/g, ' ').trim().slice(0, 100);
+  const description = String(parsed.description || '').trim().slice(0, 500);
+  if (!title || !description) throw new Error('La IA no devolvió el texto de Pinterest');
+  return { title, description };
+}
+
+export default { generateReelTexts, generateYoutubeVariant, generateFacebookVariant, generateInstagramVariant, generatePinterestTexts };
