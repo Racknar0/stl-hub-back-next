@@ -364,13 +364,19 @@ export function missingFields(post) {
 }
 
 /**
- * Enlace del pin: la página del modelo sin redirecciones (Pinterest rechaza el pin si el enlace redirige).
- * El link del reel usa /es/asset/…, que redirige a /asset/…, así que se quita el /es.
+ * Enlace del pin: la página del modelo en inglés y sin UTM, igual que los pines automáticos.
+ * Con UTM o con la ruta en español Pinterest rechazó el pin ("This site doesn't allow you to save Pins").
+ * Las visitas siguen viéndose en Analytics como pinterest.com / referral.
  */
 export function pinterestLink(post) {
-  const link = platformLink(post.link, 'pinterest', post.id);
-  if (!link) return 'https://stlgratis.com/';
-  return link.replace(/^https:\/\/stlgratis\.com\/es\//, 'https://stlgratis.com/');
+  if (!post.link) return 'https://stlgratis.com/en';
+  try {
+    const url = new URL(post.link);
+    const slugPath = url.pathname.replace(/^\/(es|en)\//, '/');
+    return `https://stlgratis.com/en${slugPath}`;
+  } catch {
+    return 'https://stlgratis.com/en';
+  }
 }
 
 /** Título y descripción del pin de video: título de YouTube (o el del modelo) y el caption sin cabecera ni pie. */
@@ -538,7 +544,7 @@ async function publishToPlatform(platform, post, { now = false } = {}) {
     return publishThreadsVideo({ videoUrl: publicVideoUrl(post.videoPath), text: threadsText(captionBody(post.caption), short) });
   }
   if (platform === 'pinterest') {
-    // Pin de video: enlace directo al modelo (Pinterest rechaza los enlaces que redirigen, así que sin acortador)
+    // Pin de video: enlace directo al modelo en inglés y sin UTM (Pinterest rechaza otros formatos; sin acortador)
     return pinterestPublisher.publishVideoPin({
       videoAbsPath: toAbsVideoPath(post.videoPath),
       ...pinterestTexts(post),
