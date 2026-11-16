@@ -11,7 +11,6 @@ import { getChannelVariantVideo, cleanVariants } from './reelsVideoVariants.serv
 import { publishDueHorizontal } from './horizontalShowcase.service.js';
 import { shortOrLong, setFixedLink, BIO_CODE } from './shortLinks.service.js';
 import pinterestPublisher from './pinterestPublisher.service.js';
-import pinterestService from './pinterest.service.js';
 
 const prisma = new PrismaClient();
 
@@ -917,16 +916,16 @@ export async function autoFill() {
 }
 
 /**
- * Redes por defecto de un reel nuevo: YouTube y Threads si su cuenta está conectada.
- * TikTok queda apagado por defecto (se programa en el programador nativo de TikTok); se puede encender a mano en cada reel.
+ * Redes por defecto de un reel nuevo: YouTube y Threads si su cuenta está conectada; Instagram, Facebook y
+ * Pinterest siempre. TikTok queda apagado por defecto (se programa en el programador nativo de TikTok);
+ * se puede encender a mano en cada reel.
  */
 export async function defaultPlatforms() {
-  const [yt, th, pin] = await Promise.all([
+  const [yt, th] = await Promise.all([
     youtubeStatus().catch(() => ({ connected: false })),
     threadsStatus().catch(() => ({ connected: false })),
-    pinterestService.testConnection().catch(() => ({ connected: false })),
   ]);
-  const connected = { youtube: yt.connected, threads: th.connected, pinterest: pin.connected };
+  const connected = { youtube: yt.connected, threads: th.connected };
   return PLATFORMS.filter(p => p !== 'tiktok' && (!(p in connected) || connected[p]));
 }
 
