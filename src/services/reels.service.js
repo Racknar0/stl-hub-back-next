@@ -818,7 +818,7 @@ export function startReelsWorker(intervalMs = 60000) {
   workerTimer = setInterval(() => {
     publishDueReels().catch(e => console.error('[REELS] Worker:', e.message));
     runResultTasks();
-    // Video horizontal automático unas horas después de cada reel (render largo: no bloquea el resto)
+    // Video horizontal automático una vez al día a hora fija (render largo: no bloquea el resto)
     publishDueHorizontal({ notify: dispatchReelNotification }).catch(e => console.error('[HORIZONTAL] Worker:', e.message));
   }, intervalMs);
 }

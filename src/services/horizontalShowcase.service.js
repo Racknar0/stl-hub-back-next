@@ -16,11 +16,11 @@ const SETTINGS = {
   LAST_LANGUAGE: 'HORIZONTAL_LAST_LANGUAGE',
   LAST_PUBLISHED_AT: 'HORIZONTAL_LAST_PUBLISHED_AT',
   AUTO_ENABLED: 'HORIZONTAL_AUTO_ENABLED', // "false" apaga la publicación automática
-  SPACING_MINUTES: 'HORIZONTAL_SPACING_MINUTES', // minutos tras el reel (por defecto 120)
-  LAST_AUTO_REEL: 'HORIZONTAL_LAST_AUTO_REEL', // id del último reel que ya disparó un video horizontal
+  DAILY_TIME: 'HORIZONTAL_DAILY_TIME', // hora fija diaria "HH:MM" en hora de Colombia (por defecto 21:00)
+  LAST_AUTO_DAY: 'HORIZONTAL_LAST_AUTO_DAY', // último día (Colombia, YYYY-MM-DD) en que se intentó el automático
   LAST_FB_PAGE: 'HORIZONTAL_LAST_FB_PAGE' // id de la última Página de Facebook donde salió un video horizontal
 };
-const DEFAULT_SPACING_MINUTES = 120;
+const DEFAULT_DAILY_TIME = '21:00';
 
 const HORIZONTAL_DIR = path.resolve('uploads', 'horizontal');
 const COMPLETED_DIR = path.resolve(HORIZONTAL_DIR, 'completed');
@@ -65,9 +65,9 @@ export async function getChannelSchedule() {
   const nextIdx = (tomorrowIdx + 1) % ROTATION_ORDER.length;
 
   return [
-    { id: ROTATION_ORDER[todayIdx].toLowerCase(), name: ROTATION_ORDER[todayIdx], handle: `@${ROTATION_ORDER[todayIdx]}`, status: 'today', turnLabel: 'Turno de Hoy', nextPublish: 'Próximo video (2 h tras el reel)' },
-    { id: ROTATION_ORDER[tomorrowIdx].toLowerCase(), name: ROTATION_ORDER[tomorrowIdx], handle: `@${ROTATION_ORDER[tomorrowIdx]}`, status: 'tomorrow', turnLabel: 'Mañana', nextPublish: 'El siguiente' },
-    { id: ROTATION_ORDER[nextIdx].toLowerCase(), name: ROTATION_ORDER[nextIdx], handle: `@${ROTATION_ORDER[nextIdx]}`, status: 'next', turnLabel: 'En 2 días', nextPublish: 'Dentro de dos' },
+    { id: ROTATION_ORDER[todayIdx].toLowerCase(), name: ROTATION_ORDER[todayIdx], handle: `@${ROTATION_ORDER[todayIdx]}`, status: 'today', turnLabel: 'Siguiente', nextPublish: 'Próximo video' },
+    { id: ROTATION_ORDER[tomorrowIdx].toLowerCase(), name: ROTATION_ORDER[tomorrowIdx], handle: `@${ROTATION_ORDER[tomorrowIdx]}`, status: 'tomorrow', turnLabel: 'Después', nextPublish: 'El siguiente' },
+    { id: ROTATION_ORDER[nextIdx].toLowerCase(), name: ROTATION_ORDER[nextIdx], handle: `@${ROTATION_ORDER[nextIdx]}`, status: 'next', turnLabel: 'Al final', nextPublish: 'Dentro de dos' },
   ];
 }
 
@@ -458,7 +458,7 @@ export async function getHorizontalStatus() {
   const description = selection.allSelected.length ? buildDescription(selection.timestamps, currentLang) : '';
 
   // KPIs (todos reales)
-  const next = totalModels > 0 ? await nextAutoPublishInfo() : { label: 'Sin reels programados', note: '' };
+  const next = totalModels > 0 ? await nextAutoPublishInfo() : { label: 'Sin modelos aprobados', note: '' };
   const connected = await youtubeChannels().catch(() => []);
   const norm = (v) => String(v || '').trim().replace(/^@/, '').toLowerCase();
   const channelConnected = connected.some(c => [c.title, c.handle, c.id].some(v => v && norm(v) === norm(todayChannel)));
@@ -970,112 +970,111 @@ export async function publishToFacebook(compilationId, { background = false } = 
   return run();
 }
 
-// ─── Publicación automática: cada reel publicado dispara un video horizontal X minutos después ───
+// ─── Publicación automática: un video horizontal al día a una hora fija (hora de Colombia) ───
+
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 async function autoSettings() {
-  const rows = await prisma.systemSetting.findMany({ where: { key: { in: [SETTINGS.AUTO_ENABLED, SETTINGS.SPACING_MINUTES, SETTINGS.LAST_AUTO_REEL] } } });
+  const rows = await prisma.systemSetting.findMany({ where: { key: { in: [SETTINGS.AUTO_ENABLED, SETTINGS.DAILY_TIME, SETTINGS.LAST_AUTO_DAY] } } });
   const byKey = Object.fromEntries(rows.map(r => [r.key, r.value]));
-  const spacing = Number(byKey[SETTINGS.SPACING_MINUTES]);
+  const time = String(byKey[SETTINGS.DAILY_TIME] || '').trim();
   return {
     enabled: String(byKey[SETTINGS.AUTO_ENABLED] ?? 'true').toLowerCase() !== 'false',
-    spacingMin: Number.isFinite(spacing) && spacing > 0 ? spacing : DEFAULT_SPACING_MINUTES,
-    lastReelId: Number(byKey[SETTINGS.LAST_AUTO_REEL]) || 0,
-    hasMarker: byKey[SETTINGS.LAST_AUTO_REEL] != null,
+    time: TIME_RE.test(time) ? time : DEFAULT_DAILY_TIME,
+    lastDay: byKey[SETTINGS.LAST_AUTO_DAY] || null,
   };
 }
 
-// Solo cuentan los reels publicados en las últimas horas: si el servidor estuvo caído mucho tiempo, ese reel se salta
-const AUTO_WINDOW_MS = 6 * 3600 * 1000;
-
-/** Reel publicado que aún no tiene su video horizontal (el más reciente), o null. */
-async function pendingTriggerReel({ spacingMin, lastReelId }) {
-  return prisma.reelPost.findFirst({
-    where: {
-      id: { gt: lastReelId },
-      status: 'PUBLISHED',
-      publishedAt: { gte: new Date(Date.now() - AUTO_WINDOW_MS - spacingMin * 60000) },
-    },
-    orderBy: { publishedAt: 'desc' },
-  });
-}
+// Colombia no cambia de hora: siempre UTC-5
+const bogotaDay = (ms = Date.now()) => new Date(ms - 5 * 3600 * 1000).toISOString().slice(0, 10);
+/** Instante real de una hora "HH:MM" de Colombia en el día "YYYY-MM-DD". */
+const bogotaInstant = (day, time) => new Date(`${day}T${time}:00-05:00`);
 
 const fmtBogota = (date) => new Date(date).toLocaleString('es-CO', {
   timeZone: 'America/Bogota', weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
 });
-const spacingText = (min) => (min % 60 === 0 ? `${min / 60} h` : `${min} min`);
 
 let autoRunning = false;
 
-/** Hora real del próximo video horizontal (label) y de dónde sale (note), en hora de Colombia. */
+/** ¿Ya se publicó hoy (día de Colombia) algún video horizontal en YouTube, automático o a mano? */
+async function publishedToday(day) {
+  const found = await prisma.horizontalCompilation.findFirst({
+    where: { status: 'PUBLISHED', publishedAt: { gte: bogotaInstant(day, '00:00') } },
+    select: { id: true },
+  });
+  return Boolean(found);
+}
+
+/** Hora real del próximo video horizontal (label) y una nota que la explica, en hora de Colombia. */
 export async function nextAutoPublishInfo() {
   const cfg = await autoSettings();
   if (!cfg.enabled) return { label: 'Automático apagado', note: 'No se publican solos' };
-  if (autoRunning) return { label: 'Publicando ahora…', note: 'Generando la recopilación y subiéndola a YouTube' };
-  const pending = cfg.hasMarker ? await pendingTriggerReel(cfg) : null;
-  const base = pending
-    ? new Date(pending.publishedAt)
-    : (await prisma.reelPost.findFirst({
-      where: { status: 'PENDING', approved: true, scheduledAt: { gte: new Date() } },
-      orderBy: { scheduledAt: 'asc' },
-    }))?.scheduledAt;
-  if (!base) return { label: 'Sin reels programados', note: `Sale ${spacingText(cfg.spacingMin)} después del próximo reel` };
-  return { label: fmtBogota(new Date(base).getTime() + cfg.spacingMin * 60000), note: '' };
+  if (autoRunning) return { label: 'Publicando ahora…', note: 'Generando el video y subiéndolo a YouTube y Facebook' };
+  const today = bogotaDay();
+  const slot = bogotaInstant(today, cfg.time);
+  const doneToday = cfg.lastDay === today || await publishedToday(today);
+  const next = doneToday ? new Date(slot.getTime() + 24 * 3600 * 1000) : slot;
+  return { label: fmtBogota(next), note: 'Sale solo todos los días a esta hora' };
 }
 
 /**
- * Lo llama el worker de reels cada minuto. Cuando pasan los minutos configurados desde que se publicó un reel,
- * genera la recopilación (con ese reel de protagonista) y la sube a YouTube. Cada reel dispara un solo intento:
- * si falla, avisa en el panel y se puede publicar a mano desde "Videos Horizontales".
+ * Lo llama el worker de reels cada minuto. Una vez al día, a la hora fija, genera la recopilación (abre con el último
+ * reel publicado) y la sube a YouTube y a Facebook. Si el servidor estaba caído a esa hora, lo hace al volver siempre
+ * que sea el mismo día. Un solo intento por día: si falla, avisa en el panel y se puede publicar a mano.
  */
 export async function publishDueHorizontal({ notify } = {}) {
   if (autoRunning) return;
   const cfg = await autoSettings();
   if (!cfg.enabled) return;
-  // Primera vez: se toma como punto de partida el último reel ya publicado (no se publica nada por reels viejos)
-  if (!cfg.hasMarker) {
-    const last = await prisma.reelPost.findFirst({ where: { status: 'PUBLISHED' }, orderBy: { id: 'desc' }, select: { id: true } });
-    await prisma.systemSetting.create({
-      data: { key: SETTINGS.LAST_AUTO_REEL, value: String(last?.id || 0), description: 'Último reel que disparó un video horizontal automático' },
-    });
-    return;
-  }
-  const reel = await pendingTriggerReel(cfg);
-  if (!reel || Date.now() < new Date(reel.publishedAt).getTime() + cfg.spacingMin * 60000) return;
+  const today = bogotaDay();
+  if (cfg.lastDay === today || Date.now() < bogotaInstant(today, cfg.time).getTime()) return;
 
   autoRunning = true;
   let record = null;
+  let hero = null;
   try {
-    // Se marca antes de empezar: si algo falla no se reintenta en bucle cada minuto
+    // Se marca el día antes de empezar: si algo falla no se reintenta en bucle cada minuto
     await prisma.systemSetting.upsert({
-      where: { key: SETTINGS.LAST_AUTO_REEL },
-      create: { key: SETTINGS.LAST_AUTO_REEL, value: String(reel.id), description: 'Último reel que disparó un video horizontal automático' },
-      update: { value: String(reel.id) },
+      where: { key: SETTINGS.LAST_AUTO_DAY },
+      create: { key: SETTINGS.LAST_AUTO_DAY, value: today, description: 'Último día (Colombia) en que se intentó el video horizontal automático' },
+      update: { value: today },
     });
-    console.log(`[HORIZONTAL] Reel ${reel.id}: generando la recopilación automática…`);
-    record = await createCompilation({ heroId: reel.id, render: true });
-    if (!record.videoPath) throw new Error('No se generó el archivo de video de la recopilación');
-    const published = await publishToYouTube(record.id);
-    console.log(`[HORIZONTAL] Reel ${reel.id}: publicado en ${published.channelName} → ${published.youtubeUrl}`);
-  } catch (e) {
-    console.error(`[HORIZONTAL] Reel ${reel.id}: falló la publicación automática:`, e.message);
-    if (record) {
-      await prisma.horizontalCompilation.update({ where: { id: record.id }, data: { status: 'FAILED', errorMessage: e.message } }).catch(() => {});
+    // Si hoy ya se publicó uno a mano, no se duplica
+    if (await publishedToday(today)) return;
+
+    hero = await prisma.reelPost.findFirst({ where: { status: 'PUBLISHED', approved: true }, orderBy: { publishedAt: 'desc' } });
+    console.log(`[HORIZONTAL] ${today}: generando la recopilación automática (abre con el reel ${hero?.id ?? 'por defecto'})…`);
+    try {
+      record = await createCompilation({ heroId: hero?.id || null, render: true });
+      if (!record.videoPath) throw new Error('No se generó el archivo de video de la recopilación');
+      const published = await publishToYouTube(record.id);
+      console.log(`[HORIZONTAL] ${today}: publicado en ${published.channelName} → ${published.youtubeUrl}`);
+    } catch (e) {
+      console.error(`[HORIZONTAL] ${today}: falló la publicación automática:`, e.message);
+      if (record) {
+        await prisma.horizontalCompilation.update({ where: { id: record.id }, data: { status: 'FAILED', errorMessage: e.message } }).catch(() => {});
+      }
+      if (hero) {
+        await notify?.({
+          post: hero,
+          title: 'Video horizontal: no se pudo publicar',
+          detail: `La recopilación automática de hoy falló.\n\nError: ${e.message}\n\nPuedes publicarla a mano desde "Videos Horizontales".`,
+        }).catch(() => {});
+      }
     }
-    await notify?.({
-      post: reel,
-      title: 'Video horizontal: no se pudo publicar',
-      detail: `La recopilación automática (${spacingText(cfg.spacingMin)} tras el reel) falló.\n\nError: ${e.message}\n\nPuedes publicarla a mano desde "Videos Horizontales".`,
-    }).catch(() => {});
-  }
-  // El mismo video sale también en la Página de Facebook en turno (aunque YouTube haya fallado)
-  try {
-    if (record?.videoPath && metaConfigured()) await publishToFacebook(record.id);
-  } catch (e) {
-    await notify?.({
-      post: reel,
-      title: 'Video horizontal: no se pudo publicar en Facebook',
-      detail: `La recopilación se generó pero Facebook falló.\n\nError: ${e.message}\n\nPuedes publicarla a mano con "Publicar en Facebook" en "Videos Horizontales".`,
-    }).catch(() => {});
+    // El mismo video sale también en la Página de Facebook en turno (aunque YouTube haya fallado)
+    try {
+      if (record?.videoPath && metaConfigured()) await publishToFacebook(record.id);
+    } catch (e) {
+      console.error(`[HORIZONTAL] ${today}: falló la publicación en Facebook:`, e.message);
+      if (hero) {
+        await notify?.({
+          post: hero,
+          title: 'Video horizontal: no se pudo publicar en Facebook',
+          detail: `La recopilación se generó pero Facebook falló.\n\nError: ${e.message}\n\nPuedes publicarla a mano con "Publicar en Facebook" en "Videos Horizontales".`,
+        }).catch(() => {});
+      }
+    }
   } finally {
     autoRunning = false;
   }
