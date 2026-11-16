@@ -11,7 +11,7 @@ import { parseSizeToMB, parseStorageFromDfText } from '../utils/megaDfParser.js'
 import { megaLoginFull, megaLogoutSafe, createReloginFn, refreshStorageMetrics } from '../utils/megaSession.js';
 import path from 'path';
 import fs from 'fs';
-import { batchAccountLimitMb, batchUsableFreeMb, isActiveBatchBackup } from '../utils/batchAccountCapacity.js';
+import { batchAccountLimitMb, batchAccountFreeMb, batchUsableFreeMb, isActiveBatchBackup } from '../utils/batchAccountCapacity.js';
 
 const prisma = new PrismaClient();
 // Cuota por defecto para cuentas gratuitas de MEGA (MB). Se puede sobreescribir con MEGA_FREE_QUOTA_MB
@@ -109,10 +109,15 @@ export const listAccounts = async (req, res) => {
 
       // Para batch upload: MB que aún admite la cuenta sin pasar del 95 % real,
       // limitado por el backup activo con menos espacio y descontando lo ya encolado.
+      const committedOf = id => committedMbById.get(id) || 0;
       const batchFields = onlyBatchUploadEligible && String(a.type).toLowerCase() === 'main'
         ? {
             batchLimitMB: batchAccountLimitMb(activeTotalMB),
-            batchUsableFreeMB: batchUsableFreeMb(a, (a.backups || []).map(b => b.backupAccount), id => committedMbById.get(id) || 0),
+            batchUsableFreeMB: batchUsableFreeMb(a, (a.backups || []).map(b => b.backupAccount), committedOf),
+            // Libre por cuenta implicada (main + backups activos): el reparto lo descuenta de cada una,
+            // así dos mains que comparten backup no lo llenan entre las dos.
+            batchResources: [a, ...(a.backups || []).map(b => b.backupAccount).filter(isActiveBatchBackup)]
+              .map(x => ({ id: x.id, freeMB: batchAccountFreeMb(x, committedOf(x.id)) })),
           }
         : {};
 
