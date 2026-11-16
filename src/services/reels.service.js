@@ -5,7 +5,7 @@ import { generateReelTexts, generateYoutubeVariant, generateFacebookVariant, gen
 import { metaConfigured, listFacebookPages, listInstagramAccounts, publishInstagramReel, publishFacebookReel, commentOnPublishedReel } from './metaReels.service.js';
 import { dispatchReelNotification } from '../utils/reelsNotifications.js';
 import { uploadShort, connectionStatus as youtubeStatus, listChannels as youtubeChannels } from './youtube.service.js';
-import { publishVideo as publishTiktokVideo, connectionStatus as tiktokStatus, tiktokOptionsProblem } from './tiktok.service.js';
+import { publishVideo as publishTiktokVideo, tiktokOptionsProblem } from './tiktok.service.js';
 import { publishVideo as publishThreadsVideo, connectionStatus as threadsStatus, threadsText } from './threads.service.js';
 import { getChannelVariantVideo, cleanVariants } from './reelsVideoVariants.service.js';
 import { publishDueHorizontal } from './horizontalShowcase.service.js';
@@ -879,15 +879,17 @@ export async function autoFill() {
   return { assigned };
 }
 
-/** Redes por defecto de un reel nuevo: YouTube, TikTok y Threads si su cuenta está conectada (TikTok va a borradores). */
+/**
+ * Redes por defecto de un reel nuevo: YouTube y Threads si su cuenta está conectada.
+ * TikTok queda apagado por defecto (se programa en el programador nativo de TikTok); se puede encender a mano en cada reel.
+ */
 export async function defaultPlatforms() {
-  const [yt, tt, th] = await Promise.all([
+  const [yt, th] = await Promise.all([
     youtubeStatus().catch(() => ({ connected: false })),
-    tiktokStatus().catch(() => ({ connected: false })),
     threadsStatus().catch(() => ({ connected: false })),
   ]);
-  const connected = { youtube: yt.connected, tiktok: tt.connected, threads: th.connected };
-  return PLATFORMS.filter(p => !(p in connected) || connected[p]);
+  const connected = { youtube: yt.connected, threads: th.connected };
+  return PLATFORMS.filter(p => p !== 'tiktok' && (!(p in connected) || connected[p]));
 }
 
 export async function deleteReel(postId) {
