@@ -305,6 +305,37 @@ async function notifyAutomation({ title, body, typeStatus = 'ERROR' }) {
   }
 }
 
+// Lee el uso real de la cuenta con la sesión MEGA ya abierta (sin login extra) y lo guarda.
+// Devuelve null si MEGA no informa la cuota: quien llama decide no subir.
+async function readLiveStorageInSession(accountId, ctx = '') {
+  let parsed = null
+  for (const args of [['-h'], []]) {
+    try {
+      const { out } = await runCmd('mega-df', args)
+      const candidate = parseStorageFromDfText(out)
+      if (toSafeNumber(candidate?.storageTotalMB, 0) > 0) { parsed = candidate; break }
+    } catch (e) {
+      console.warn(`[BATCH][ACCOUNT][LIVE][WARN] mega-df ${args.join(' ')} accId=${accountId}: ${e.message}`)
+    }
+  }
+  if (!parsed) return null
+
+  const storageUsedMB = Math.max(0, Math.round(toSafeNumber(parsed.storageUsedMB, 0)))
+  const storageTotalMB = Math.round(toSafeNumber(parsed.storageTotalMB, 0))
+  try {
+    await prisma.megaAccount.update({
+      where: { id: Number(accountId) },
+      data: { storageUsedMB, storageTotalMB, lastCheckAt: new Date() },
+    })
+    // El dato real ya incluye lo subido en esta sesión
+    sessionUploadedMbByAccountId.set(Number(accountId), 0)
+  } catch (e) {
+    console.warn(`[BATCH][ACCOUNT][LIVE][WARN] db update accId=${accountId}: ${e.message}`)
+  }
+  console.log(`[BATCH][ACCOUNT][LIVE] accId=${accountId} used=${storageUsedMB}MB total=${storageTotalMB}MB ${ctx}`)
+  return { storageUsedMB, storageTotalMB }
+}
+
 async function refreshMainAccountStorageMetrics(mainAccount, extraCtx = '') {
   const accountId = Number(mainAccount?.id || 0)
   if (!accountId) return null
@@ -1003,6 +1034,20 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
         }
 
         await ensureMegaSessionForAccount(payload, account.id, ctx, { forceRelogin: forceReloginNextAttempt })
+
+        // Garantía de espacio: con la sesión ya abierta se lee el uso REAL en MEGA antes de subir.
+        // El dato guardado puede estar viejo (cuentas que figuran vacías y no lo están).
+        const live = await readLiveStorageInSession(account.id, ctx)
+        if (!live) throw new Error(`MEGA_DF_UNAVAILABLE: no se pudo leer el espacio real accId=${account.id}; no se sube a ciegas`)
+        account.storageUsedMB = live.storageUsedMB
+        account.storageTotalMB = live.storageTotalMB
+        const liveLimitMb = batchAccountLimitMb(live.storageTotalMB)
+        if (live.storageUsedMB + archiveSizeMb > liveLimitMb) {
+          throw new Error(
+            `ACCOUNT_STORAGE_LIMIT_REACHED_${Math.floor(liveLimitMb)}MB (real) accId=${account.id} role=${role} used=${live.storageUsedMB.toFixed(2)}MB incoming=${archiveSizeMb.toFixed(2)}MB total=${live.storageTotalMB}MB`
+          )
+        }
+
         await safeMkdir(remotePath)
         forceReloginNextAttempt = false
         forceSkipLastProxy = false
