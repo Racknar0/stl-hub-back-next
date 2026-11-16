@@ -915,6 +915,27 @@ export async function autoFill() {
   return { assigned };
 }
 
+/** Reels sin publicar (ni publicándose) que todavía no tienen esa red marcada. */
+export async function reelsMissingPlatform(platform) {
+  if (!PLATFORMS.includes(platform)) throw Object.assign(new Error('Red desconocida'), { status: 400 });
+  const pending = await prisma.reelPost.findMany({
+    where: { status: { not: 'PUBLISHED' }, publishing: false },
+    select: { id: true, platforms: true },
+  });
+  return pending.filter(p => !(Array.isArray(p.platforms) ? p.platforms : []).includes(platform));
+}
+
+/** Marca esa red en todos los reels sin publicar que no la tienen (saldrán también ahí a su hora). */
+export async function addPlatformToPending(platform) {
+  const missing = await reelsMissingPlatform(platform);
+  for (const post of missing) {
+    if (inFlight.has(post.id)) continue;
+    const platforms = Array.isArray(post.platforms) ? post.platforms : [];
+    await prisma.reelPost.update({ where: { id: post.id }, data: { platforms: [...platforms, platform] } });
+  }
+  return { added: missing.filter(p => !inFlight.has(p.id)).length };
+}
+
 /**
  * Redes por defecto de un reel nuevo: YouTube y Threads si su cuenta está conectada; Instagram, Facebook y
  * Pinterest siempre. TikTok queda apagado por defecto (se programa en el programador nativo de TikTok);

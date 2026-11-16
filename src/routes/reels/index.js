@@ -316,6 +316,14 @@ router.post('/threads/disconnect', requireAuth, requireAdmin, async (req, res) =
 });
 
 // 7. Rellenar los próximos días libres con la bandeja
+// 7b. Añadir una red (p. ej. Pinterest) a los reels sin publicar que no la tienen
+router.get('/missing-platform/:platform', requireAuth, requireAdmin, async (req, res) => {
+  try { res.json({ pending: (await reels.reelsMissingPlatform(String(req.params.platform))).length }); } catch (error) { sendError(res, error); }
+});
+router.post('/missing-platform/:platform', requireAuth, requireAdmin, async (req, res) => {
+  try { res.json(await reels.addPlatformToPending(String(req.params.platform))); } catch (error) { sendError(res, error); }
+});
+
 router.post('/auto-fill', requireAuth, requireAdmin, async (req, res) => {
   try { res.json(await reels.autoFill()); } catch (error) { sendError(res, error); }
 });
