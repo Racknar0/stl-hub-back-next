@@ -10,10 +10,12 @@ import { publishVideo as publishThreadsVideo, connectionStatus as threadsStatus,
 import { getChannelVariantVideo, cleanVariants } from './reelsVideoVariants.service.js';
 import { publishDueHorizontal } from './horizontalShowcase.service.js';
 import { shortOrLong, setFixedLink, BIO_CODE } from './shortLinks.service.js';
+import pinterestPublisher from './pinterestPublisher.service.js';
+import pinterestService from './pinterest.service.js';
 
 const prisma = new PrismaClient();
 
-export const PLATFORMS = ['instagram', 'facebook', 'youtube', 'tiktok', 'threads'];
+export const PLATFORMS = ['instagram', 'facebook', 'youtube', 'tiktok', 'threads', 'pinterest'];
 const SETTINGS = { defaultTime: 'REELS_DEFAULT_TIME', timeSpread: 'REELS_TIME_SPREAD', language: 'REELS_LANGUAGE', youtubePrivacy: 'REELS_YOUTUBE_PRIVACY' };
 const DEFAULTS = { defaultTime: '18:00', timeSpread: 60, language: 'es', youtubePrivacy: 'public' };
 const YOUTUBE_PRIVACY = ['private', 'unlisted', 'public'];
@@ -356,7 +358,17 @@ export function missingFields(post) {
   }
   // Threads usa el caption de Instagram (sin su pie) + el link del modelo
   if (platforms.includes('threads') && !post.caption?.trim()) missing.push('caption (se usa también en Threads)');
+  // Pinterest usa el título de YouTube (o el del modelo) y el caption de Instagram sin cabecera ni pie
+  if (platforms.includes('pinterest') && !(post.title || post.assetTitle)?.trim()) missing.push('título (se usa en Pinterest)');
   return missing;
+}
+
+/** Título y descripción del pin de video: título de YouTube (o el del modelo) y el caption sin cabecera ni pie. */
+export function pinterestTexts(post) {
+  const title = String(post.title || post.assetTitle || 'Modelo 3D STL').replace(/#\S+/g, '').replace(/\s+/g, ' ').trim().slice(0, 100);
+  const tags = (Array.isArray(post.hashtags) ? post.hashtags : []).map(t => `#${String(t).replace(/^#/, '')}`).join(' ');
+  const body = captionBody(post.caption || '') || String(post.youtubeDescription || '').trim();
+  return { title, description: [body, tags].filter(Boolean).join('\n\n').slice(0, 500) };
 }
 
 // ---------- Publicación ----------
@@ -443,7 +455,7 @@ async function instagramTargets(post) {
   });
 }
 
-const PLATFORM_NAMES = { instagram: 'Instagram', facebook: 'Facebook', youtube: 'YouTube', tiktok: 'TikTok', threads: 'Threads' };
+const PLATFORM_NAMES = { instagram: 'Instagram', facebook: 'Facebook', youtube: 'YouTube', tiktok: 'TikTok', threads: 'Threads', pinterest: 'Pinterest' };
 
 // Reels que se están subiendo ahora mismo (evita publicar dos veces el mismo si coinciden el worker y "Publicar ahora")
 const inFlight = new Set();
@@ -514,6 +526,15 @@ async function publishToPlatform(platform, post, { now = false } = {}) {
   if (platform === 'threads') {
     const short = link ? await shortOrLong({ targetUrl: link, source: 'threads', label: `Reel ${post.id} · Threads`, refType: 'reel', refId: post.id }) : null;
     return publishThreadsVideo({ videoUrl: publicVideoUrl(post.videoPath), text: threadsText(captionBody(post.caption), short) });
+  }
+  if (platform === 'pinterest') {
+    // Pin de video: enlace directo al modelo (Pinterest desconfía de las redirecciones, así que sin acortador)
+    return pinterestPublisher.publishVideoPin({
+      videoAbsPath: toAbsVideoPath(post.videoPath),
+      ...pinterestTexts(post),
+      link: link || 'https://stlgratis.com/',
+      assetId: post.assetId,
+    });
   }
   if (platform === 'tiktok') {
     return publishTiktokVideo({ videoAbsPath: toAbsVideoPath(post.videoPath), caption: withHashtags(post.tiktokCaption || post.caption, post), options: post.tiktokOptions });
@@ -884,11 +905,12 @@ export async function autoFill() {
  * TikTok queda apagado por defecto (se programa en el programador nativo de TikTok); se puede encender a mano en cada reel.
  */
 export async function defaultPlatforms() {
-  const [yt, th] = await Promise.all([
+  const [yt, th, pin] = await Promise.all([
     youtubeStatus().catch(() => ({ connected: false })),
     threadsStatus().catch(() => ({ connected: false })),
+    pinterestService.testConnection().catch(() => ({ connected: false })),
   ]);
-  const connected = { youtube: yt.connected, threads: th.connected };
+  const connected = { youtube: yt.connected, threads: th.connected, pinterest: pin.connected };
   return PLATFORMS.filter(p => p !== 'tiktok' && (!(p in connected) || connected[p]));
 }
 

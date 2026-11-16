@@ -375,6 +375,97 @@ class PinterestPublisherService {
       return null;
     }
   }
+  /**
+   * Tablero para un pin: el de la categoría del asset si existe en Pinterest; si no, el tablero por defecto.
+   */
+  async resolveBoardForAsset(assetId, accessToken) {
+    if (assetId) {
+      try {
+        const dbAsset = await prisma.asset.findUnique({ where: { id: Number(assetId) }, include: { categories: true } });
+        const categoryName = dbAsset?.categories?.[0]?.name;
+        if (categoryName) {
+          const matched = await this.findBoardByName(categoryName, accessToken);
+          if (matched) return matched;
+        }
+      } catch (e) {
+        console.error('[Pinterest Publisher] Error buscando categoría de asset:', e.message);
+      }
+    }
+    const fallback = await this.findOrCreateDefaultBoard('STL Hub', accessToken);
+    if (!fallback) throw new Error('No se pudo obtener ningún tablero de Pinterest. Crea al menos un tablero en tu cuenta.');
+    return fallback;
+  }
+
+  /**
+   * Pin de video (reels): registra el video en Pinterest, lo sube, espera a que lo procese y crea el pin.
+   * @param {Object} params
+   * @param {string} params.videoAbsPath Ruta local del .mp4
+   * @param {string} params.title Título (máx. 100)
+   * @param {string} params.description Descripción (máx. 500)
+   * @param {string} params.link URL a la que lleva el pin
+   * @param {number|null} params.assetId Asset para elegir el tablero por su categoría
+   * @param {number} params.coverSeconds Segundo del video que se usa como portada
+   */
+  async publishVideoPin({ videoAbsPath, title, description, link, assetId = null, coverSeconds = 1 }) {
+    if (!videoAbsPath || !fs.existsSync(videoAbsPath)) throw new Error('El archivo de video no está en el servidor');
+    const accessToken = await pinterestService.getValidAccessToken();
+    const auth = { Authorization: `Bearer ${accessToken}` };
+    const boardId = await this.resolveBoardForAsset(assetId, accessToken);
+
+    // 1. Registrar la subida
+    const regResp = await fetch(`${this.baseUrl}/media`, {
+      method: 'POST',
+      headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ media_type: 'video' }),
+    });
+    const reg = await regResp.json().catch(() => ({}));
+    if (!regResp.ok || !reg.media_id || !reg.upload_url) {
+      throw new Error(`Pinterest no aceptó registrar el video: ${reg.message || `HTTP ${regResp.status}`}`);
+    }
+
+    // 2. Subir el archivo al almacenamiento que indica Pinterest (formulario con sus parámetros + el archivo)
+    const form = new FormData();
+    for (const [key, value] of Object.entries(reg.upload_parameters || {})) form.append(key, value);
+    const buffer = await fs.promises.readFile(videoAbsPath);
+    form.append('file', new Blob([buffer], { type: 'video/mp4' }), path.basename(videoAbsPath));
+    const upResp = await fetch(reg.upload_url, { method: 'POST', body: form });
+    if (!upResp.ok) {
+      const text = await upResp.text().catch(() => '');
+      throw new Error(`No se pudo subir el video a Pinterest (HTTP ${upResp.status}) ${text.slice(0, 200)}`);
+    }
+
+    // 3. Esperar a que Pinterest procese el video (hasta ~10 min)
+    let status = 'registered';
+    for (let i = 0; i < 120; i++) {
+      await new Promise(r => setTimeout(r, 5000));
+      const stResp = await fetch(`${this.baseUrl}/media/${reg.media_id}`, { headers: auth });
+      const st = await stResp.json().catch(() => ({}));
+      status = st.status || status;
+      if (status === 'succeeded') break;
+      if (status === 'failed') throw new Error('Pinterest no pudo procesar el video');
+    }
+    if (status !== 'succeeded') throw new Error('Pinterest tardó demasiado en procesar el video');
+
+    // 4. Crear el pin con el video
+    const payload = {
+      board_id: boardId,
+      title: String(title || '').slice(0, 100),
+      description: String(description || '').slice(0, 500),
+      link: link || '',
+      media_source: { source_type: 'video_id', media_id: reg.media_id, cover_image_key_frame_time: coverSeconds },
+    };
+    const pinResp = await fetch(`${this.baseUrl}/pins`, {
+      method: 'POST',
+      headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!pinResp.ok) {
+      const text = await pinResp.text().catch(() => '');
+      throw new Error(`Error de Pinterest al crear el pin de video: ${text.slice(0, 300)}`);
+    }
+    const pin = await pinResp.json();
+    return { id: pin.id, pinId: pin.id, boardId, url: `https://www.pinterest.com/pin/${pin.id}/` };
+  }
 }
 
 export default new PinterestPublisherService();

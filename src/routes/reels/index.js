@@ -8,6 +8,7 @@ import reels, { PLATFORMS, assetLink, dayKey, defaultPlatforms } from '../../ser
 import youtube from '../../services/youtube.service.js';
 import tiktok, { PRIVACY_LEVELS } from '../../services/tiktok.service.js';
 import threads from '../../services/threads.service.js';
+import pinterestService from '../../services/pinterest.service.js';
 import { listFacebookPages, listInstagramAccounts } from '../../services/metaReels.service.js';
 import horizontalRoutes from './horizontal.js';
 
@@ -207,10 +208,11 @@ router.put('/settings', requireAuth, requireAdmin, async (req, res) => {
 // 6. Estado de las cuentas (por ahora solo comprueba que haya credenciales configuradas)
 router.get('/connection-status', requireAuth, requireAdmin, async (req, res) => {
   const meta = !!(process.env.META_SYSTEM_USER_TOKEN && process.env.META_PAGE_ID && process.env.META_IG_USER_ID);
-  const [yt, tt, th] = await Promise.all([
+  const [yt, tt, th, pin] = await Promise.all([
     youtube.connectionStatus().catch(() => ({ configured: false, connected: false })),
     tiktok.connectionStatus().catch(() => ({ configured: false, connected: false })),
     threads.connectionStatus().catch(() => ({ configured: false, connected: false })),
+    pinterestService.testConnection().catch(() => ({ connected: false })),
   ]);
   res.json({
     // Cuentas vinculadas a las Páginas asignadas (la principal primero)
@@ -220,6 +222,8 @@ router.get('/connection-status', requireAuth, requireAdmin, async (req, res) => 
     youtube: { ...yt, appConfigured: youtube.youtubeConfigured() },
     tiktok: { ...tt, appConfigured: tiktok.tiktokConfigured() },
     threads: { ...th, appConfigured: threads.threadsConfigured() },
+    // Pinterest se conecta en Publicaciones → Pinterest; aquí solo se informa si hay cuenta
+    pinterest: { connected: !!pin.connected, username: pin.account?.username || null },
   });
 });
 
