@@ -2,8 +2,8 @@
  * Publica en Pinterest (pin de video) un reel que ya salió en las demás redes, para probar la integración
  * o completar reels antiguos. Guarda el resultado en el reel como una red más.
  *
- * Uso: node --env-file=.env scripts/publishReelToPinterest.js [idReel]
- *      (sin id: el último reel publicado que aún no está en Pinterest)
+ * Uso: node --env-file=.env scripts/publishReelToPinterest.js [idReel] [--link=<url>]
+ *      (sin id: el último reel publicado que aún no está en Pinterest; --link cambia el enlace del pin para probar)
  */
 import { PrismaClient } from '@prisma/client';
 import pinterestPublisher from '../src/services/pinterestPublisher.service.js';
@@ -12,7 +12,8 @@ import { pinterestTexts, pinterestLink, toAbsVideoPath } from '../src/services/r
 const prisma = new PrismaClient();
 
 async function main() {
-  const idArg = Number(process.argv[2]);
+  const idArg = Number(process.argv.find(a => /^\d+$/.test(a)));
+  const linkArg = (process.argv.find(a => a.startsWith('--link=')) || '').slice('--link='.length);
   let post;
   if (idArg) {
     post = await prisma.reelPost.findUnique({ where: { id: idArg } });
@@ -29,7 +30,7 @@ async function main() {
   const result = await pinterestPublisher.publishVideoPin({
     videoAbsPath: toAbsVideoPath(post.videoPath),
     ...texts,
-    link: pinterestLink(post),
+    link: linkArg || pinterestLink(post),
     assetId: post.assetId,
   });
 
