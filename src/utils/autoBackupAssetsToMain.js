@@ -11,6 +11,7 @@ import { runCmd } from './megaCmd.js'
 import { parseSizeToMB, parseStorageFromDfText, pickFirstFileFromLs } from './megaDfParser.js'
 import { megaGetWithStallRetry, megaPutWithStallRetry, applyProxyByIndexOrThrow } from './megaTransfer.js'
 import { megaLoginFull, megaLogoutSafe, resetMegaServerIfSafe } from './megaSession.js'
+import { orderGroups, isCoolingDown, cooldownHours, recordFailure, clearFailure, pruneFailures, loadFailures, saveFailures } from './cronGroupQueue.js'
 
 /*
   Script: validateAssetsOnLastAccount (FINAL V3 - ZOMBIE KILLER EDITION)
@@ -24,6 +25,8 @@ const prisma = new PrismaClient()
 const UPLOADS_DIR = path.resolve('uploads')
 const TEMP_DIR = path.join(UPLOADS_DIR, 'tmp')
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive:true })
+// Fallos recientes por grupo, para no reintentar siempre el mismo (ver cronGroupQueue.js).
+const FAILURES_FILE = path.join(TEMP_DIR, 'auto-restore-main.failures.json')
 const DEFAULT_FREE_QUOTA_MB = Number(process.env.MEGA_FREE_QUOTA_MB) || 20480
 const UPLOADS_ACTIVE_FLAG = process.env.UPLOADS_ACTIVE_FLAG || path.join(UPLOADS_DIR, 'sync-cache', 'uploads-active.lock')
 
@@ -590,7 +593,11 @@ export async function runAutoRestoreMain(){
       return { m, oldestTs, driver };
     });
 
-    scored.sort((a, b) => a.oldestTs - b.oldestTs);
+    // Los grupos que fallaron hace poco pasan al final: un grupo roto no bloquea al resto.
+    let failures = pruneFailures(loadFailures(FAILURES_FILE), mains.map(m => m.id));
+    const ordered = orderGroups(scored, failures);
+    const pausedCount = scored.filter(s => isCoolingDown(failures[s.m.id])).length;
+    if (pausedCount) log.info(`[CRON][COLA] ${pausedCount} grupo(s) en pausa por fallos recientes`);
 
     // CÁLCULO DINÁMICO DE BATCH
     // Garantiza que sin importar la cantidad de cuentas, se revisen todas en un máximo de TARGET_DAYS (50 días).
@@ -598,7 +605,7 @@ export async function runAutoRestoreMain(){
     const RUNS_PER_DAY = Number(process.env.AUTO_BACKUP_RUNS_PER_DAY) || 24; // Asumiendo cron horario
     const batchSize = Math.max(1, Math.ceil(mains.length / (TARGET_DAYS * RUNS_PER_DAY)));
 
-    const toProcess = scored.slice(0, batchSize);
+    const toProcess = ordered.slice(0, batchSize);
     log.info(`[CRON][DYNAMIC] Total mains: ${mains.length} | Meta: ${TARGET_DAYS} días (${RUNS_PER_DAY} runs/día) | Procesando batch de ${toProcess.length} grupo(s)`);
 
     const summaryResults = [];
@@ -609,8 +616,13 @@ export async function runAutoRestoreMain(){
       try {
         const res = await processSingleMainGroup(m, maxAssets);
         summaryResults.push({ mainId: m.id, ok: true, res });
+        failures = clearFailure(failures, m.id);
+        saveFailures(FAILURES_FILE, failures);
       } catch (e) {
         log.error(`[CRON][ERROR] Fallo procesando grupo mainId=${m.id} (${m.alias || '--'}): ${e.message}`);
+        failures = recordFailure(failures, m.id, Date.now(), e.message);
+        saveFailures(FAILURES_FILE, failures);
+        log.info(`[CRON][COLA] mainId=${m.id} en pausa ${cooldownHours(failures[m.id].count)} h (fallo #${failures[m.id].count} seguido)`);
         try {
           await prisma.megaAccount.update({
             where: { id: m.id },
