@@ -963,4 +963,5 @@ export async function deleteReel(postId) {
 export default {
   getSettings, saveSettings, processReelAi, enqueueAi, missingFields, publishReel, publishInBackground, publishDueReels,
   startReelsWorker, assignDay, autoFill, deleteReel, reelsMissingYoutubeVariants, fillMissingYoutubeVariants,
+  reelsMissingPlatform, addPlatformToPending,
 };
