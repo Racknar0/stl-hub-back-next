@@ -8,6 +8,7 @@ import { callGoogleBatchScan } from '../helpers/batchAi/callGoogleBatchScan.js';
 import { extractArchiveWithFallback, isUnsupportedArchiveMethodError } from '../utils/archiveExtractor.js';
 import sharp from 'sharp';
 import qdrantMultimodalService from '../services/qdrantMultimodal.service.js';
+import { batchAccountLimitMb, batchAccountFreeMb, isActiveBatchBackup } from '../utils/batchAccountCapacity.js';
 
 const prisma = new PrismaClient();
 const UPLOADS_DIR = path.resolve('uploads');
@@ -16,7 +17,6 @@ const TELEGRAM_DIR = path.join(UPLOADS_DIR, 'telegram_downloads_organized');
 const ARCHIVES_DIR = path.join(UPLOADS_DIR, 'archives');
 const ARCHIVE_EXTS = ['.rar', '.zip', '.7z', '.tar', '.gz', '.tgz'];
 const TITLE_PREFIX_RE = /^\s*STL\s*-\s*/i;
-const MAX_ACCOUNT_UPLOAD_MB = 18 * 1024;
 
 let batchScanRunSeq = 0;
 let batchScanStatus = {
@@ -1538,11 +1538,29 @@ export const confirmBatchItems = async (req, res) => {
     const accountRows = targetAccountIds.length
       ? await prisma.megaAccount.findMany({
           where: { id: { in: targetAccountIds } },
-          select: { id: true, alias: true, storageUsedMB: true },
+          select: {
+            id: true, alias: true, storageUsedMB: true, storageTotalMB: true,
+            backups: { select: { backupAccount: { select: { id: true, alias: true, status: true, storageUsedMB: true, storageTotalMB: true } } } },
+          },
         })
       : [];
     const accountById = new Map(accountRows.map((a) => [Number(a.id), a]));
+    // Lo ya encolado/subiendo cuenta como espacio comprometido (en la main y en sus backups activos)
     const plannedExtraByAccount = new Map();
+    const involvedAccounts = (acc) => [acc, ...(acc.backups || []).map((b) => b.backupAccount).filter(isActiveBatchBackup)];
+    const alreadyQueued = targetAccountIds.length
+      ? await prisma.batchImportItem.groupBy({
+          by: ['targetAccount'],
+          where: { status: { in: ['QUEUED', 'PROCESSING'] }, targetAccount: { in: targetAccountIds }, id: { notIn: normalizedIds } },
+          _sum: { pesoMB: true },
+        })
+      : [];
+    for (const row of alreadyQueued) {
+      const acc = accountById.get(Number(row.targetAccount));
+      const mb = Number(row._sum?.pesoMB || 0);
+      if (!acc || !(mb > 0)) continue;
+      for (const a of involvedAccounts(acc)) plannedExtraByAccount.set(Number(a.id), Number(plannedExtraByAccount.get(Number(a.id)) || 0) + mb);
+    }
 
     const reservedKeys = await buildReservedBatchTitleSet(normalizedIds);
 
@@ -1557,24 +1575,27 @@ export const confirmBatchItems = async (req, res) => {
       const acc = accountById.get(accountId);
       if (!acc) continue;
 
-      const usedMb = Number(acc.storageUsedMB || 0);
-      const plannedMb = Number(plannedExtraByAccount.get(accountId) || 0);
       const incomingMb = Number(item.pesoMB || 0);
-      const projectedMb = usedMb + plannedMb + incomingMb;
+      const involved = involvedAccounts(acc);
+      // Debe caber en la main y en cada backup activo sin pasar del 95 % de su tamaño real
+      const blocker = involved.find((a) => incomingMb > batchAccountFreeMb(a, plannedExtraByAccount.get(Number(a.id)) || 0));
 
-      if (projectedMb > MAX_ACCOUNT_UPLOAD_MB) {
+      if (blocker) {
+        const usedMb = Number(blocker.storageUsedMB || 0);
+        const plannedMb = Number(plannedExtraByAccount.get(Number(blocker.id)) || 0);
         rejectedOverLimit.push({
           itemId: item.id,
           accountId,
           accountAlias: acc.alias,
+          blockedByAlias: blocker.alias,
           usedMb,
           incomingMb,
-          projectedMb,
-          limitMb: MAX_ACCOUNT_UPLOAD_MB,
+          projectedMb: usedMb + plannedMb + incomingMb,
+          limitMb: batchAccountLimitMb(blocker.storageTotalMB),
         });
         continue;
       }
-      plannedExtraByAccount.set(accountId, plannedMb + incomingMb);
+      for (const a of involved) plannedExtraByAccount.set(Number(a.id), Number(plannedExtraByAccount.get(Number(a.id)) || 0) + incomingMb);
 
       const desired = item.title || item.titleEn || item.folderName || `Asset ${item.id}`;
       const uniqueTitle = await ensureUniqueBatchTitle(desired, reservedKeys);
@@ -1598,7 +1619,7 @@ export const confirmBatchItems = async (req, res) => {
     }
 
     const message = rejectedOverLimit.length
-      ? `Confirmados ${confirmed}. Rechazados por límite de ${MAX_ACCOUNT_UPLOAD_MB}MB: ${rejectedOverLimit.length}`
+      ? `Confirmados ${confirmed}. Rechazados por falta de espacio (tope 95 % en main o backup): ${rejectedOverLimit.length}`
       : undefined;
 
     return res.json({ success: true, confirmed, confirmedIds, renamed, rejectedOverLimit, message });

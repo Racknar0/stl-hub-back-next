@@ -38,6 +38,7 @@ import { parseSizeToMB, parseStorageFromDfText } from '../utils/megaDfParser.js'
 import { killProcessTreeBestEffort } from '../utils/megaTransfer.js'
 import { megaLoginFull, megaLogoutSafe } from '../utils/megaSession.js'
 import { ensureMegaHttps, isMegaHttpsError } from '../utils/megaHttps.js'
+import { batchAccountLimitMb, batchAccountFreeMb, isActiveBatchBackup } from '../utils/batchAccountCapacity.js'
 
 const prisma = new PrismaClient()
 const UPLOADS_DIR  = path.resolve('uploads')
@@ -59,7 +60,6 @@ let activeMegaSessionAccountId = 0
 let activeMegaProxyUrl = ''
 const preferredProxyByAccountId = new Map()
 const sessionUploadedMbByAccountId = new Map()
-const MAX_ACCOUNT_UPLOAD_MB = Number(process.env.BATCH_ACCOUNT_MAX_MB) || (18 * 1024)
 const DISK_MIN_FREE_GB = Number(process.env.BATCH_DISK_MIN_FREE_GB) || 50
 
 // ────────────────────────────── HELPERS ──────────────────────────────
@@ -252,6 +252,17 @@ function registerSessionUploadedMb(accountId, addedMb) {
   if (!id) return
   const current = getSessionUploadedMb(id)
   sessionUploadedMbByAccountId.set(id, current + Math.max(0, toSafeNumber(addedMb, 0)))
+}
+
+// ¿Caben extraMb en la cuenta sin pasar del 95 % de su tamaño real? Cuenta lo subido en esta sesión.
+function batchAccountFits(account, extraMb) {
+  return toSafeNumber(extraMb, 0) <= batchAccountFreeMb(account, getSessionUploadedMb(account?.id))
+}
+
+// Todos los backups activos deben admitir el peso; sin backups activos no hay réplica sana.
+function batchBackupsFit(backups, extraMb) {
+  const active = (backups || []).filter(isActiveBatchBackup)
+  return active.length > 0 && active.every((backup) => batchAccountFits(backup, extraMb))
 }
 
 function createProgressLogger(label) {
@@ -923,9 +934,10 @@ async function uploadToAccountWithRetry({ archivePath, slug, account, role, onPr
       const usedMb = toSafeNumber(account.storageUsedMB, 0)
       const sessionUploadedMb = getSessionUploadedMb(accountIdNum)
       const projectedMb = usedMb + sessionUploadedMb + archiveSizeMb
-      if (projectedMb > MAX_ACCOUNT_UPLOAD_MB) {
+      const accountLimitMb = batchAccountLimitMb(account.storageTotalMB)
+      if (projectedMb > accountLimitMb) {
         throw new Error(
-          `ACCOUNT_STORAGE_LIMIT_REACHED_${MAX_ACCOUNT_UPLOAD_MB}MB accId=${account.id} role=${role} used=${usedMb.toFixed(2)}MB session=${sessionUploadedMb.toFixed(2)}MB incoming=${archiveSizeMb.toFixed(2)}MB projected=${projectedMb.toFixed(2)}MB`
+          `ACCOUNT_STORAGE_LIMIT_REACHED_${Math.floor(accountLimitMb)}MB accId=${account.id} role=${role} used=${usedMb.toFixed(2)}MB session=${sessionUploadedMb.toFixed(2)}MB incoming=${archiveSizeMb.toFixed(2)}MB projected=${projectedMb.toFixed(2)}MB`
         )
       }
 
@@ -1173,9 +1185,13 @@ async function prepareItemForMain(item, updateItem, artifacts = {}) {
   const sessionUploadedMb = getSessionUploadedMb(mainAccount.id)
   const projectedMb = usedMb + sessionUploadedMb + archiveSizeMb
 
-  if (projectedMb > MAX_ACCOUNT_UPLOAD_MB) {
+  // Los backups activos de la cuenta original también deben admitir el archivo antes de subir nada
+  const originalActiveBackups = backupAccounts.filter(isActiveBatchBackup)
+  const originalBackupsFit = originalActiveBackups.every((backup) => batchAccountFits(backup, archiveSizeMb))
+
+  if (projectedMb > batchAccountLimitMb(mainAccount.storageTotalMB) || !originalBackupsFit) {
     const originalAccountId = item.targetAccount
-    console.warn(`[BATCH][MAIN] Cuenta original ${originalAccountId} llena (Proyectado: ${projectedMb.toFixed(2)} MB). Buscando alternativa con backups saludables...`)
+    console.warn(`[BATCH][MAIN] Cuenta original ${originalAccountId} sin espacio en main o backup (Proyectado main: ${projectedMb.toFixed(2)} MB). Buscando alternativa con backups saludables...`)
 
     // Buscar TODOS los items pendientes de la misma cuenta para reasignar en bloque
     const remainingItems = await prisma.batchImportItem.findMany({
@@ -1206,14 +1222,11 @@ async function prepareItemForMain(item, updateItem, artifacts = {}) {
 
         // Validar que al menos 1 backup vinculado tenga espacio
         const linkedBackups = (acc.backups || []).map(b => b.backupAccount).filter(b => b && b.type === 'backup')
-        const hasHealthyBackup = linkedBackups.some(backup => {
-          const backupUsed = toSafeNumber(backup.storageUsedMB, 0)
-          return (backupUsed + totalRemainingMb) <= MAX_ACCOUNT_UPLOAD_MB
-        })
+        const hasHealthyBackup = batchBackupsFit(linkedBackups, totalRemainingMb)
 
         return { acc, mainProjected, hasHealthyBackup, backupCount: linkedBackups.length }
       })
-      .filter(x => x.mainProjected <= MAX_ACCOUNT_UPLOAD_MB && x.hasHealthyBackup)
+      .filter(x => x.mainProjected <= batchAccountLimitMb(x.acc.storageTotalMB) && x.hasHealthyBackup)
 
     if (accountsWithSpace.length > 0) {
       // Priorizar la que tenga más espacio libre (menor projected)
@@ -1244,14 +1257,11 @@ async function prepareItemForMain(item, updateItem, artifacts = {}) {
 
           // Validar que al menos 1 backup vinculado tenga espacio
           const linkedBackups = (acc.backups || []).map(b => b.backupAccount).filter(b => b && b.type === 'backup')
-          const hasHealthyBackup = linkedBackups.some(backup => {
-            const backupUsed = toSafeNumber(backup.storageUsedMB, 0)
-            return (backupUsed + archiveSizeMb) <= MAX_ACCOUNT_UPLOAD_MB
-          })
+          const hasHealthyBackup = batchBackupsFit(linkedBackups, archiveSizeMb)
 
           return { acc, mainProjected, hasHealthyBackup, backupCount: linkedBackups.length }
         })
-        .filter(x => x.mainProjected <= MAX_ACCOUNT_UPLOAD_MB && x.hasHealthyBackup)
+        .filter(x => x.mainProjected <= batchAccountLimitMb(x.acc.storageTotalMB) && x.hasHealthyBackup)
 
       if (accountsWithSpaceSingle.length > 0) {
         accountsWithSpaceSingle.sort((a, b) => a.mainProjected - b.mainProjected)

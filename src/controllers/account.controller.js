@@ -11,6 +11,7 @@ import { parseSizeToMB, parseStorageFromDfText } from '../utils/megaDfParser.js'
 import { megaLoginFull, megaLogoutSafe, createReloginFn, refreshStorageMetrics } from '../utils/megaSession.js';
 import path from 'path';
 import fs from 'fs';
+import { batchAccountLimitMb, batchUsableFreeMb, isActiveBatchBackup } from '../utils/batchAccountCapacity.js';
 
 const prisma = new PrismaClient();
 // Cuota por defecto para cuentas gratuitas de MEGA (MB). Se puede sobreescribir con MEGA_FREE_QUOTA_MB
@@ -83,25 +84,37 @@ export const listAccounts = async (req, res) => {
 
     const onlyBatchUploadEligible = isTruthyFlag(req?.query?.batchUpload);
 
-    const mapped = accounts.map(a => {
-      let activeUsedMB = a.storageUsedMB || 0;
-      let activeTotalMB = a.storageTotalMB || 0;
-
-      // Si es para batch upload, calculamos el "cuello de botella" de las cuentas backup enlazadas.
-      if (onlyBatchUploadEligible && String(a.type).toLowerCase() === 'main') {
-        let maxAvailable = Math.max(0, activeTotalMB - activeUsedMB);
-        for (const bRef of a.backups || []) {
-          const bAcc = bRef.backupAccount;
-          if (bAcc && String(bAcc.status).toUpperCase() !== 'SUSPENDED') {
-            const bAvail = Math.max(0, (bAcc.storageTotalMB || 0) - (bAcc.storageUsedMB || 0));
-            if (bAvail < maxAvailable) {
-              maxAvailable = bAvail;
-            }
-          }
+    // Peso ya encolado o subiendo en el batch, por cuenta (main y sus backups activos)
+    const committedMbById = new Map();
+    if (onlyBatchUploadEligible) {
+      const queued = await prisma.batchImportItem.groupBy({
+        by: ['targetAccount'],
+        where: { status: { in: ['QUEUED', 'PROCESSING'] }, targetAccount: { not: null } },
+        _sum: { pesoMB: true },
+      });
+      const backupsByMainId = new Map(accounts.map(a => [a.id, (a.backups || []).map(b => b.backupAccount).filter(isActiveBatchBackup)]));
+      for (const row of queued) {
+        const mb = Number(row._sum?.pesoMB || 0);
+        const mainId = Number(row.targetAccount);
+        if (!(mb > 0) || !backupsByMainId.has(mainId)) continue;
+        for (const id of [mainId, ...backupsByMainId.get(mainId).map(b => b.id)]) {
+          committedMbById.set(id, (committedMbById.get(id) || 0) + mb);
         }
-        // Ajustamos el "total" ficticio para que el restante que ve el frontend sea igual al tamaño del botleneck
-        activeTotalMB = activeUsedMB + maxAvailable;
       }
+    }
+
+    const mapped = accounts.map(a => {
+      const activeUsedMB = a.storageUsedMB || 0;
+      const activeTotalMB = a.storageTotalMB || 0;
+
+      // Para batch upload: MB que aún admite la cuenta sin pasar del 95 % real,
+      // limitado por el backup activo con menos espacio y descontando lo ya encolado.
+      const batchFields = onlyBatchUploadEligible && String(a.type).toLowerCase() === 'main'
+        ? {
+            batchLimitMB: batchAccountLimitMb(activeTotalMB),
+            batchUsableFreeMB: batchUsableFreeMb(a, (a.backups || []).map(b => b.backupAccount), id => committedMbById.get(id) || 0),
+          }
+        : {};
 
       return {
         id: a.id,
@@ -121,6 +134,7 @@ export const listAccounts = async (req, res) => {
         createdAt: a.createdAt,
         updatedAt: a.updatedAt,
         ignoreInUploadBatch: a.ignoreInUploadBatch,
+        ...batchFields,
         backups: (a.backups || []).map(b => ({ id: b.backupAccount.id, alias: b.backupAccount.alias, type: b.backupAccount.type, status: b.backupAccount.status, storageTotalMB: b.backupAccount.storageTotalMB })),
         mains: (a.assignedAsBackup || []).map(b => ({ id: b.mainAccount.id, alias: b.mainAccount.alias, type: b.mainAccount.type, status: b.mainAccount.status, storageTotalMB: b.mainAccount.storageTotalMB })),
       };
