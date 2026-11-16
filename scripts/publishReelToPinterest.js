@@ -7,7 +7,7 @@
  */
 import { PrismaClient } from '@prisma/client';
 import pinterestPublisher from '../src/services/pinterestPublisher.service.js';
-import { pinterestTexts, platformLink, toAbsVideoPath } from '../src/services/reels.service.js';
+import { pinterestTexts, pinterestLink, toAbsVideoPath } from '../src/services/reels.service.js';
 
 const prisma = new PrismaClient();
 
@@ -29,7 +29,7 @@ async function main() {
   const result = await pinterestPublisher.publishVideoPin({
     videoAbsPath: toAbsVideoPath(post.videoPath),
     ...texts,
-    link: platformLink(post.link, 'pinterest', post.id) || 'https://stlgratis.com/',
+    link: pinterestLink(post),
     assetId: post.assetId,
   });
 

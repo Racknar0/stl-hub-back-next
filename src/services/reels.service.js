@@ -363,6 +363,16 @@ export function missingFields(post) {
   return missing;
 }
 
+/**
+ * Enlace del pin: la página del modelo sin redirecciones (Pinterest rechaza el pin si el enlace redirige).
+ * El link del reel usa /es/asset/…, que redirige a /asset/…, así que se quita el /es.
+ */
+export function pinterestLink(post) {
+  const link = platformLink(post.link, 'pinterest', post.id);
+  if (!link) return 'https://stlgratis.com/';
+  return link.replace(/^https:\/\/stlgratis\.com\/es\//, 'https://stlgratis.com/');
+}
+
 /** Título y descripción del pin de video: título de YouTube (o el del modelo) y el caption sin cabecera ni pie. */
 export function pinterestTexts(post) {
   const title = String(post.title || post.assetTitle || 'Modelo 3D STL').replace(/#\S+/g, '').replace(/\s+/g, ' ').trim().slice(0, 100);
@@ -528,11 +538,11 @@ async function publishToPlatform(platform, post, { now = false } = {}) {
     return publishThreadsVideo({ videoUrl: publicVideoUrl(post.videoPath), text: threadsText(captionBody(post.caption), short) });
   }
   if (platform === 'pinterest') {
-    // Pin de video: enlace directo al modelo (Pinterest desconfía de las redirecciones, así que sin acortador)
+    // Pin de video: enlace directo al modelo (Pinterest rechaza los enlaces que redirigen, así que sin acortador)
     return pinterestPublisher.publishVideoPin({
       videoAbsPath: toAbsVideoPath(post.videoPath),
       ...pinterestTexts(post),
-      link: link || 'https://stlgratis.com/',
+      link: pinterestLink(post),
       assetId: post.assetId,
     });
   }
