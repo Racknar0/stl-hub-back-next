@@ -194,32 +194,50 @@ export const updateChannel = async (req, res) => {
     }
 };
 
+// Escanea el canal y devuelve el resultado guardado en BD (o el error del chequeo).
+const runQuickScan = async (channelName) => {
+    broadcastToClients({ type: 'scan_start', channelName });
+
+    await telegramCheckerService.syncChannelData(channelName, (prog) => {
+        broadcastToClients(prog);
+    });
+
+    const chan = await prisma.telegramChannel.findUnique({ where: { name: channelName } });
+    const result = !chan
+        ? { success: false, message: 'Channel not found after sync' }
+        : chan.hasError
+            ? { success: false, message: chan.errorMessage || 'Error escaneando el canal' }
+            : {
+                success: true,
+                newFiles: chan.newFiles ?? 0,
+                totalMessages: chan.maxId ?? 0,
+                totalSize: chan.totalSize ?? '0 B',
+                totalSizeBytes: Number(chan.totalSizeBytes ?? 0),
+                maxId: chan.maxId ?? 0
+            };
+
+    broadcastToClients({ type: 'scan_finish', channelName, result });
+    return result;
+};
+
 export const quickScan = async (req, res) => {
     try {
-        const { channelName } = req.query;
+        const { channelName, async: isAsync } = req.query;
         if (!channelName) return res.status(400).json({ success: false, message: 'channelName required' });
 
-        broadcastToClients({ type: 'scan_start', channelName });
-        
-        await telegramCheckerService.syncChannelData(channelName, (prog) => {
-            broadcastToClients(prog);
-        });
-        
-        broadcastToClients({ type: 'scan_finish', channelName });
-
-        const chan = await prisma.telegramChannel.findUnique({ where: { name: channelName } });
-        if (!chan) {
-            return res.status(404).json({ success: false, message: 'Channel not found after sync' });
+        // Canales grandes tardan más que el corte de Cloudflare (100 s): con async=1 se responde
+        // al momento y el resultado llega por el stream SSE en el evento scan_finish.
+        if (isAsync === '1') {
+            runQuickScan(channelName).catch((error) => {
+                console.error(`[Telegram QuickScan] Error en escaneo asíncrono de ${channelName}:`, error.message);
+                broadcastToClients({ type: 'scan_finish', channelName, result: { success: false, message: error.message } });
+            });
+            return res.status(202).json({ success: true, started: true });
         }
 
-        res.json({
-            success: true,
-            newFiles: chan.newFiles ?? 0,
-            totalMessages: chan.maxId ?? 0,
-            totalSize: chan.totalSize ?? '0 B',
-            totalSizeBytes: Number(chan.totalSizeBytes ?? 0),
-            maxId: chan.maxId ?? 0
-        });
+        const result = await runQuickScan(channelName);
+        if (!result.success) return res.status(result.message === 'Channel not found after sync' ? 404 : 500).json(result);
+        res.json(result);
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
