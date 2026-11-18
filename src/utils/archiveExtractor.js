@@ -14,7 +14,7 @@ import fs from 'fs';
 import path from 'path';
 
 // ─── Resolver ruta de 7z según el SO ──────────────────────────────
-const SEVEN_ZIP = (() => {
+export const SEVEN_ZIP = (() => {
   if (process.platform !== 'win32') return '7z';
   const candidates = [
     'C:\\Program Files\\7-Zip\\7z.exe',

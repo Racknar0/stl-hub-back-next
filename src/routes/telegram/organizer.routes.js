@@ -1,6 +1,8 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
+import { spawn } from 'child_process';
+import { SEVEN_ZIP } from '../../utils/archiveExtractor.js';
 
 const router = express.Router();
 
@@ -293,6 +295,178 @@ router.post('/undo', (req, res) => {
         res.json({ success: true, restored });
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+// ─── Vista previa de un asset (contenido del comprimido) ──────────────────────
+// /archive/list lista lo que hay dentro sin extraer nada; /archive/entry saca un solo archivo por stdout
+// (7z e -so, o unrar p si el 7z del VPS no soporta ese RAR) y lo manda tal cual al navegador.
+const COMPRESSED_REGEX = /\.(rar|zip|7z)($|\.\d+$)/i;
+const PREVIEW_MAX_BYTES = 512 * 1024 * 1024;
+const PREVIEW_TIMEOUT_MS = 2 * 60 * 1000;
+const ENTRY_TYPES = {
+    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+    '.webp': 'image/webp', '.bmp': 'image/bmp', '.pdf': 'application/pdf',
+    '.txt': 'text/plain; charset=utf-8', '.md': 'text/plain; charset=utf-8', '.nfo': 'text/plain; charset=utf-8',
+};
+
+// Junta toda la salida de un proceso (para los listados)
+const runCapture = (cmd, args) => new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '', err = '';
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, PREVIEW_TIMEOUT_MS);
+    child.stdout.on('data', d => { out += d.toString(); });
+    child.stderr.on('data', d => { err += d.toString(); });
+    child.on('error', e => { clearTimeout(timer); reject(new Error(`Spawn error: ${e.message}`)); });
+    child.on('close', code => {
+        clearTimeout(timer);
+        code === 0 ? resolve(out) : reject(new Error((err || out).trim().slice(0, 300) || `${cmd} exited ${code}`));
+    });
+});
+
+// Bloques "clave = valor" de `7z l -slt`; el primero (antes de "----------") describe el propio comprimido
+const parse7zListing = (out) => {
+    const body = out.split(/^-{5,}\s*$/m).slice(1).join('\n');
+    const entries = [];
+    for (const block of body.split(/\r?\n\s*\r?\n/)) {
+        const fields = {};
+        for (const line of block.split(/\r?\n/)) {
+            const m = line.match(/^([^=]+?) = (.*)$/);
+            if (m) fields[m[1].trim()] = m[2];
+        }
+        if (!fields.Path) continue;
+        const isDir = fields.Folder === '+' || /^D/.test(fields.Attributes || '');
+        entries.push({ raw: fields.Path, size: Number(fields.Size) || 0, isDir });
+    }
+    return entries;
+};
+
+// Bloques "Clave: valor" de `unrar lt`
+const parseUnrarListing = (out) => {
+    const entries = [];
+    for (const block of out.split(/\r?\n\s*\r?\n/)) {
+        const fields = {};
+        for (const line of block.split(/\r?\n/)) {
+            const m = line.match(/^\s*([A-Za-z ]+): (.*)$/);
+            if (m) fields[m[1].trim()] = m[2];
+        }
+        if (!fields.Name || !fields.Type) continue;
+        entries.push({ raw: fields.Name, size: Number(fields.Size) || 0, isDir: /directory/i.test(fields.Type) });
+    }
+    return entries;
+};
+
+// Pocos listados en memoria: al ir pinchando archivos del mismo comprimido no se vuelve a listar
+const archiveListCache = new Map(); // `${name}|${mtimeMs}` → { entries, tool }
+const ARCHIVE_LIST_CACHE_MAX = 20;
+
+const listArchive = async (name, filePath) => {
+    const stat = await fs.promises.stat(filePath);
+    const key = `${name}|${stat.mtimeMs}`;
+    if (archiveListCache.has(key)) return archiveListCache.get(key);
+
+    let result;
+    try {
+        const out = await runCapture(SEVEN_ZIP, ['l', '-slt', '-p-', filePath]);
+        result = { entries: parse7zListing(out), tool: '7z' };
+    } catch (e7z) {
+        if (!/\.rar($|\.\d+$)/i.test(name)) throw e7z;
+        try {
+            const out = await runCapture('unrar', ['lt', '-p-', filePath]);
+            result = { entries: parseUnrarListing(out), tool: 'unrar' };
+        } catch (eRar) {
+            throw new Error(`7z: ${e7z.message.slice(0, 150)} | unrar: ${eRar.message.slice(0, 150)}`);
+        }
+    }
+    for (const entry of result.entries) entry.path = entry.raw.replace(/\\/g, '/');
+    archiveListCache.set(key, result);
+    if (archiveListCache.size > ARCHIVE_LIST_CACHE_MAX) archiveListCache.delete(archiveListCache.keys().next().value);
+    return result;
+};
+
+// Manda por la respuesta el stdout del proceso. Si falla antes de mandar nada, rechaza (para probar otra herramienta).
+const streamEntry = (cmd, args, req, res, contentType) => new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+    let started = false, err = '';
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, PREVIEW_TIMEOUT_MS);
+    // Si el usuario cambia de archivo o cierra el modal, no seguir extrayendo
+    const onAbort = () => { try { child.kill('SIGKILL'); } catch {} };
+    res.on('close', onAbort);
+    child.stderr.on('data', d => { err += d.toString(); });
+    child.stdout.on('data', chunk => {
+        if (!started) {
+            started = true;
+            res.set('Content-Type', contentType);
+            res.set('Cache-Control', 'private, max-age=3600');
+        }
+        if (!res.write(chunk)) {
+            child.stdout.pause();
+            res.once('drain', () => child.stdout.resume());
+        }
+    });
+    child.on('error', e => { clearTimeout(timer); res.off('close', onAbort); if (!started) reject(new Error(`Spawn error: ${e.message}`)); else res.end(); });
+    child.on('close', code => {
+        clearTimeout(timer);
+        res.off('close', onAbort);
+        if (started) { res.end(); return resolve(); }
+        if (code === 0) { res.set('Content-Type', contentType); res.end(); return resolve(); } // archivo vacío
+        reject(new Error(err.trim().slice(0, 300) || `${cmd} exited ${code}`));
+    });
+});
+
+router.get('/archive/list', async (req, res) => {
+    const { name } = req.query;
+    if (!isSafeName(name)) return res.status(400).json({ error: 'Nombre inválido' });
+    const filePath = path.join(SOURCE_DIR, name);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'El archivo ya no existe' });
+    try {
+        if (!COMPRESSED_REGEX.test(name)) {
+            // .stl / .obj suelto: el "contenido" es el propio archivo
+            const stat = await fs.promises.stat(filePath);
+            return res.json({ entries: [{ path: name, size: stat.size, isDir: false }], direct: true });
+        }
+        const { entries } = await listArchive(name, filePath);
+        res.json({ entries: entries.map(({ path: p, size, isDir }) => ({ path: p, size, isDir })), direct: false });
+    } catch (err) {
+        const msg = String(err.message || err);
+        const encrypted = /wrong password|encrypted|password/i.test(msg);
+        res.status(422).json({ error: encrypted ? 'El archivo tiene contraseña' : `No se pudo leer el comprimido: ${msg}` });
+    }
+});
+
+router.get('/archive/entry', async (req, res) => {
+    const { name, entry } = req.query;
+    if (!isSafeName(name) || typeof entry !== 'string' || !entry) return res.sendStatus(400);
+    const filePath = path.join(SOURCE_DIR, name);
+    if (!fs.existsSync(filePath)) return res.sendStatus(404);
+    const ext = path.extname(entry).toLowerCase();
+    const contentType = ENTRY_TYPES[ext] || 'application/octet-stream';
+
+    if (!COMPRESSED_REGEX.test(name)) {
+        if (entry !== name) return res.sendStatus(404);
+        res.set('Content-Type', contentType);
+        return res.sendFile(filePath);
+    }
+
+    try {
+        const { entries, tool } = await listArchive(name, filePath);
+        // Solo se extraen rutas que salen en el listado (y se usa la ruta tal cual la escribe 7z)
+        const found = entries.find(e => !e.isDir && e.path === entry);
+        if (!found) return res.sendStatus(404);
+        if (found.size > PREVIEW_MAX_BYTES) return res.status(413).json({ error: 'Archivo demasiado grande para la vista previa' });
+        if (found.raw.startsWith('-')) return res.sendStatus(400);
+
+        const viaUnrar = () => streamEntry('unrar', ['p', '-inul', '-p-', filePath, found.raw], req, res, contentType);
+        if (tool === 'unrar') return await viaUnrar();
+        try {
+            // -spd: la ruta es literal (sin comodines * ?)
+            await streamEntry(SEVEN_ZIP, ['e', '-so', '-spd', '-p-', '-y', filePath, found.raw], req, res, contentType);
+        } catch (e7z) {
+            if (!/\.rar($|\.\d+$)/i.test(name)) throw e7z;
+            await viaUnrar();
+        }
+    } catch (err) {
+        if (!res.headersSent) res.status(422).json({ error: `No se pudo extraer: ${String(err.message || err).slice(0, 300)}` });
     }
 });
 
