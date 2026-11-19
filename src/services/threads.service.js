@@ -7,7 +7,7 @@ const prisma = new PrismaClient();
 const GRAPH = 'https://graph.threads.net';
 const API = `${GRAPH}/v1.0`;
 const KEYS = { token: 'THREADS_TOKEN', expiresAt: 'THREADS_TOKEN_EXPIRES', account: 'THREADS_ACCOUNT' };
-const SCOPES = ['threads_basic', 'threads_content_publish'];
+const SCOPES = ['threads_basic', 'threads_content_publish', 'threads_manage_insights']; // insights: vistas y métricas de los posts
 export const THREADS_MAX_TEXT = 500;
 
 export const threadsConfigured = () => !!(process.env.THREADS_APP_ID && process.env.THREADS_APP_SECRET && process.env.THREADS_REDIRECT_URI);
