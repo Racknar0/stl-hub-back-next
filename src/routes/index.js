@@ -28,6 +28,7 @@ import reelsRoutes from './reels/index.js';
 import shortLinksRoutes from './shortLinks/index.js';
 import adminShortLinksRoutes from './shortLinks/admin.js';
 import heroBannersRoutes, { publicHeroBannersRouter } from './heroBanners/index.js';
+import adminLicensesRoutes, { publicLicensesRouter } from './licenses/index.js';
 import { requireAuth, requireAdmin, requireAuthOrQueryToken } from '../middlewares/auth.js';
 import {
   createGiftCode, listGiftCodes, updateGiftCode, deleteGiftCode,
@@ -70,6 +71,9 @@ router.use('/pinterest', pinterestRoutes);
 router.use('/s', shortLinksRoutes);
 router.use('/admin/short-links', adminShortLinksRoutes);
 router.use('/reels', reelsRoutes);
+// Servidor de licencias de programas de escritorio: público para los programas, admin para el dashboard
+router.use('/v1/licenses', publicLicensesRouter);
+router.use('/admin/licenses', adminLicensesRoutes);
 router.use('/', telegramRoutes);
 
 // ─── Gift Codes ────────────────────────────────────────

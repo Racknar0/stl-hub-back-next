@@ -1177,3 +1177,37 @@ model EmailEvent {
   @@index([occurredAt(sort: Desc)])
   @@map("emailevent")
 }
+
+/// Programa de escritorio que usa el servidor de licencias (p. ej. PondWatch Update)
+model LicenseProduct {
+  id        Int             @id @default(autoincrement())
+  code      String          @unique @db.VarChar(64) // product_id que manda el programa (minúsculas, números y guiones)
+  name      String          @db.VarChar(120)        // nombre visible en el dashboard
+  active    Boolean         @default(true)          // inactivo: no se activan ni validan sus seriales
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+  serials   LicenseSerial[]
+
+  @@map("license_product")
+}
+
+/// Serial de un producto. Solo se guarda el hash: el serial en claro se muestra una única vez al crearlo.
+model LicenseSerial {
+  id              Int            @id @default(autoincrement())
+  productId       Int
+  product         LicenseProduct @relation(fields: [productId], references: [id], onDelete: Restrict)
+  serialHash      String         @unique @db.Char(64)     // SHA-256 (hex) del serial normalizado
+  masked          String         @db.VarChar(40)          // versión enmascarada para el dashboard (solo los últimos 4 caracteres)
+  note            String?        @db.VarChar(255)         // cliente, pedido o comentario interno
+  installationId  String?        @db.VarChar(128)         // instalación a la que quedó asociado (null = libre)
+  activatedAt     DateTime?
+  lastValidatedAt DateTime?                               // última activación o validación con conexión
+  resetCount      Int            @default(0)              // veces que se liberó la activación
+  revokedAt       DateTime?                               // revocado: no activa ni valida
+  revokeReason    String?        @db.VarChar(255)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([productId, createdAt])
+  @@map("license_serial")
+}
