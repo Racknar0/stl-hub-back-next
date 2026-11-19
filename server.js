@@ -1,5 +1,6 @@
 // server.js
 import http from 'http';
+import dns from 'dns';
 import app from './app.js';
 import { startBatchWorker } from './src/workers/batchWorker.js';
 import pinterestWorker from './src/services/pinterestWorker.service.js';
@@ -8,6 +9,10 @@ import { startReelsWorker } from './src/services/reels.service.js';
 import { startEmailEngine } from './src/services/emailEngine.service.js';
 import { startReengageCloser } from './src/services/emailReengage.service.js';
 import telegramCheckerService from './src/services/telegramChecker.service.js';
+
+// Preferir IPv4 al conectar con servicios externos: desde la IPv6 del VPS (Contabo) Google rechaza la API de Gemini
+// con "User location is not supported", mientras que por IPv4 funciona.
+dns.setDefaultResultOrder('ipv4first');
 
 const PORT = process.env.PORT || 3001; // usa 3001 si NGINX proxy_pass -> 3001
 
