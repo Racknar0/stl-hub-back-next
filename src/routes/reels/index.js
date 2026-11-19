@@ -202,8 +202,16 @@ router.get('/stats', requireAuth, requireAdmin, async (req, res) => {
 router.get('/metrics', requireAuth, requireAdmin, async (req, res) => {
   try {
     const networks = req.query.networks ? String(req.query.networks).split(',').filter(Boolean) : null;
-    res.json(await socialMetrics.getSocialMetrics({ from: req.query.from, to: req.query.to, networks, fresh: req.query.fresh === '1' }));
+    const fresh = req.query.fresh === '1';
+    res.json(await socialMetrics.getSocialMetrics({ from: req.query.from, to: req.query.to, networks, fresh }));
+    // "Actualizar" también deja una foto para el historial (con la caché recién llenada; máx. una por hora)
+    if (fresh) socialMetrics.takeSnapshot().catch(e => console.error('[SOCIAL-METRICS] Foto:', e.message));
   } catch (error) { res.status(400).json({ error: error.message }); }
+});
+
+// 4c. Evolución de las métricas (fotos periódicas): lo ganado por red entre cada foto
+router.get('/metrics/history', requireAuth, requireAdmin, async (req, res) => {
+  try { res.json(await socialMetrics.getMetricsHistory({ from: req.query.from, to: req.query.to })); } catch (error) { res.status(400).json({ error: error.message }); }
 });
 
 // 5. Ajustes (hora por defecto e idioma)

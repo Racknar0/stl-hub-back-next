@@ -1228,3 +1228,24 @@ model LicenseSerial {
   @@index([productId, createdAt])
   @@map("license_serial")
 }
+
+/// Foto periódica de las métricas de cada publicación en las redes (alimenta los gráficos de evolución del panel Redes)
+model SocialMetricSnapshot {
+  id          Int      @id @default(autoincrement())
+  takenAt     DateTime @default(now())
+  postId      String   @db.VarChar(24) // id del reel, o "h<id>" si es un video largo
+  network     String   @db.VarChar(16)
+  account     String   @db.VarChar(120)
+  publishedAt DateTime
+  views       Int?
+  reach       Int?
+  likes       Int?
+  comments    Int?
+  shares      Int?
+  saves       Int?
+  clicks      Int?
+
+  @@index([takenAt])
+  @@index([postId, network, account, takenAt])
+  @@map("socialmetricsnapshot")
+}

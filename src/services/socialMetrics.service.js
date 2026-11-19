@@ -180,4 +180,105 @@ export async function getSocialMetrics({ from, to, networks = null, fresh = fals
   return { from: start.toISOString(), to: end.toISOString(), rows, pinterest, generatedAt: new Date().toISOString(), dataAt: new Date(ages.length ? Math.min(...ages) : Date.now()).toISOString() };
 }
 
-export default { getSocialMetrics };
+// ---------- Historial: fotos periódicas de las métricas ----------
+const SNAPSHOT_EVERY_MS = 6 * 3600 * 1000; // foto automática cada 6 h
+const SNAPSHOT_MIN_GAP_MS = 3600 * 1000;   // nunca dos fotos con menos de 1 h de diferencia
+const SNAPSHOT_WINDOW_DAYS = 28;
+const METRIC_KEYS = ['views', 'reach', 'likes', 'comments', 'shares', 'saves', 'clicks'];
+let snapshotRunning = false;
+
+/**
+ * Guarda una foto de las métricas de los últimos 28 días. Sin `force` respeta el hueco mínimo de 1 h con la foto anterior.
+ * `fresh` consulta las redes en vivo; si no, aprovecha lo que ya está en la caché de 30 min.
+ */
+export async function takeSnapshot({ fresh = false, force = false } = {}) {
+  if (snapshotRunning) return { skipped: 'en curso' };
+  snapshotRunning = true;
+  try {
+    if (!force) {
+      const last = await prisma.socialMetricSnapshot.findFirst({ orderBy: { takenAt: 'desc' }, select: { takenAt: true } });
+      if (last && Date.now() - last.takenAt.getTime() < SNAPSHOT_MIN_GAP_MS) return { skipped: 'reciente' };
+    }
+    const to = new Date();
+    const from = new Date(to.getTime() - SNAPSHOT_WINDOW_DAYS * 86400000);
+    const { rows } = await getSocialMetrics({ from: from.toISOString(), to: to.toISOString(), fresh });
+    const takenAt = new Date();
+    const data = rows.filter(r => !r.error).map(r => ({
+      takenAt, postId: String(r.postId).slice(0, 24), network: r.network, account: String(r.account || '').slice(0, 120), publishedAt: new Date(r.publishedAt),
+      ...Object.fromEntries(METRIC_KEYS.map(k => [k, r[k] == null ? null : Math.round(r[k])])),
+    }));
+    if (data.length) await prisma.socialMetricSnapshot.createMany({ data });
+    return { saved: data.length };
+  } finally {
+    snapshotRunning = false;
+  }
+}
+
+/** Arranca la tarea interna: cada 10 min mira si ya pasaron 6 h desde la última foto (así un reinicio del servidor no hace perder puntos). */
+let snapshotTimer = null;
+export function startSnapshotScheduler() {
+  if (snapshotTimer) return;
+  const tick = async () => {
+    try {
+      const last = await prisma.socialMetricSnapshot.findFirst({ orderBy: { takenAt: 'desc' }, select: { takenAt: true } });
+      if (!last || Date.now() - last.takenAt.getTime() >= SNAPSHOT_EVERY_MS) await takeSnapshot({ fresh: true });
+    } catch (e) { console.error('[SOCIAL-METRICS] Foto:', e.message); }
+  };
+  setTimeout(tick, 60000); // un minuto tras arrancar, para no competir con el resto del arranque
+  snapshotTimer = setInterval(tick, 10 * 60000);
+}
+
+/**
+ * Evolución entre `from` y `to`: por cada foto, lo ganado desde la foto anterior (por red y métrica), más los totales del periodo
+ * anterior de igual duración para comparar. Una publicación nueva aporta todo lo que lleva; la primera foto de todas no genera punto.
+ */
+export async function getMetricsHistory({ from, to }) {
+  const start = new Date(from);
+  const end = new Date(to);
+  if (Number.isNaN(+start) || Number.isNaN(+end) || end < start) throw new Error('Rango de fechas no válido');
+  const span = end.getTime() - start.getTime();
+  const prevStart = new Date(start.getTime() - span - 1);
+  // Una foto antes de la ventana sirve de base para el primer delta
+  const base = await prisma.socialMetricSnapshot.findFirst({ where: { takenAt: { lt: prevStart } }, orderBy: { takenAt: 'desc' }, select: { takenAt: true } });
+  const snaps = await prisma.socialMetricSnapshot.findMany({
+    where: { takenAt: { gte: base?.takenAt || prevStart, lte: end } },
+    orderBy: { takenAt: 'asc' },
+  });
+  const groups = new Map(); // takenAt(ms) -> filas
+  for (const s of snaps) {
+    const t = s.takenAt.getTime();
+    if (!groups.has(t)) groups.set(t, []);
+    groups.get(t).push(s);
+  }
+  const keyOf = (s) => `${s.postId}|${s.network}|${s.account}`;
+  const points = [];
+  let prev = null; // Map clave -> fila de la foto anterior
+  for (const [t, list] of groups) {
+    const cur = new Map(list.map(s => [keyOf(s), s]));
+    if (prev) {
+      const byNetwork = {};
+      for (const s of list) {
+        const p = prev.get(keyOf(s));
+        const acc = (byNetwork[s.network] ||= Object.fromEntries(METRIC_KEYS.map(k => [k, 0])));
+        for (const k of METRIC_KEYS) acc[k] += Math.max(0, (s[k] || 0) - (p?.[k] || 0));
+      }
+      points.push({ t, byNetwork });
+    }
+    prev = cur;
+  }
+  const inRange = points.filter(p => p.t >= start.getTime());
+  const previous = points.filter(p => p.t >= prevStart.getTime() && p.t < start.getTime());
+  const totalOf = (pts) => {
+    const out = Object.fromEntries(METRIC_KEYS.map(k => [k, 0]));
+    for (const p of pts) for (const n of Object.values(p.byNetwork)) for (const k of METRIC_KEYS) out[k] += n[k];
+    return out;
+  };
+  return {
+    from: start.toISOString(), to: end.toISOString(),
+    points: inRange.map(p => ({ t: new Date(p.t).toISOString(), byNetwork: p.byNetwork })),
+    previousTotals: previous.length ? totalOf(previous) : null,
+    snapshots: groups.size,
+  };
+}
+
+export default { getSocialMetrics, takeSnapshot, getMetricsHistory, startSnapshotScheduler };
