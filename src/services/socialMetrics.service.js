@@ -58,8 +58,23 @@ export async function getSocialMetrics({ from, to, networks = null, fresh = fals
   const posts = await prisma.reelPost.findMany({
     where: { status: 'PUBLISHED', simulated: false, publishedAt: { gte: new Date(start.getTime() - 3 * 86400000), lte: new Date(end.getTime() + 86400000) } },
     orderBy: { publishedAt: 'desc' },
-    select: { id: true, title: true, assetTitle: true, publishedAt: true, results: true },
+    select: { id: true, title: true, assetTitle: true, publishedAt: true, results: true, caption: true, facebookCaption: true, youtubeVariants: true, facebookVariants: true, instagramVariants: true, pinterestTitle: true },
   });
+
+  // Título que se ve en la tabla: el real de cada cuenta (YouTube) o la primera frase de su texto (el resto de redes)
+  const bodyLine = (text) => {
+    const line = String(text || '').split('\n').map(l => l.trim()).find(l => l && !/^(🌐|📦)/.test(l) && !/^#/.test(l));
+    return line ? (line.length > 110 ? `${line.slice(0, 107)}…` : line) : null;
+  };
+  const displayTitle = (post, network, account) => {
+    const fallback = post.title || post.assetTitle || `Reel ${post.id}`;
+    const primary = (p) => !account || account === p;
+    if (network === 'youtube') return (account && post.youtubeVariants?.[account]?.title) || fallback;
+    if (network === 'facebook') return bodyLine(account && post.facebookVariants?.[account]?.caption) || bodyLine(post.facebookCaption || post.caption) || fallback;
+    if (network === 'instagram') return bodyLine(account && post.instagramVariants?.[account]?.caption) || bodyLine(post.caption) || fallback;
+    if (network === 'pinterest') return post.pinterestTitle || fallback;
+    return primary(null) ? bodyLine(post.caption) || fallback : fallback;
+  };
 
   const [pages, igAccounts, ytChannels, threadsStatus] = await Promise.all([
     listFacebookPages().catch(() => []),
@@ -87,7 +102,7 @@ export async function getSocialMetrics({ from, to, networks = null, fresh = fals
           : network === 'youtube' ? ytName[accountId] || ''
             : network === 'threads' ? (threadsStatus.account?.username ? `@${threadsStatus.account.username}` : '')
               : '';
-      entries.push({ postId: post.id, title: post.title || post.assetTitle || `Reel ${post.id}`, network, key, id: r.id, url: r.url || null, publishedAt: when.toISOString(), accountId, account: label || NETWORK_LABEL[network], pageId: network === 'facebook' ? accountId : r.pageId, when });
+      entries.push({ postId: post.id, title: displayTitle(post, network, account), network, key, id: r.id, url: r.url || null, publishedAt: when.toISOString(), accountId, account: label || NETWORK_LABEL[network], pageId: network === 'facebook' ? accountId : r.pageId, when });
     }
   }
 
