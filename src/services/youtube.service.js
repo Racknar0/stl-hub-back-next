@@ -245,4 +245,20 @@ export async function uploadHorizontalVideo({ channelId, videoAbsPath, title, de
   };
 }
 
-export default { youtubeConfigured, getAuthUrl, handleCallback, connectionStatus, listChannels, disconnect, uploadShort, uploadHorizontalVideo };
+/** Vistas, me gusta y comentarios de varios videos de un canal (hasta 50 ids): { [videoId]: { views, likes, comments } }. */
+export async function videoStats(channelId, ids) {
+  const accounts = await loadAccounts();
+  const account = accounts.find(a => a.id === channelId);
+  if (!account || !ids.length) return {};
+  const token = await accessToken(account);
+  const res = await fetch(`https://www.googleapis.com/youtube/v3/videos?part=statistics&maxResults=50&id=${ids.slice(0, 50).join(',')}`, { headers: { Authorization: `Bearer ${token}` } });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`YouTube: ${data.error?.message || `HTTP ${res.status}`}`);
+  return Object.fromEntries((data.items || []).map(v => [v.id, {
+    views: Number(v.statistics?.viewCount ?? 0),
+    likes: Number(v.statistics?.likeCount ?? 0),
+    comments: Number(v.statistics?.commentCount ?? 0),
+  }]));
+}
+
+export default { youtubeConfigured, getAuthUrl, handleCallback, connectionStatus, listChannels, disconnect, uploadShort, uploadHorizontalVideo, videoStats };

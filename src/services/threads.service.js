@@ -141,4 +141,12 @@ export async function publishVideo({ videoUrl, text }) {
   throw new Error('Threads sigue procesando el video tras 10 minutos: revisa tu perfil de Threads antes de reintentar');
 }
 
-export default { threadsConfigured, getAuthUrl, handleCallback, connectionStatus, disconnect, publishVideo, threadsText };
+/** Métricas de un post de Threads (necesita el permiso threads_manage_insights: hay que reconectar la cuenta). */
+export async function postInsights(postId) {
+  const token = await accessToken();
+  const data = await request(`${API}/${postId}/insights?${new URLSearchParams({ metric: 'views,likes,replies,reposts,quotes,shares', access_token: token })}`);
+  const m = Object.fromEntries((data.data || []).map(x => [x.name, x.values?.[0]?.value ?? x.total_value?.value]));
+  return { views: m.views ?? null, likes: m.likes ?? null, comments: m.replies ?? null, shares: (m.reposts ?? 0) + (m.quotes ?? 0) + (m.shares ?? 0) };
+}
+
+export default { threadsConfigured, getAuthUrl, handleCallback, connectionStatus, disconnect, publishVideo, threadsText, postInsights };

@@ -9,6 +9,7 @@ import youtube from '../../services/youtube.service.js';
 import tiktok, { PRIVACY_LEVELS } from '../../services/tiktok.service.js';
 import threads from '../../services/threads.service.js';
 import pinterestService from '../../services/pinterest.service.js';
+import socialMetrics from '../../services/socialMetrics.service.js';
 import { listFacebookPages, listInstagramAccounts } from '../../services/metaReels.service.js';
 import horizontalRoutes from './horizontal.js';
 
@@ -195,6 +196,14 @@ router.get('/stats', requireAuth, requireAdmin, async (req, res) => {
     for (let d = new Date(); days.has(dayKey(d)); d.setDate(d.getDate() + 1)) coveredDays++;
     res.json({ published, scheduled, pendingReview, tray, failed, noMetadata, coveredDays });
   } catch (error) { sendError(res, error); }
+});
+
+// 4b. Métricas por publicación en todas las redes (?from=ISO&to=ISO&networks=facebook,instagram)
+router.get('/metrics', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const networks = req.query.networks ? String(req.query.networks).split(',').filter(Boolean) : null;
+    res.json(await socialMetrics.getSocialMetrics({ from: req.query.from, to: req.query.to, networks }));
+  } catch (error) { res.status(400).json({ error: error.message }); }
 });
 
 // 5. Ajustes (hora por defecto e idioma)

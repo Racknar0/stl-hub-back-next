@@ -191,6 +191,26 @@ class PinterestService {
       };
     }
   }
+  // Métricas de la cuenta entera en un rango de días (YYYY-MM-DD): impresiones, clics, guardados
+  async getAccountAnalytics(startDate, endDate) {
+    const token = await this.getValidAccessToken();
+    const qs = new URLSearchParams({ start_date: startDate, end_date: endDate, metric_types: 'IMPRESSION,PIN_CLICK,SAVE,OUTBOUND_CLICK' });
+    const response = await fetch(`${this.baseUrl}/user_account/analytics?${qs}`, { headers: { 'Authorization': `Bearer ${token}` } });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(`Pinterest analytics: ${data.message || `HTTP ${response.status}`}`);
+    return data.all?.summary_metrics || {};
+  }
+
+  // Métricas de un pin (de su publicación a hoy)
+  async getPinAnalytics(pinId, startDate, endDate) {
+    const token = await this.getValidAccessToken();
+    const qs = new URLSearchParams({ start_date: startDate, end_date: endDate, metric_types: 'IMPRESSION,PIN_CLICK,SAVE,OUTBOUND_CLICK,VIDEO_MRC_VIEW,VIDEO_AVG_WATCH_TIME' });
+    const response = await fetch(`${this.baseUrl}/pins/${pinId}/analytics?${qs}`, { headers: { 'Authorization': `Bearer ${token}` } });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(`Pinterest analytics: ${data.message || `HTTP ${response.status}`}`);
+    return data.all?.summary_metrics || {};
+  }
+
   // Listar tableros de la cuenta de Pinterest
   async listBoards() {
     const token = await this.getValidAccessToken();

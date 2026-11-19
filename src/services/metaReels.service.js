@@ -227,4 +227,42 @@ export async function commentOnPublishedReel({ pageId, videoId, message }) {
   return { published: true, commentId: id };
 }
 
-export default { metaConfigured, listFacebookPages, listInstagramAccounts, publishInstagramReel, publishFacebookReel, publishFacebookVideo, commentOnPublishedReel };
+// --- Métricas (necesitan los permisos read_insights e instagram_manage_insights en el token) ---
+
+const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+
+/** Métricas de un Reel de Facebook: reproducciones, tiempo visto, reacciones, comentarios y compartidos. */
+export async function facebookReelMetrics({ pageId, videoId }) {
+  const token = await pageToken(pageId);
+  const [fields, insights] = await Promise.all([
+    graph('GET', videoId, { fields: 'likes.summary(true).limit(0),comments.summary(true).limit(0)' }, token),
+    graph('GET', `${videoId}/video_insights`, { metric: 'fb_reels_total_plays,post_video_view_time,post_video_avg_time_watched,post_video_social_actions' }, token).catch(() => ({ data: [] })),
+  ]);
+  const m = Object.fromEntries((insights.data || []).map(x => [x.name, x.values?.[0]?.value]));
+  return {
+    views: num(m.fb_reels_total_plays),
+    likes: num(fields.likes?.summary?.total_count),
+    comments: num(fields.comments?.summary?.total_count),
+    shares: num(m.post_video_social_actions?.SHARE ?? 0),
+    avgWatchSec: m.post_video_avg_time_watched != null ? Math.round(m.post_video_avg_time_watched / 100) / 10 : null,
+    totalWatchSec: m.post_video_view_time != null ? Math.round(m.post_video_view_time / 1000) : null,
+  };
+}
+
+/** Métricas de un Reel de Instagram: reproducciones, alcance, me gusta, comentarios, compartidos, guardados y tiempo visto. */
+export async function instagramMediaMetrics({ mediaId }) {
+  const data = await graph('GET', `${mediaId}/insights`, { metric: 'views,reach,likes,comments,shares,saved,ig_reels_avg_watch_time,ig_reels_video_view_total_time' });
+  const m = Object.fromEntries((data.data || []).map(x => [x.name, x.values?.[0]?.value]));
+  return {
+    views: num(m.views),
+    reach: num(m.reach),
+    likes: num(m.likes),
+    comments: num(m.comments),
+    shares: num(m.shares),
+    saves: num(m.saved),
+    avgWatchSec: m.ig_reels_avg_watch_time != null ? Math.round(m.ig_reels_avg_watch_time / 100) / 10 : null,
+    totalWatchSec: m.ig_reels_video_view_total_time != null ? Math.round(m.ig_reels_video_view_total_time / 1000) : null,
+  };
+}
+
+export default { metaConfigured, listFacebookPages, listInstagramAccounts, publishInstagramReel, publishFacebookReel, publishFacebookVideo, commentOnPublishedReel, facebookReelMetrics, instagramMediaMetrics };
