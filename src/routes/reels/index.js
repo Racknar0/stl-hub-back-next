@@ -202,7 +202,7 @@ router.get('/stats', requireAuth, requireAdmin, async (req, res) => {
 router.get('/metrics', requireAuth, requireAdmin, async (req, res) => {
   try {
     const networks = req.query.networks ? String(req.query.networks).split(',').filter(Boolean) : null;
-    res.json(await socialMetrics.getSocialMetrics({ from: req.query.from, to: req.query.to, networks }));
+    res.json(await socialMetrics.getSocialMetrics({ from: req.query.from, to: req.query.to, networks, fresh: req.query.fresh === '1' }));
   } catch (error) { res.status(400).json({ error: error.message }); }
 });
 

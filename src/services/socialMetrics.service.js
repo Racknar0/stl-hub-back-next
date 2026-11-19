@@ -13,9 +13,9 @@ const cache = new Map(); // clave -> { at, value }
 
 const NETWORK_LABEL = { facebook: 'Facebook', instagram: 'Instagram', youtube: 'YouTube', pinterest: 'Pinterest', threads: 'Threads' };
 
-async function cached(key, loader) {
+async function cached(key, loader, fresh = false) {
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < CACHE_MS) return hit.value;
+  if (!fresh && hit && Date.now() - hit.at < CACHE_MS) return hit.value;
   const value = await loader();
   cache.set(key, { at: Date.now(), value });
   return value;
@@ -39,9 +39,9 @@ const EMPTY = { views: null, reach: null, likes: null, comments: null, shares: n
 
 /**
  * Filas de métricas de los reels publicados entre `from` y `to` (fechas ISO), más la fila resumen de Pinterest.
- * `networks` (opcional) limita a algunas redes.
+ * `networks` (opcional) limita a algunas redes. Con `fresh` se ignora lo guardado y se consulta cada red en vivo.
  */
-export async function getSocialMetrics({ from, to, networks = null }) {
+export async function getSocialMetrics({ from, to, networks = null, fresh = false }) {
   const start = new Date(from);
   const end = new Date(to);
   if (Number.isNaN(+start) || Number.isNaN(+end) || end < start) throw new Error('Rango de fechas no válido');
@@ -90,7 +90,7 @@ export async function getSocialMetrics({ from, to, networks = null }) {
   const ytStats = {};
   await Promise.all(Object.entries(ytByChannel).map(async ([channelId, ids]) => {
     try {
-      Object.assign(ytStats, await cached(`yt:${channelId}:${ids.sort().join(',')}`, () => youtube.videoStats(channelId, ids)));
+      Object.assign(ytStats, await cached(`yt:${channelId}:${ids.sort().join(',')}`, () => youtube.videoStats(channelId, ids), fresh));
     } catch (e) { ids.forEach(id => { ytStats[id] = { error: e.message }; }); }
   }));
 
@@ -100,12 +100,12 @@ export async function getSocialMetrics({ from, to, networks = null }) {
     const base = { postId: e.postId, title: e.title, network: e.network, account: e.account, publishedAt: e.publishedAt, url: e.url, ...EMPTY };
     try {
       let m = {};
-      if (e.network === 'facebook') m = await cached(`fb:${e.id}`, () => facebookReelMetrics({ pageId: e.pageId || e.accountId, videoId: e.id }));
-      else if (e.network === 'instagram') m = await cached(`ig:${e.id}`, () => instagramMediaMetrics({ mediaId: e.id }));
+      if (e.network === 'facebook') m = await cached(`fb:${e.id}`, () => facebookReelMetrics({ pageId: e.pageId || e.accountId, videoId: e.id }), fresh);
+      else if (e.network === 'instagram') m = await cached(`ig:${e.id}`, () => instagramMediaMetrics({ mediaId: e.id }), fresh);
       else if (e.network === 'youtube') { m = ytStats[e.id] || {}; if (m.error) throw new Error(m.error); }
-      else if (e.network === 'threads') m = await cached(`th:${e.id}`, () => threads.postInsights(e.id));
+      else if (e.network === 'threads') m = await cached(`th:${e.id}`, () => threads.postInsights(e.id), fresh);
       else if (e.network === 'pinterest') {
-        const p = await cached(`pin:${e.id}:${todayStr}`, () => pinterestService.getPinAnalytics(e.id, ymd(e.when), todayStr));
+        const p = await cached(`pin:${e.id}:${todayStr}`, () => pinterestService.getPinAnalytics(e.id, ymd(e.when), todayStr), fresh);
         m = { views: p.VIDEO_MRC_VIEW ?? p.IMPRESSION ?? 0, saves: p.SAVE ?? 0, clicks: (p.OUTBOUND_CLICK ?? 0) + (p.PIN_CLICK ?? 0), avgWatchSec: p.VIDEO_AVG_WATCH_TIME ? Math.round(p.VIDEO_AVG_WATCH_TIME / 100) / 10 : null };
         m.reach = p.IMPRESSION ?? null; // impresiones = alcance aproximado en Pinterest
       }
@@ -122,7 +122,7 @@ export async function getSocialMetrics({ from, to, networks = null }) {
       const startDay = ymd(start);
       const endDay = ymd(end > new Date() ? new Date() : end);
       const [acct, pins] = await Promise.all([
-        cached(`pinacct:${startDay}:${endDay}`, () => pinterestService.getAccountAnalytics(startDay, endDay)),
+        cached(`pinacct:${startDay}:${endDay}`, () => pinterestService.getAccountAnalytics(startDay, endDay), fresh),
         prisma.pinterestPinQueue.count({ where: { status: 'PUBLISHED', scheduledAt: { gte: start, lte: end } } }),
       ]);
       pinterest = { network: 'pinterest', account: 'Pinterest · todos los pines', pins, views: acct.IMPRESSION ?? 0, clicks: (acct.OUTBOUND_CLICK ?? 0) + (acct.PIN_CLICK ?? 0), saves: acct.SAVE ?? 0 };
