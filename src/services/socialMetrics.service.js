@@ -74,13 +74,37 @@ export async function getSocialMetrics({ from, to, networks = null, fresh = fals
       if (!NETWORK_LABEL[network] || !want(network)) continue;
       const when = new Date(r.publishedAt || r.publishAt || post.publishedAt);
       if (when < start || when > end) continue;
-      let accountId = account || (network === 'facebook' ? r.pageId : network === 'instagram' ? r.igUserId : network === 'youtube' ? primaryYt : null);
-      const label = network === 'facebook' ? pageName[accountId] || r.pageId
+      let accountId = account || (network === 'facebook' ? r.pageId || process.env.META_PAGE_ID : network === 'instagram' ? r.igUserId || process.env.META_IG_USER_ID : network === 'youtube' ? primaryYt : null);
+      const label = network === 'facebook' ? pageName[accountId] || accountId
         : network === 'instagram' ? igName[accountId] || (r.username ? `@${r.username}` : '')
           : network === 'youtube' ? ytName[accountId] || ''
             : network === 'threads' ? (threadsStatus.account?.username ? `@${threadsStatus.account.username}` : '')
               : '';
-      entries.push({ postId: post.id, title: post.title || post.assetTitle || `Reel ${post.id}`, network, key, id: r.id, url: r.url || null, publishedAt: when.toISOString(), accountId, account: label || NETWORK_LABEL[network], pageId: r.pageId, when });
+      entries.push({ postId: post.id, title: post.title || post.assetTitle || `Reel ${post.id}`, network, key, id: r.id, url: r.url || null, publishedAt: when.toISOString(), accountId, account: label || NETWORK_LABEL[network], pageId: network === 'facebook' ? accountId : r.pageId, when });
+    }
+  }
+
+  // 1b. Videos largos (recopilaciones horizontales): van a YouTube y a una Página de Facebook
+  const compilations = await prisma.horizontalCompilation.findMany({
+    where: { status: 'PUBLISHED', publishedAt: { gte: new Date(start.getTime() - 3 * 86400000), lte: new Date(end.getTime() + 86400000) } },
+    orderBy: { publishedAt: 'desc' },
+    select: { id: true, title: true, channelId: true, channelName: true, youtubeVideoId: true, youtubeUrl: true, fbSynced: true, fbPostId: true, publishedAt: true, tags: true },
+  });
+  for (const c of compilations) {
+    const title = c.title;
+    if (want('youtube') && c.youtubeVideoId) {
+      const when = new Date(c.publishedAt);
+      if (when >= start && when <= end) {
+        entries.push({ postId: `h${c.id}`, long: true, title, network: 'youtube', key: 'youtube', id: c.youtubeVideoId, url: c.youtubeUrl || `https://youtube.com/watch?v=${c.youtubeVideoId}`, publishedAt: when.toISOString(), accountId: c.channelId, account: ytName[c.channelId] || c.channelName || 'YouTube', when });
+      }
+    }
+    const fb = c.tags?.facebook;
+    if (want('facebook') && c.fbSynced && c.fbPostId) {
+      const when = new Date(fb?.publishedAt || c.publishedAt);
+      if (when >= start && when <= end) {
+        const pageId = fb?.pageId || process.env.META_PAGE_ID;
+        entries.push({ postId: `h${c.id}`, long: true, title, network: 'facebook', key: 'facebook', id: c.fbPostId, url: fb?.url || null, publishedAt: when.toISOString(), accountId: pageId, account: pageName[pageId] || fb?.pageName || 'Facebook', pageId, when });
+      }
     }
   }
 
@@ -97,7 +121,7 @@ export async function getSocialMetrics({ from, to, networks = null, fresh = fals
   // 3. Resto de redes: una llamada por publicación
   const todayStr = ymd(new Date());
   const rows = await pool(entries, 6, async (e) => {
-    const base = { postId: e.postId, title: e.title, network: e.network, account: e.account, publishedAt: e.publishedAt, url: e.url, ...EMPTY };
+    const base = { postId: e.postId, title: e.title, network: e.network, account: e.account, publishedAt: e.publishedAt, url: e.url, long: !!e.long, ...EMPTY };
     try {
       let m = {};
       if (e.network === 'facebook') m = await cached(`fb:${e.id}`, () => facebookReelMetrics({ pageId: e.pageId || e.accountId, videoId: e.id }), fresh);

@@ -233,6 +233,7 @@ const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
 
 /** Métricas de un Reel de Facebook: reproducciones, tiempo visto, reacciones, comentarios y compartidos. */
 export async function facebookReelMetrics({ pageId, videoId }) {
+  if (!pageId) throw new Error('No se sabe en qué Página de Facebook se publicó');
   const token = await pageToken(pageId);
   const [fields, insights] = await Promise.all([
     graph('GET', videoId, { fields: 'likes.summary(true).limit(0),comments.summary(true).limit(0)' }, token),
