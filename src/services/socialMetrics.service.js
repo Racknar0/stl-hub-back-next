@@ -8,16 +8,22 @@ import pinterestService from './pinterest.service.js';
 import { listFacebookPages, listInstagramAccounts, facebookReelMetrics, instagramMediaMetrics } from './metaReels.service.js';
 
 const prisma = new PrismaClient();
-const CACHE_MS = 10 * 60 * 1000;
+// Las cifras se guardan 30 min: el panel no consulta las redes en cada visita, solo con el botón Actualizar (fresh)
+const CACHE_MS = 30 * 60 * 1000;
 const cache = new Map(); // clave -> { at, value }
 
 const NETWORK_LABEL = { facebook: 'Facebook', instagram: 'Instagram', youtube: 'YouTube', pinterest: 'Pinterest', threads: 'Threads' };
 
-async function cached(key, loader, fresh = false) {
+// `ages` recoge la hora de cada dato usado, para decirle al panel qué tan viejo es el más antiguo
+async function cached(key, loader, fresh = false, ages = null) {
   const hit = cache.get(key);
-  if (!fresh && hit && Date.now() - hit.at < CACHE_MS) return hit.value;
+  if (!fresh && hit && Date.now() - hit.at < CACHE_MS) {
+    ages?.push(hit.at);
+    return hit.value;
+  }
   const value = await loader();
   cache.set(key, { at: Date.now(), value });
+  ages?.push(Date.now());
   return value;
 }
 
@@ -46,6 +52,7 @@ export async function getSocialMetrics({ from, to, networks = null, fresh = fals
   const end = new Date(to);
   if (Number.isNaN(+start) || Number.isNaN(+end) || end < start) throw new Error('Rango de fechas no válido');
   const want = (n) => !networks || networks.includes(n);
+  const ages = [];
 
   // Las cuentas extra publican horas después: se amplía la búsqueda y luego se filtra por la hora real de cada red
   const posts = await prisma.reelPost.findMany({
@@ -114,7 +121,7 @@ export async function getSocialMetrics({ from, to, networks = null, fresh = fals
   const ytStats = {};
   await Promise.all(Object.entries(ytByChannel).map(async ([channelId, ids]) => {
     try {
-      Object.assign(ytStats, await cached(`yt:${channelId}:${ids.sort().join(',')}`, () => youtube.videoStats(channelId, ids), fresh));
+      Object.assign(ytStats, await cached(`yt:${channelId}:${ids.sort().join(',')}`, () => youtube.videoStats(channelId, ids), fresh, ages));
     } catch (e) { ids.forEach(id => { ytStats[id] = { error: e.message }; }); }
   }));
 
@@ -124,12 +131,12 @@ export async function getSocialMetrics({ from, to, networks = null, fresh = fals
     const base = { postId: e.postId, title: e.title, network: e.network, account: e.account, publishedAt: e.publishedAt, url: e.url, long: !!e.long, ...EMPTY };
     try {
       let m = {};
-      if (e.network === 'facebook') m = await cached(`fb:${e.id}`, () => facebookReelMetrics({ pageId: e.pageId || e.accountId, videoId: e.id }), fresh);
-      else if (e.network === 'instagram') m = await cached(`ig:${e.id}`, () => instagramMediaMetrics({ mediaId: e.id }), fresh);
+      if (e.network === 'facebook') m = await cached(`fb:${e.id}`, () => facebookReelMetrics({ pageId: e.pageId || e.accountId, videoId: e.id }), fresh, ages);
+      else if (e.network === 'instagram') m = await cached(`ig:${e.id}`, () => instagramMediaMetrics({ mediaId: e.id }), fresh, ages);
       else if (e.network === 'youtube') { m = ytStats[e.id] || {}; if (m.error) throw new Error(m.error); }
-      else if (e.network === 'threads') m = await cached(`th:${e.id}`, () => threads.postInsights(e.id), fresh);
+      else if (e.network === 'threads') m = await cached(`th:${e.id}`, () => threads.postInsights(e.id), fresh, ages);
       else if (e.network === 'pinterest') {
-        const p = await cached(`pin:${e.id}:${todayStr}`, () => pinterestService.getPinAnalytics(e.id, ymd(e.when), todayStr), fresh);
+        const p = await cached(`pin:${e.id}:${todayStr}`, () => pinterestService.getPinAnalytics(e.id, ymd(e.when), todayStr), fresh, ages);
         m = { views: p.VIDEO_MRC_VIEW ?? p.IMPRESSION ?? 0, saves: p.SAVE ?? 0, clicks: (p.OUTBOUND_CLICK ?? 0) + (p.PIN_CLICK ?? 0), avgWatchSec: p.VIDEO_AVG_WATCH_TIME ? Math.round(p.VIDEO_AVG_WATCH_TIME / 100) / 10 : null };
         m.reach = p.IMPRESSION ?? null; // impresiones = alcance aproximado en Pinterest
       }
@@ -146,7 +153,7 @@ export async function getSocialMetrics({ from, to, networks = null, fresh = fals
       const startDay = ymd(start);
       const endDay = ymd(end > new Date() ? new Date() : end);
       const [acct, pins] = await Promise.all([
-        cached(`pinacct:${startDay}:${endDay}`, () => pinterestService.getAccountAnalytics(startDay, endDay), fresh),
+        cached(`pinacct:${startDay}:${endDay}`, () => pinterestService.getAccountAnalytics(startDay, endDay), fresh, ages),
         prisma.pinterestPinQueue.count({ where: { status: 'PUBLISHED', scheduledAt: { gte: start, lte: end } } }),
       ]);
       pinterest = { network: 'pinterest', account: 'Pinterest · todos los pines', pins, views: acct.IMPRESSION ?? 0, clicks: (acct.OUTBOUND_CLICK ?? 0) + (acct.PIN_CLICK ?? 0), saves: acct.SAVE ?? 0 };
@@ -155,7 +162,7 @@ export async function getSocialMetrics({ from, to, networks = null, fresh = fals
     }
   }
 
-  return { from: start.toISOString(), to: end.toISOString(), rows, pinterest, generatedAt: new Date().toISOString() };
+  return { from: start.toISOString(), to: end.toISOString(), rows, pinterest, generatedAt: new Date().toISOString(), dataAt: new Date(ages.length ? Math.min(...ages) : Date.now()).toISOString() };
 }
 
 export default { getSocialMetrics };
