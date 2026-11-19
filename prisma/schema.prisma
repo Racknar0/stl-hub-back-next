@@ -1023,6 +1023,23 @@ model TelegramChannel {
   @@map("telegramchannel")
 }
 
+// Descarga de Telegram en curso o interrumpida: permite retomarla sola al reiniciar el backend
+model TelegramDownloadJob {
+  id          Int       @id @default(autoincrement())
+  channelName String    @db.VarChar(255)
+  startId     Int
+  endId       Int
+  status      String    @default("RUNNING") @db.VarChar(20) // RUNNING | COMPLETED | CANCELLED | FAILED
+  resumeCount Int       @default(0) // veces que se retomó tras un reinicio (tope para no entrar en bucle)
+  lastError   String?   @db.Text
+  startedAt   DateTime  @default(now())
+  finishedAt  DateTime?
+  updatedAt   DateTime  @updatedAt
+
+  @@index([status])
+  @@map("telegramdownloadjob")
+}
+
 model userDailyRolls {
   id        Int      @id @default(autoincrement())
   userId    Int

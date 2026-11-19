@@ -7,6 +7,7 @@ import bigInt from 'big-integer';
 import fs from 'fs';
 import path from 'path';
 import { PrismaClient } from '@prisma/client';
+import { bytesFromDone, clearPartState, loadPartState, savePartState } from '../utils/telegramPartState.js';
 
 const prisma = new PrismaClient();
 
@@ -21,6 +22,8 @@ const LAST_DOWNLOADS_PATH = path.join(process.cwd(), 'data', 'last_downloads.jso
 const FAST_DOWNLOAD_MIN_BYTES = 20 * 1024 * 1024;
 const FAST_WORKERS = 4;
 const FAST_PART_SIZE_KB = 512;
+const PART_STATE_SAVE_EVERY_MS = 2000; // cada cuánto se guarda el avance de un archivo grande
+const MAX_AUTO_RESUMES = 5;            // tope de reanudaciones automáticas de una misma descarga
 
 class FilteredLogger extends Logger {
     log(level, message, color) {
@@ -42,6 +45,9 @@ class TelegramDownloaderService {
         this.client = null;
         this.isDownloading = false;
         this.shouldCancel = false;
+        this.shuttingDown = false;  // el backend se está apagando: se conserva el avance para retomar
+        this.currentJobId = null;   // fila de TelegramDownloadJob de la descarga en curso
+        this.flushPartState = null; // guarda ya el avance del archivo grande que se está bajando
         this.progressEmitter = null; // Callback for SSE
         
         // Auth flow resolvers
@@ -515,7 +521,7 @@ class TelegramDownloaderService {
         return Array.isArray(res) && res.length ? res[0] : null;
     }
 
-    async parallelDownloadToFile(client, fileLocation, { dcId, fileSizeBytes, outputFile, workers, partSizeKb, progressCallback }) {
+    async parallelDownloadToFile(client, fileLocation, { dcId, fileSizeBytes, outputFile, workers, partSizeKb, progressCallback, msgId, resumeDone }) {
         const partSize = Math.floor(partSizeKb * 1024);
         if (partSize % 4096 !== 0) throw new Error('partSizeKb debe ser divisible por 4KB');
         
@@ -523,13 +529,26 @@ class TelegramDownloaderService {
         const totalChunks = Math.ceil(fileSizeBytes / partSize);
         const strideBig = bigInt(stride);
 
-        const fd = fs.openSync(outputFile, 'w');
+        // Si hay avance válido guardado se abre sin truncar y cada worker sigue donde se quedó.
+        const done = resumeDone ? [...resumeDone] : Array(workers).fill(0);
+        const fd = fs.openSync(outputFile, resumeDone ? 'r+' : 'w');
+        const saveState = () => {
+            try {
+                fs.fsyncSync(fd); // los datos van a disco antes de anotar que están hechos
+                savePartState(outputFile, { msgId, fileSizeBytes, partSize, workers, done });
+            } catch (e) {
+                console.error('[Telegram Downloader] No se pudo guardar el avance del archivo:', e.message);
+            }
+        };
+        this.flushPartState = saveState;
         try {
-            fs.ftruncateSync(fd, fileSizeBytes);
-            let downloaded = 0;
+            if (!resumeDone) fs.ftruncateSync(fd, fileSizeBytes);
+            let downloaded = resumeDone ? bytesFromDone(done, partSize, fileSizeBytes) : 0;
             let lastPrint = 0;
-            let lastBytes = 0;
+            let lastBytes = downloaded;
             let lastTime = Date.now();
+            let lastSave = 0;
+            saveState();
 
             const report = async () => {
                 if (!progressCallback) return;
@@ -549,9 +568,10 @@ class TelegramDownloaderService {
             const workerTasks = Array.from({ length: workers }, (_, workerIndex) =>
                 (async () => {
                     const chunksForWorker = workerIndex >= totalChunks ? 0 : Math.ceil((totalChunks - workerIndex) / workers);
-                    if (chunksForWorker <= 0) return;
+                    const remaining = chunksForWorker - done[workerIndex];
+                    if (remaining <= 0) return;
 
-                    let offset = bigInt(workerIndex * partSize);
+                    let offset = bigInt(workerIndex * partSize).add(strideBig.multiply(done[workerIndex]));
                     const iter = client.iterDownload({
                         file: fileLocation,
                         dcId,
@@ -560,7 +580,7 @@ class TelegramDownloaderService {
                         stride,
                         chunkSize: partSize,
                         requestSize: partSize,
-                        limit: chunksForWorker,
+                        limit: remaining,
                     });
 
                     for await (const chunk of iter) {
@@ -569,6 +589,11 @@ class TelegramDownloaderService {
                         fs.writeSync(fd, chunk, 0, chunk.length, position);
                         offset = offset.add(strideBig);
                         downloaded += chunk.length;
+                        done[workerIndex]++;
+                        if (Date.now() - lastSave >= PART_STATE_SAVE_EVERY_MS) {
+                            lastSave = Date.now();
+                            saveState();
+                        }
                         await report();
                     }
                 })(),
@@ -577,6 +602,13 @@ class TelegramDownloaderService {
             await Promise.all(workerTasks);
             await report();
         } finally {
+            // Si se interrumpe (apagado, cancelación o error) queda el avance guardado; si terminó, ya no hace falta.
+            if (done.every((n, w) => n >= (w >= totalChunks ? 0 : Math.ceil((totalChunks - w) / workers)))) {
+                clearPartState(outputFile);
+            } else {
+                saveState();
+            }
+            this.flushPartState = null;
             fs.closeSync(fd);
         }
     }
@@ -618,17 +650,103 @@ class TelegramDownloaderService {
         this.shouldCancel = true;
     }
 
-    async startDownload({ channelName, startId, endId }, onProgress) {
+    // --- Trabajos de descarga persistidos (para retomarlos tras un reinicio) ---
+    async finishJob(jobId, status, lastError = null) {
+        if (!jobId) return;
+        try {
+            if (status === 'COMPLETED') {
+                // Terminada bien: no hace falta conservar nada (lo descargado ya queda en TelegramChannel.lastMsgId).
+                await prisma.telegramDownloadJob.delete({ where: { id: jobId } });
+                return;
+            }
+            await prisma.telegramDownloadJob.update({
+                where: { id: jobId },
+                data: { status, lastError, finishedAt: new Date() }
+            });
+        } catch (e) {
+            console.error('[Telegram Downloader] No se pudo actualizar el trabajo de descarga:', e.message);
+        }
+    }
+
+    // Avisa al servicio de que el proceso va a cerrarse: corta la descarga SIN darla por cancelada
+    // y deja guardado el avance del archivo en curso para que el próximo arranque lo retome.
+    async prepareShutdown(maxWaitMs = 1200) {
+        if (!this.isDownloading) return;
+        this.shuttingDown = true;
+        this.shouldCancel = true;
+        try { this.flushPartState?.(); } catch {}
+        const deadline = Date.now() + maxWaitMs;
+        while (this.isDownloading && Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 50));
+        }
+        try { this.flushPartState?.(); } catch {}
+    }
+
+    // Al arrancar el backend: retoma la descarga que quedó a medias (si la hay). Devuelve la promesa de la descarga.
+    async resumeInterruptedDownload(onProgress) {
+        if (this.isDownloading) return null;
+        // Limpieza: los trabajos fallidos o cancelados se conservan 7 días para diagnosticar y luego se borran.
+        await prisma.telegramDownloadJob.deleteMany({
+            where: { status: { not: 'RUNNING' }, updatedAt: { lt: new Date(Date.now() - 7 * 24 * 3600 * 1000) } }
+        }).catch(() => {});
+        const jobs = await prisma.telegramDownloadJob.findMany({ where: { status: 'RUNNING' }, orderBy: { id: 'desc' } });
+        if (jobs.length === 0) return null;
+
+        const [job, ...older] = jobs;
+        // Nunca dos descargas a la vez: los trabajos más antiguos "en curso" quedaron huérfanos.
+        for (const o of older) await this.finishJob(o.id, 'CANCELLED', 'Reemplazada por un trabajo más reciente');
+
+        if (job.resumeCount >= MAX_AUTO_RESUMES) {
+            await this.finishJob(job.id, 'FAILED', `Se interrumpió más de ${MAX_AUTO_RESUMES} veces seguidas; no se reintenta sola.`);
+            return null;
+        }
+        if (!(await this.checkAuth())) {
+            await this.finishJob(job.id, 'FAILED', 'No hay sesión de Telegram para retomar la descarga.');
+            return null;
+        }
+
+        await prisma.telegramDownloadJob.update({ where: { id: job.id }, data: { resumeCount: { increment: 1 } } });
+        console.log(`[Telegram Downloader] Retomando descarga de ${job.channelName} (${job.startId}-${job.endId}), intento ${job.resumeCount + 1}`);
+
+        const params = { channelName: job.channelName, startId: job.startId, endId: job.endId, jobId: job.id };
+        return (async () => {
+            let outcome = await this.startDownload(params, onProgress);
+            // Si Telegram no estaba alcanzable justo al arrancar, se reintenta unas veces antes de rendirse.
+            for (let attempt = 1; outcome === 'failed' && attempt <= 3; attempt++) {
+                await new Promise((r) => setTimeout(r, 30000));
+                await prisma.telegramDownloadJob.update({ where: { id: job.id }, data: { status: 'RUNNING', finishedAt: null } });
+                outcome = await this.startDownload(params, onProgress);
+            }
+            return outcome;
+        })();
+    }
+
+    // Devuelve: 'completed' | 'empty' | 'cancelled' | 'interrupted' | 'failed'
+    async startDownload({ channelName, startId, endId, jobId = null }, onProgress) {
         if (this.isDownloading) throw new Error('Ya hay una descarga en progreso.');
-        
+
         this.isDownloading = true;
         this.shouldCancel = false;
+        this.shuttingDown = false;
+        this.currentJobId = jobId;
+        let outcome = 'completed';
+        let failMessage = null;
         this.progressEmitter = onProgress;
         this.lastProgress = null;
         this.logBuffer = [];
         this.downloadInfo = { channelName, startId, endId, startedAt: new Date().toISOString() };
 
         try {
+            if (!jobId) {
+                // Registro durable de la descarga: si el backend se reinicia, al arrancar se retoma sola.
+                await prisma.telegramDownloadJob.updateMany({
+                    where: { status: 'RUNNING' },
+                    data: { status: 'CANCELLED', finishedAt: new Date(), lastError: 'Reemplazada por una descarga nueva' }
+                });
+                const job = await prisma.telegramDownloadJob.create({ data: { channelName, startId, endId } });
+                this.currentJobId = job.id;
+            }
+
             await this.initClient();
             this.emitProgress({ type: 'info', message: `Calculando archivos para ${channelName}...` });
 
@@ -670,9 +788,15 @@ class TelegramDownloaderService {
             // Revertir para procesar en orden cronológico (de startId a endId)
             messages.reverse();
 
+            if (this.shouldCancel) {
+                outcome = this.shuttingDown ? 'interrupted' : 'cancelled';
+                return outcome;
+            }
+
             if (messages.length === 0) {
                 this.emitProgress({ type: 'error', message: 'No se encontraron mensajes en ese rango.' });
-                return;
+                outcome = 'empty';
+                return outcome;
             }
 
             let totalSizeBytes = 0;
@@ -710,7 +834,7 @@ class TelegramDownloaderService {
 
             for (let idx = 0; idx < totalItems; idx++) {
                 if (this.shouldCancel) {
-                    this.emitProgress({ type: 'info', message: 'Descarga cancelada por el usuario.' });
+                    if (!this.shuttingDown) this.emitProgress({ type: 'info', message: 'Descarga cancelada por el usuario.' });
                     break;
                 }
 
@@ -741,10 +865,6 @@ class TelegramDownloaderService {
                         continue;
                     }
                     try { fs.unlinkSync(fullPath); } catch {}
-                }
-
-                if (fs.existsSync(tempPath)) {
-                    try { fs.unlinkSync(tempPath); } catch {}
                 }
 
                 let lastBytes = 0;
@@ -787,6 +907,16 @@ class TelegramDownloaderService {
                         if (info?.location && info?.dcId) {
                             const sizeBig = info.size;
                             const size = sizeBig ? Number(sizeBig.toString()) : Number(msgToDownload.media.document.size || 0);
+                            // Si quedó un .part con avance válido (reinicio, corte...) se retoma a mitad de archivo.
+                            const resumeDone = loadPartState(tempPath, {
+                                msgId: msgToDownload.id,
+                                fileSizeBytes: size,
+                                partSize: FAST_PART_SIZE_KB * 1024,
+                                workers: FAST_WORKERS,
+                            });
+                            if (resumeDone) {
+                                this.emitProgress({ type: 'info', message: `Retomando ${item.originalName} desde ${this.formatBytes(bytesFromDone(resumeDone, FAST_PART_SIZE_KB * 1024, size))}...` });
+                            }
                             return this.parallelDownloadToFile(this.client, info.location, {
                                 dcId: info.dcId,
                                 fileSizeBytes: size,
@@ -794,13 +924,16 @@ class TelegramDownloaderService {
                                 workers: FAST_WORKERS,
                                 partSizeKb: FAST_PART_SIZE_KB,
                                 progressCallback,
+                                msgId: msgToDownload.id,
+                                resumeDone,
                             });
-                        } else {
-                            return this.client.downloadMedia(msgToDownload, { outputFile: tempPath, progressCallback });
                         }
-                    } else {
-                        return this.client.downloadMedia(msgToDownload, { outputFile: tempPath, progressCallback });
                     }
+
+                    // Archivos pequeños o sin ubicación directa: no se puede retomar, se descargan de cero.
+                    try { fs.unlinkSync(tempPath); } catch {}
+                    clearPartState(tempPath);
+                    return this.client.downloadMedia(msgToDownload, { outputFile: tempPath, progressCallback });
                 };
 
                 const downloadWithStallDetector = async (msgToDownload) => {
@@ -847,10 +980,7 @@ class TelegramDownloaderService {
                         try {
                             const fresh = await this.refetchMessageById(channelName, item.msg.id);
                             if (fresh?.media) {
-                                item.msg = fresh;
-                                if (fs.existsSync(tempPath)) {
-                                    try { fs.unlinkSync(tempPath); } catch {}
-                                }
+                                item.msg = fresh; // el avance guardado sigue siendo válido: es el mismo archivo
                                 await downloadWithStallDetector(fresh);
                                 continue;
                             }
@@ -859,19 +989,44 @@ class TelegramDownloaderService {
                         }
                     }
                     
-                    this.emitProgress({ type: 'error', message: `Error en ${item.msg.id}: ${err.message}` });
-                    if (fs.existsSync(tempPath)) {
+                    if (this.shuttingDown) break; // apagado: se conserva el .part para retomarlo
+                    if (this.shouldCancel) {
+                        // Cancelación del usuario: se descarta lo parcial.
                         try { fs.unlinkSync(tempPath); } catch {}
+                        clearPartState(tempPath);
+                        break;
                     }
+                    // Error normal: el .part y su avance se conservan, el siguiente intento los retoma.
+                    this.emitProgress({ type: 'error', message: `Error en ${item.msg.id}: ${err.message}` });
                 }
             }
 
-            this.emitProgress({ type: 'finish', message: 'Descarga completada.' });
+            if (this.shuttingDown) {
+                outcome = 'interrupted';
+            } else if (this.shouldCancel) {
+                outcome = 'cancelled';
+                this.emitProgress({ type: 'finish', message: 'Descarga cancelada.' });
+            } else {
+                this.emitProgress({ type: 'finish', message: 'Descarga completada.' });
+            }
         } catch (error) {
-            this.emitProgress({ type: 'error', message: error.message });
+            if (this.shuttingDown) {
+                outcome = 'interrupted';
+            } else {
+                outcome = 'failed';
+                failMessage = error.message;
+                this.emitProgress({ type: 'error', message: error.message });
+            }
         } finally {
+            // 'interrupted' deja el trabajo en RUNNING: el próximo arranque del backend lo retoma.
+            const jid = this.currentJobId;
+            if (outcome === 'completed' || outcome === 'empty') await this.finishJob(jid, 'COMPLETED');
+            else if (outcome === 'cancelled') await this.finishJob(jid, 'CANCELLED', 'Cancelada por el usuario');
+            else if (outcome === 'failed') await this.finishJob(jid, 'FAILED', failMessage);
+            this.currentJobId = null;
             this.isDownloading = false;
         }
+        return outcome;
     }
 }
 

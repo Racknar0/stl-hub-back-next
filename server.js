@@ -9,6 +9,8 @@ import { startReelsWorker } from './src/services/reels.service.js';
 import { startEmailEngine } from './src/services/emailEngine.service.js';
 import { startReengageCloser } from './src/services/emailReengage.service.js';
 import telegramCheckerService from './src/services/telegramChecker.service.js';
+import telegramDownloaderService from './src/services/telegramDownloader.service.js';
+import { resumeInterruptedDownloads } from './src/controllers/telegramDownloader.controller.js';
 
 // Preferir IPv4 al conectar con servicios externos: desde la IPv6 del VPS (Contabo) Google rechaza la API de Gemini
 // con "User location is not supported", mientras que por IPv4 funciona.
@@ -43,8 +45,29 @@ server.listen(PORT, () => {
     startReengageCloser(); // Cierra el reenganche de quien no reaccionó en el plazo
   }, 9000);
 
+  // Retomar la descarga de Telegram que quedó a medias por un reinicio (antes del Auto-Checker, que espera si hay descarga)
+  setTimeout(() => {
+    resumeInterruptedDownloads();
+  }, 4000);
+
   // Iniciar worker de Telegram Auto-Checker
   setTimeout(() => {
     telegramCheckerService.start();
   }, 7000);
 });
+
+// Apagado ordenado (pm2 restart / u_back): se guarda el avance de la descarga de Telegram en curso
+// para que el próximo arranque la retome donde iba, en vez de perderla.
+let shuttingDown = false;
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try {
+      await telegramDownloaderService.prepareShutdown();
+    } catch (e) {
+      console.error('Error guardando la descarga de Telegram al apagar:', e.message);
+    }
+    process.exit(0);
+  });
+}

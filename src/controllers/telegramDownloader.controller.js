@@ -369,3 +369,12 @@ export const streamProgress = (req, res) => {
         clients = clients.filter(client => client !== res);
     });
 };
+
+// Al arrancar el backend: retoma sola la descarga de Telegram que quedó a medias por un reinicio.
+export const resumeInterruptedDownloads = async () => {
+    try {
+        await telegramDownloaderService.resumeInterruptedDownload(broadcastToClients);
+    } catch (err) {
+        console.error('[Telegram Downloader] No se pudo retomar la descarga interrumpida:', err.message);
+    }
+};
