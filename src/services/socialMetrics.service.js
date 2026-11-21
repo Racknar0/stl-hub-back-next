@@ -55,8 +55,11 @@ export async function getSocialMetrics({ from, to, networks = null, fresh = fals
   const ages = [];
 
   // Las cuentas extra publican horas después: se amplía la búsqueda y luego se filtra por la hora real de cada red
+  // Un reel que falló en una sola red queda en FAILED y sin publishedAt, pero sí salió en las demás: se busca también
+  // por su hora programada y se cuentan solo las redes con id (cada una con su propia hora de publicación)
+  const searchWindow = { gte: new Date(start.getTime() - 3 * 86400000), lte: new Date(end.getTime() + 86400000) };
   const posts = await prisma.reelPost.findMany({
-    where: { status: 'PUBLISHED', simulated: false, publishedAt: { gte: new Date(start.getTime() - 3 * 86400000), lte: new Date(end.getTime() + 86400000) } },
+    where: { simulated: false, status: { in: ['PUBLISHED', 'FAILED'] }, OR: [{ publishedAt: searchWindow }, { publishedAt: null, scheduledAt: searchWindow }] },
     orderBy: { publishedAt: 'desc' },
     select: { id: true, title: true, assetTitle: true, publishedAt: true, results: true, caption: true, facebookCaption: true, youtubeVariants: true, facebookVariants: true, instagramVariants: true, pinterestTitle: true },
   });
