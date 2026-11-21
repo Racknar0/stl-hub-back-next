@@ -72,6 +72,32 @@ class FilteredLogger extends Logger {
     }
 }
 
+// ─── Errores del login de Telegram ─────────────────────────────────
+// Código o contraseña equivocados: se vuelven a pedir sin reiniciar el login
+const RETRYABLE_AUTH_ERRORS = new Set(['PHONE_CODE_INVALID', 'PHONE_CODE_EMPTY', 'PASSWORD_HASH_INVALID']);
+
+function describeAuthError(code) {
+    if (!code) return null;
+    const map = {
+        PASSWORD_HASH_INVALID: 'Contraseña de verificación en dos pasos incorrecta. Es la contraseña que configuraste en Telegram (Ajustes → Privacidad y seguridad → Verificación en dos pasos), no el código.',
+        PHONE_CODE_INVALID: 'Código incorrecto. Revisa el código que te llegó por Telegram o SMS.',
+        PHONE_CODE_EMPTY: 'Falta el código.',
+        PHONE_CODE_EXPIRED: 'El código expiró. Vuelve a empezar para pedir uno nuevo.',
+        PHONE_NUMBER_INVALID: 'Número de teléfono inválido. Usa el formato internacional, p. ej. +573001234567.',
+        PHONE_NUMBER_BANNED: 'Telegram bloqueó este número.',
+        PHONE_NUMBER_UNOCCUPIED: 'Ese número no tiene cuenta de Telegram.',
+        SESSION_PASSWORD_NEEDED: 'La cuenta tiene verificación en dos pasos: escribe su contraseña.',
+        AUTH_USER_CANCEL: 'El inicio de sesión se canceló. Vuelve a empezar.',
+    };
+    if (map[code]) return map[code];
+    const flood = String(code).match(/FLOOD_WAIT_(\d+)|A wait of (\d+) seconds/i);
+    if (flood) {
+        const secs = Number(flood[1] || flood[2]);
+        return `Telegram pide esperar ${secs >= 60 ? Math.ceil(secs / 60) + ' min' : secs + ' s'} antes de reintentar (demasiados intentos).`;
+    }
+    return `Error de Telegram: ${code}`;
+}
+
 class TelegramDownloaderService {
     constructor() {
         this.client = null;
@@ -89,6 +115,9 @@ class TelegramDownloaderService {
         this.resolvePassword = null;
         this.authError = null;
         this.isAuthenticating = false;
+        this.authStage = 'idle';    // idle | sending | code | password | done | failed (lo lee la pantalla de login)
+        this.passwordHint = null;   // pista de la contraseña 2FA que devuelve Telegram
+        this.authGeneration = 0;    // cada intento nuevo invalida al anterior
         
         // Persistent state for reconnecting clients
         this.lastProgress = null;   // Last progress event
@@ -165,60 +194,100 @@ class TelegramDownloaderService {
     }
 
     async startAuth(phoneNumber) {
-        if (this.isAuthenticating) {
-            throw new Error('Ya hay un proceso de autenticación en curso. Espera a que termine.');
+        // Un intento anterior abandonado (p. ej. se cerró la página) ya no bloquea: se descarta
+        if (this.isAuthenticating && this.client) {
+            try { await this.client.disconnect(); } catch {}
         }
+        const generation = ++this.authGeneration;
+        const current = () => generation === this.authGeneration;
 
         this.isAuthenticating = true;
         this.authError = null;
+        this.authStage = 'sending';
+        this.passwordHint = null;
+        this.resolvePhoneCode = null;
+        this.resolvePassword = null;
 
         const stringSession = new StringSession("");
         const baseLogger = this.newLogger();
-        this.client = new TelegramClient(stringSession, apiId, apiHash, {
+        const client = new TelegramClient(stringSession, apiId, apiHash, {
             connectionRetries: 1,   // Solo 1 reintento para evitar FLOOD
             retryDelay: 5000,
             useWSS: false,
             baseLogger
         });
+        this.client = client;
 
         // Este proceso corre en background y espera a que resuelvas las promesas
-        this.client.start({
+        client.start({
             phoneNumber: async () => phoneNumber,
-            password: async () => new Promise(resolve => { this.resolvePassword = resolve; }),
-            phoneCode: async () => new Promise(resolve => { this.resolvePhoneCode = resolve; }),
-            onError: (err) => { 
-                this.authError = err.message;
+            password: async (hint) => new Promise(resolve => {
+                if (!current()) return;
+                this.authStage = 'password';
+                this.passwordHint = hint || null;
+                this.resolvePassword = resolve;
+            }),
+            phoneCode: async () => new Promise(resolve => {
+                if (!current()) return;
+                this.authStage = 'code';
+                this.resolvePhoneCode = resolve;
+            }),
+            onError: (err) => {
+                if (!current()) return true;
+                const code = err?.errorMessage || err?.message || String(err);
                 console.error("Auth Error:", err);
-                // Retornar true para indicar a GramJS que NO reintente
-                return true;
+                this.authError = code;
+                // Código o contraseña equivocados: GramJS vuelve a pedirlos (no se reinicia todo el login)
+                return !RETRYABLE_AUTH_ERRORS.has(code);
             },
         }).then(() => {
-            const sessionStr = this.client.session.save();
+            if (!current()) return;
+            const sessionStr = client.session.save();
             if (!fs.existsSync(path.dirname(SESSION_PATH))) {
                 fs.mkdirSync(path.dirname(SESSION_PATH), { recursive: true });
             }
             fs.writeFileSync(SESSION_PATH, sessionStr, 'utf8');
+            this.authStage = 'done';
+            this.authError = null;
             console.log('Telegram session saved to data/telegram.session');
         }).catch(err => {
-            this.authError = err.message;
+            if (!current()) return;
+            // AUTH_USER_CANCEL lo lanza GramJS tras un error no recuperable: se conserva ese error original
+            if (!this.authError || err.message !== 'AUTH_USER_CANCEL') this.authError = err.message;
+            this.authStage = 'failed';
             console.error("Auth final error:", err.message);
         }).finally(() => {
-            this.isAuthenticating = false;
+            if (current()) this.isAuthenticating = false;
         });
     }
 
     provideCode(code) {
-        if (this.resolvePhoneCode) {
-            this.resolvePhoneCode(code);
-            this.resolvePhoneCode = null;
-        }
+        if (!this.resolvePhoneCode) return false;
+        this.authError = null;
+        this.authStage = 'sending';
+        this.resolvePhoneCode(String(code).trim());
+        this.resolvePhoneCode = null;
+        return true;
     }
 
     providePassword(password) {
-        if (this.resolvePassword) {
-            this.resolvePassword(password);
-            this.resolvePassword = null;
-        }
+        if (!this.resolvePassword) return false;
+        this.authError = null;
+        this.authStage = 'sending';
+        this.resolvePassword(password);
+        this.resolvePassword = null;
+        return true;
+    }
+
+    // Estado del login para la pantalla: en qué paso está y el último error de Telegram
+    getAuthState() {
+        return {
+            stage: this.authStage,
+            authenticating: this.isAuthenticating,
+            error: this.authError,
+            errorMessage: describeAuthError(this.authError),
+            passwordHint: this.authStage === 'password' ? this.passwordHint : null,
+        };
     }
 
     async initClient() {

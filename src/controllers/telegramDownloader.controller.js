@@ -40,7 +40,7 @@ function mapChannelToFrontend(c) {
 export const checkAuth = async (req, res) => {
     try {
         const isAuth = await telegramDownloaderService.checkAuth();
-        res.json({ success: true, isAuthorized: isAuth });
+        res.json({ success: true, isAuthorized: isAuth, auth: telegramDownloaderService.getAuthState() });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
@@ -69,7 +69,7 @@ export const startAuth = async (req, res) => {
         const { phoneNumber } = req.body;
         if (!phoneNumber) return res.status(400).json({ success: false, message: 'Phone number required' });
         
-        telegramDownloaderService.startAuth(phoneNumber);
+        await telegramDownloaderService.startAuth(phoneNumber);
         res.json({ success: true, message: 'Auth started, waiting for code' });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
@@ -79,14 +79,18 @@ export const startAuth = async (req, res) => {
 export const provideCode = (req, res) => {
     const { code } = req.body;
     if (!code) return res.status(400).json({ success: false, message: 'Code required' });
-    telegramDownloaderService.provideCode(code);
+    if (!telegramDownloaderService.provideCode(code)) {
+        return res.status(409).json({ success: false, message: 'No hay un login esperando el código. Vuelve a empezar.' });
+    }
     res.json({ success: true, message: 'Code provided' });
 };
 
 export const providePassword = (req, res) => {
     const { password } = req.body;
     if (!password) return res.status(400).json({ success: false, message: 'Password required' });
-    telegramDownloaderService.providePassword(password);
+    if (!telegramDownloaderService.providePassword(password)) {
+        return res.status(409).json({ success: false, message: 'No hay un login esperando la contraseña. Vuelve a empezar.' });
+    }
     res.json({ success: true, message: 'Password provided' });
 };
 
