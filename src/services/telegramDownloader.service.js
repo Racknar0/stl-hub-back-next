@@ -139,6 +139,8 @@ class TelegramDownloaderService {
         this.passwordHint = null;   // pista de la contraseña 2FA que devuelve Telegram
         this.authGeneration = 0;    // cada intento nuevo invalida al anterior
         this.codeDelivery = null;   // por dónde mandó Telegram el código: { type, emailPattern, length, nextType, timeout }
+        this.qrLoginUrl = null;     // tg://login?token=… del login por QR (se renueva cada ~30 s)
+        this.qrExpires = null;      // vencimiento del token QR (segundos Unix)
         
         // Persistent state for reconnecting clients
         this.lastProgress = null;   // Last progress event
@@ -214,7 +216,8 @@ class TelegramDownloaderService {
         return count;
     }
 
-    async startAuth(phoneNumber) {
+    // mode 'qr': login escaneando un QR desde la app (Ajustes → Dispositivos → Vincular dispositivo); no usa código
+    async startAuth(phoneNumber, mode = 'phone') {
         // Un intento anterior abandonado (p. ej. se cerró la página) ya no bloquea: se descarta
         if (this.isAuthenticating && this.client) {
             try { await this.client.disconnect(); } catch {}
@@ -227,6 +230,8 @@ class TelegramDownloaderService {
         this.authStage = 'sending';
         this.passwordHint = null;
         this.codeDelivery = null;
+        this.qrLoginUrl = null;
+        this.qrExpires = null;
         this.resolvePhoneCode = null;
         this.resolvePassword = null;
 
@@ -259,7 +264,19 @@ class TelegramDownloaderService {
 
         // Este proceso corre en background y espera a que resuelvas las promesas
         client.start({
-            phoneNumber: async () => phoneNumber,
+            phoneNumber: async () => {
+                if (mode !== 'qr') return phoneNumber;
+                // GramJS cambia al login por QR cuando el callback del teléfono lanza este error
+                const err = new Error('RESTART_AUTH_WITH_QR');
+                err.errorMessage = 'RESTART_AUTH_WITH_QR';
+                throw err;
+            },
+            qrCode: async ({ token, expires }) => {
+                if (!current()) return;
+                this.qrLoginUrl = `tg://login?token=${Buffer.from(token).toString('base64url')}`;
+                this.qrExpires = expires;
+                this.authStage = 'qr';
+            },
             password: async (hint) => new Promise(resolve => {
                 if (!current()) return;
                 this.authStage = 'password';
@@ -288,6 +305,7 @@ class TelegramDownloaderService {
             fs.writeFileSync(SESSION_PATH, sessionStr, 'utf8');
             this.authStage = 'done';
             this.authError = null;
+            this.qrLoginUrl = null;
             console.log('Telegram session saved to data/telegram.session');
         }).catch(err => {
             if (!current()) return;
@@ -327,6 +345,8 @@ class TelegramDownloaderService {
             errorMessage: describeAuthError(this.authError),
             passwordHint: this.authStage === 'password' ? this.passwordHint : null,
             codeDelivery: this.codeDelivery,
+            qrLoginUrl: this.authStage === 'qr' ? this.qrLoginUrl : null,
+            qrExpires: this.authStage === 'qr' ? this.qrExpires : null,
             codeDeliveryMessage: describeCodeDelivery(this.codeDelivery),
         };
     }

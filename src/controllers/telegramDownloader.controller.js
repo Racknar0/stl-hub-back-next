@@ -76,6 +76,16 @@ export const startAuth = async (req, res) => {
     }
 };
 
+// Login escaneando un QR desde la app de Telegram (no depende de que llegue el código)
+export const startQrAuth = async (req, res) => {
+    try {
+        await telegramDownloaderService.startAuth(null, 'qr');
+        res.json({ success: true, message: 'QR auth started' });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
 export const provideCode = (req, res) => {
     const { code } = req.body;
     if (!code) return res.status(400).json({ success: false, message: 'Code required' });

@@ -15,6 +15,7 @@ import {
     logout,
     clearDownloads,
     startAuth,
+    startQrAuth,
     provideCode,
     providePassword
 } from '../../controllers/telegramDownloader.controller.js';
@@ -25,6 +26,7 @@ router.get('/auth/status', checkAuth);
 router.post('/auth/logout', logout);
 router.post('/clear-downloads', clearDownloads);
 router.post('/auth/start', startAuth);
+router.post('/auth/qr', startQrAuth);
 router.post('/auth/code', provideCode);
 router.post('/auth/password', providePassword);
 
