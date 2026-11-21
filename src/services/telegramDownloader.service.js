@@ -24,10 +24,42 @@ const FAST_WORKERS = 4;
 const FAST_PART_SIZE_KB = 512;
 const PART_STATE_SAVE_EVERY_MS = 2000; // cada cuánto se guarda el avance de un archivo grande
 const MAX_AUTO_RESUMES = 5;            // tope de reanudaciones automáticas de una misma descarga
+// Cortacircuitos: gramJS a veces entra en un bucle de reconexión de miles de intentos por segundo
+// que satura la CPU y la salida estándar hasta dejar colgado todo el backend (20-nov-2026).
+const RECONNECT_STORM_WINDOW_MS = 10000; // ventana en la que se cuentan las reconexiones
+const RECONNECT_STORM_MAX = 30;          // más reconexiones que esto en la ventana = tormenta
+const RECONNECT_LOG_EVERY_MS = 5000;     // como mucho una línea de reconexión cada 5 s en el log
+
+const RECONNECT_LOG_PREFIXES = [
+    'Started reconnecting',
+    '[Reconnect]',
+    'Disconnecting from ',
+    'WebSocket connection failed',
+];
 
 class FilteredLogger extends Logger {
+    constructor(level, onReconnect) {
+        super(level);
+        this.onReconnect = onReconnect; // avisa al servicio de cada reconexión
+        this.lastReconnectLog = 0;
+        this.skippedReconnectLogs = 0;
+    }
+
     log(level, message, color) {
         const msg = String(message ?? '');
+        if (RECONNECT_LOG_PREFIXES.some((p) => msg.startsWith(p))) {
+            if (msg.startsWith('Started reconnecting')) this.onReconnect?.();
+            // Se resumen en vez de imprimir cada una: en un bucle llegan a miles por segundo.
+            const now = Date.now();
+            if (now - this.lastReconnectLog < RECONNECT_LOG_EVERY_MS) {
+                this.skippedReconnectLogs++;
+                return;
+            }
+            const skipped = this.skippedReconnectLogs;
+            this.lastReconnectLog = now;
+            this.skippedReconnectLogs = 0;
+            return super.log(level, skipped ? `${msg} (+${skipped} líneas de reconexión omitidas)` : message, color);
+        }
         if (level === LogLevel.INFO) {
             if (msg.startsWith('Sleeping for ')) return;
             if (msg.startsWith('Starting direct file download')) return;
@@ -49,7 +81,9 @@ class TelegramDownloaderService {
         this.currentJobId = null;   // fila de TelegramDownloadJob de la descarga en curso
         this.flushPartState = null; // guarda ya el avance del archivo grande que se está bajando
         this.progressEmitter = null; // Callback for SSE
-        
+        this.reconnectTimes = [];    // momentos de las últimas reconexiones de gramJS
+        this.reconnectStorm = false; // se cortó el cliente por un bucle de reconexión
+
         // Auth flow resolvers
         this.resolvePhoneCode = null;
         this.resolvePassword = null;
@@ -64,6 +98,35 @@ class TelegramDownloaderService {
         if (!fs.existsSync(UPLOADS_DIR)) {
             fs.mkdirSync(UPLOADS_DIR, { recursive: true });
         }
+    }
+
+    // Cuenta una reconexión de gramJS; si hay demasiadas seguidas, destruye el cliente y corta la descarga
+    // (queda como fallida para que el reintento automático la retome con un cliente nuevo).
+    noteReconnect() {
+        if (this.reconnectStorm) return;
+        const now = Date.now();
+        this.reconnectTimes.push(now);
+        while (this.reconnectTimes.length && now - this.reconnectTimes[0] > RECONNECT_STORM_WINDOW_MS) {
+            this.reconnectTimes.shift();
+        }
+        if (this.reconnectTimes.length <= RECONNECT_STORM_MAX) return;
+
+        this.reconnectStorm = true;
+        this.reconnectTimes = [];
+        console.error(`[Telegram Downloader] Bucle de reconexión (${RECONNECT_STORM_MAX}+ en ${RECONNECT_STORM_WINDOW_MS / 1000} s): se destruye el cliente de Telegram.`);
+        this.shouldCancel = true;
+        try { this.flushPartState?.(); } catch {}
+        const client = this.client;
+        this.client = null;
+        if (client) {
+            Promise.resolve()
+                .then(() => client.destroy())
+                .catch((e) => console.error('[Telegram Downloader] Error al destruir el cliente:', e?.message || e));
+        }
+    }
+
+    newLogger() {
+        return new FilteredLogger(LogLevel.INFO, () => this.noteReconnect());
     }
 
     async checkAuth() {
@@ -110,7 +173,7 @@ class TelegramDownloaderService {
         this.authError = null;
 
         const stringSession = new StringSession("");
-        const baseLogger = new FilteredLogger(LogLevel.INFO);
+        const baseLogger = this.newLogger();
         this.client = new TelegramClient(stringSession, apiId, apiHash, {
             connectionRetries: 1,   // Solo 1 reintento para evitar FLOOD
             retryDelay: 5000,
@@ -188,7 +251,7 @@ class TelegramDownloaderService {
         }
 
         const stringSession = new StringSession(existingSession);
-        const baseLogger = new FilteredLogger(LogLevel.INFO);
+        const baseLogger = this.newLogger();
 
         this.client = new TelegramClient(stringSession, apiId, apiHash, {
             connectionRetries: 10,
@@ -728,6 +791,8 @@ class TelegramDownloaderService {
         this.isDownloading = true;
         this.shouldCancel = false;
         this.shuttingDown = false;
+        this.reconnectStorm = false;
+        this.reconnectTimes = [];
         this.currentJobId = jobId;
         let outcome = 'completed';
         let failMessage = null;
@@ -789,7 +854,8 @@ class TelegramDownloaderService {
             messages.reverse();
 
             if (this.shouldCancel) {
-                outcome = this.shuttingDown ? 'interrupted' : 'cancelled';
+                outcome = this.shuttingDown ? 'interrupted' : this.reconnectStorm ? 'failed' : 'cancelled';
+                if (this.reconnectStorm) failMessage = 'Bucle de reconexión con Telegram';
                 return outcome;
             }
 
@@ -834,7 +900,7 @@ class TelegramDownloaderService {
 
             for (let idx = 0; idx < totalItems; idx++) {
                 if (this.shouldCancel) {
-                    if (!this.shuttingDown) this.emitProgress({ type: 'info', message: 'Descarga cancelada por el usuario.' });
+                    if (!this.shuttingDown && !this.reconnectStorm) this.emitProgress({ type: 'info', message: 'Descarga cancelada por el usuario.' });
                     break;
                 }
 
@@ -989,7 +1055,7 @@ class TelegramDownloaderService {
                         }
                     }
                     
-                    if (this.shuttingDown) break; // apagado: se conserva el .part para retomarlo
+                    if (this.shuttingDown || this.reconnectStorm) break; // apagado o cliente cortado: se conserva el .part para retomarlo
                     if (this.shouldCancel) {
                         // Cancelación del usuario: se descarta lo parcial.
                         try { fs.unlinkSync(tempPath); } catch {}
@@ -1003,6 +1069,10 @@ class TelegramDownloaderService {
 
             if (this.shuttingDown) {
                 outcome = 'interrupted';
+            } else if (this.reconnectStorm) {
+                outcome = 'failed';
+                failMessage = 'Bucle de reconexión con Telegram';
+                this.emitProgress({ type: 'error', message: 'Se cortó la conexión con Telegram por un bucle de reconexión; se reintentará.' });
             } else if (this.shouldCancel) {
                 outcome = 'cancelled';
                 this.emitProgress({ type: 'finish', message: 'Descarga cancelada.' });
