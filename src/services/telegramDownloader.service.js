@@ -76,6 +76,26 @@ class FilteredLogger extends Logger {
 // Código o contraseña equivocados: se vuelven a pedir sin reiniciar el login
 const RETRYABLE_AUTH_ERRORS = new Set(['PHONE_CODE_INVALID', 'PHONE_CODE_EMPTY', 'PASSWORD_HASH_INVALID']);
 
+// Dónde buscar el código según la respuesta de Telegram
+function describeCodeDelivery(d) {
+    if (!d?.type) return null;
+    const len = d.length ? ` de ${d.length} dígitos` : '';
+    const map = {
+        App: `Telegram envió el código${len} a tu app de Telegram: abre el chat oficial "Telegram" (visto azul) en el celular o en Telegram Desktop.`,
+        Sms: `Telegram envió el código${len} por SMS a tu número.`,
+        SmsWord: 'Telegram envió por SMS una palabra como código.',
+        SmsPhrase: 'Telegram envió por SMS una frase como código.',
+        Call: `Telegram te va a llamar y dictará el código${len}.`,
+        FlashCall: 'Telegram hará una llamada perdida: el código son los últimos dígitos del número que llama.',
+        MissedCall: `Telegram hará una llamada perdida: el código son los últimos ${d.length || ''} dígitos del número que llama.`,
+        EmailCode: `Telegram envió el código${len} a tu correo de inicio de sesión${d.emailPattern ? ` (${d.emailPattern})` : ''}. Revisa también spam.`,
+        SetUpEmailRequired: 'Telegram exige configurar un correo de inicio de sesión antes de enviar el código. Configúralo en la app (Ajustes → Privacidad y seguridad → Correo de inicio de sesión) y vuelve a empezar.',
+        FragmentSms: 'Telegram envió el código a tu número anónimo de Fragment (revísalo en fragment.com).',
+        FirebaseSms: 'Telegram envió el código por SMS (verificación de Firebase).',
+    };
+    return map[d.type] || `Telegram envió el código por: ${d.type}.`;
+}
+
 function describeAuthError(code) {
     if (!code) return null;
     const map = {
@@ -118,6 +138,7 @@ class TelegramDownloaderService {
         this.authStage = 'idle';    // idle | sending | code | password | done | failed (lo lee la pantalla de login)
         this.passwordHint = null;   // pista de la contraseña 2FA que devuelve Telegram
         this.authGeneration = 0;    // cada intento nuevo invalida al anterior
+        this.codeDelivery = null;   // por dónde mandó Telegram el código: { type, emailPattern, length, nextType, timeout }
         
         // Persistent state for reconnecting clients
         this.lastProgress = null;   // Last progress event
@@ -205,6 +226,7 @@ class TelegramDownloaderService {
         this.authError = null;
         this.authStage = 'sending';
         this.passwordHint = null;
+        this.codeDelivery = null;
         this.resolvePhoneCode = null;
         this.resolvePassword = null;
 
@@ -217,6 +239,23 @@ class TelegramDownloaderService {
             baseLogger
         });
         this.client = client;
+
+        // GramJS no expone por dónde se envió el código (app, SMS, correo…): se lee de la respuesta auth.SentCode
+        const originalInvoke = client.invoke.bind(client);
+        client.invoke = async (request, ...rest) => {
+            const result = await originalInvoke(request, ...rest);
+            if (current() && result?.className === 'auth.SentCode') {
+                this.codeDelivery = {
+                    type: String(result.type?.className || '').replace('auth.SentCodeType', ''),
+                    emailPattern: result.type?.emailPattern || null,
+                    length: result.type?.length || null,
+                    nextType: result.nextType ? String(result.nextType.className || '').replace('auth.CodeType', '') : null,
+                    timeout: result.timeout || null,
+                };
+                console.log('[Telegram Auth] Código enviado por:', JSON.stringify(this.codeDelivery));
+            }
+            return result;
+        };
 
         // Este proceso corre en background y espera a que resuelvas las promesas
         client.start({
@@ -287,6 +326,8 @@ class TelegramDownloaderService {
             error: this.authError,
             errorMessage: describeAuthError(this.authError),
             passwordHint: this.authStage === 'password' ? this.passwordHint : null,
+            codeDelivery: this.codeDelivery,
+            codeDeliveryMessage: describeCodeDelivery(this.codeDelivery),
         };
     }
 
