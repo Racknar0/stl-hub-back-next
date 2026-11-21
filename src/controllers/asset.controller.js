@@ -13,6 +13,7 @@ import { maybeCheckMegaOnVisit } from '../utils/megaCheckFiles/visitTriggeredMeg
 import { applyMegaProxy, listMegaProxies, getStickyProxyForAccount } from '../utils/megaProxy.js';
 import { createPartFromBase64, GoogleGenAI, PartMediaResolutionLevel } from '@google/genai';
 import qdrantMultimodalService from '../services/qdrantMultimodal.service.js';
+import { buildPublishedSafeWhere } from '../services/nsfwPublishedIndex.service.js';
 import { parseSizeToMB, parseStorageFromDfText } from '../utils/megaDfParser.js';
 import { megaLoginFull, megaLogoutSafe, refreshStorageMetrics } from '../utils/megaSession.js';
 import { megaGetWithStallRetry, megaPutWithStallRetry, applyProxyByIndexOrThrow } from '../utils/megaTransfer.js';
@@ -3526,8 +3527,7 @@ export const getAssetBySlug = async (req, res) => {
 export const listPublishedSlugs = async (req, res) => {
     try {
         const { updatedAfter } = req.query || {};
-        const nsfwWhere = buildNsfwWhere(req);
-        const where = { status: 'PUBLISHED', ...nsfwWhere };
+        const where = await buildPublishedSafeWhere(req);
         if (updatedAfter) {
             const d = new Date(updatedAfter);
             if (!isNaN(d.getTime())) where.updatedAt = { gt: d };
@@ -3561,7 +3561,7 @@ export const listPublishedSlugs = async (req, res) => {
 /** Total de assets publicados que lista /slugs (mismo filtro). GET /api/assets/slugs/count */
 export const countPublishedSlugs = async (req, res) => {
     try {
-        const count = await prisma.asset.count({ where: { status: 'PUBLISHED', ...buildNsfwWhere(req) } });
+        const count = await prisma.asset.count({ where: await buildPublishedSafeWhere(req) });
         return res.json({ count });
     } catch (e) {
         console.error('[ASSETS] countPublishedSlugs error:', e);
