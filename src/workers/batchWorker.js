@@ -3,7 +3,7 @@
  *
  * Flujo por cada BatchImportItem con status=PENDING:
  *   1. Extraer .rar/.zip/.7z internos
- *   2. Re-comprimir TODO en un único {slug}.rar
+ *   2. Re-comprimir TODO en un único {slug}.7z (LZMA2 nivel 3)
  *   3. Subir a MEGA Main (proxy + stall detection)
  *   4. Replicar a cuentas Backup (proxy + stall detection)
  *   5. Crear registro Asset en BD
@@ -839,29 +839,42 @@ async function extractInnerArchives(folderPath) {
   }
 }
 
-async function recompressFolder(folderPath, outputName) {
+// Empaquetado final en 7z (LZMA2) nivel 3. Antes era ZIP sin compresión (-mx0): lo subido ocupaba
+// de media 2,3 veces el original y llenaba las cuentas MEGA. Prueba del 20-nov-2026 con 1,18 GB
+// extraídos: ZIP -mx0 1.179 MB en 2 s · 7z -mx3 523 MB en 72 s (4 hilos).
+const ARCHIVE_EXT = '7z'
+const ARCHIVE_COMPRESS_THREADS = 4               // hilos de 7z; deja libres núcleos para web, API y MySQL
+const ARCHIVE_COMPRESS_MS_PER_GB = 3 * 60 * 1000 // margen por GB extraído (medido ~1 min/GB)
+const ARCHIVE_COMPRESS_MIN_TIMEOUT_MS = 10 * 60 * 1000
+
+function folderSizeBytes(folderPath) {
+  return getAllFiles(folderPath).reduce((sum, f) => {
+    try { return sum + fs.statSync(f).size } catch { return sum }
+  }, 0)
+}
+
+function stagingArchivePathFor(slug) {
+  return path.join(STAGING_DIR, `${slug}.${ARCHIVE_EXT}`)
+}
+
+async function recompressFolder(folderPath, outputPath, folderBytes = folderSizeBytes(folderPath)) {
   fs.mkdirSync(STAGING_DIR, { recursive: true })
-  const outputRarPath = path.join(STAGING_DIR, `${outputName}.rar`)
-  const outputZipPath = path.join(STAGING_DIR, `${outputName}.zip`)
-  if (fs.existsSync(outputRarPath)) fs.unlinkSync(outputRarPath)
-  if (fs.existsSync(outputZipPath)) fs.unlinkSync(outputZipPath)
+  // 7z "a" añade a un archivo existente: se parte siempre de cero.
+  if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath)
 
-  // Intento primario: RAR. En algunos entornos 7z no soporta creación de RAR.
-  try {
-    await run7z(['a', '-trar', outputRarPath, path.join(folderPath, '*'), '-r', '-mx0'])
-    const sizeMB = fs.existsSync(outputRarPath) ? (fs.statSync(outputRarPath).size / (1024 * 1024)).toFixed(1) : 0
-    console.log(`[BATCH][RECOMPRESS] OK → ${outputName}.rar (${sizeMB} MB)`)
-    return { outputPath: outputRarPath, ext: 'rar' }
-  } catch (e) {
-    const msg = String(e?.message || e)
-    if (!/no implementado|not implemented/i.test(msg)) throw e
-    console.warn('[BATCH][RECOMPRESS][WARN] RAR no soportado por 7z en este host, fallback a ZIP')
-  }
+  const gb = folderBytes / (1024 ** 3)
+  const timeoutMs = Math.max(ARCHIVE_COMPRESS_MIN_TIMEOUT_MS, Math.ceil(gb) * ARCHIVE_COMPRESS_MS_PER_GB)
+  const startedAt = Date.now()
+  await run7z(
+    ['a', `-t${ARCHIVE_EXT}`, outputPath, path.join(folderPath, '*'), '-r', '-mx3', `-mmt=${ARCHIVE_COMPRESS_THREADS}`],
+    { timeoutMs },
+  )
 
-  await run7z(['a', '-tzip', outputZipPath, path.join(folderPath, '*'), '-r', '-mx0'])
-  const sizeMB = fs.existsSync(outputZipPath) ? (fs.statSync(outputZipPath).size / (1024 * 1024)).toFixed(1) : 0
-  console.log(`[BATCH][RECOMPRESS] OK → ${outputName}.zip (${sizeMB} MB)`)
-  return { outputPath: outputZipPath, ext: 'zip' }
+  const outMB = fs.statSync(outputPath).size / (1024 * 1024)
+  const inMB = folderBytes / (1024 * 1024)
+  const secs = Math.round((Date.now() - startedAt) / 1000)
+  console.log(`[BATCH][RECOMPRESS] OK → ${path.basename(outputPath)} (${outMB.toFixed(1)} MB de ${inMB.toFixed(1)} MB extraídos, ${secs} s)`)
+  return { outputPath, ext: ARCHIVE_EXT }
 }
 
 function getFileHash(filePath) {
@@ -1217,11 +1230,15 @@ async function prepareItemForMain(item, updateItem, artifacts = {}) {
   await updateItem({ error: 'Procesando imágenes...' })
   const imagePaths = await extractImages(folderPath, slug)
 
-  await updateItem({ error: 'Comprimiendo archivo final...', mainStatus: 'COMPRESSING' })
-  const packed = await recompressFolder(folderPath, slug)
-  const stagingArchivePath = packed.outputPath
+  // El marcador va antes de comprimir: si el backend se reinicia a mitad (tarda minutos),
+  // el arranque borra el .7z a medio hacer.
+  const stagingArchivePath = stagingArchivePathFor(slug)
   artifacts.stagingPath = stagingArchivePath
   writeInProgressMarker(item.id, artifacts)
+  const folderBytes = folderSizeBytes(folderPath)
+  const estimatedMin = Math.max(1, Math.ceil(folderBytes / (1024 ** 3)))
+  await updateItem({ error: `Comprimiendo archivo final (7z, ~${estimatedMin} min)...`, mainStatus: 'COMPRESSING' })
+  const packed = await recompressFolder(folderPath, stagingArchivePath, folderBytes)
   const archiveSizeBytes = fs.statSync(stagingArchivePath).size
 
   // -- SMART AUTO DISTRIBUTION: reasignación en bloque con validación de backups --
