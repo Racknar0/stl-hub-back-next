@@ -29,6 +29,7 @@ import shortLinksRoutes from './shortLinks/index.js';
 import adminShortLinksRoutes from './shortLinks/admin.js';
 import heroBannersRoutes, { publicHeroBannersRouter } from './heroBanners/index.js';
 import adminLicensesRoutes, { publicLicensesRouter } from './licenses/index.js';
+import reviewsRoutes, { adminReviewsRouter } from './reviews/index.js';
 import { requireAuth, requireAdmin, requireAuthOrQueryToken } from '../middlewares/auth.js';
 import {
   createGiftCode, listGiftCodes, updateGiftCode, deleteGiftCode,
@@ -74,6 +75,9 @@ router.use('/reels', reelsRoutes);
 // Servidor de licencias de programas de escritorio: público para los programas, admin para el dashboard
 router.use('/v1/licenses', publicLicensesRouter);
 router.use('/admin/licenses', adminLicensesRoutes);
+// Opiniones sobre la web: público/usuario en /reviews, moderación en /admin/reviews
+router.use('/reviews', reviewsRoutes);
+router.use('/admin/reviews', adminReviewsRouter);
 router.use('/', telegramRoutes);
 
 // ─── Gift Codes ────────────────────────────────────────

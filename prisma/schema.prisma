@@ -48,8 +48,8 @@ model user {
   clickFbclid         String?
   clickTtclid         String?
   clickMsclkid        String?
-  utmLandingUrl       String?   @db.VarChar(512)
-  utmReferrer         String?   @db.VarChar(512)
+  utmLandingUrl       String?            @db.VarChar(512)
+  utmReferrer         String?            @db.VarChar(512)
   utmFirstAt          DateTime?
   utmLastAt           DateTime?
 
@@ -67,6 +67,9 @@ model user {
 
   brokenReports     BrokenReport[]
   userNotifications UserNotification[]
+
+  // Opinión sobre la web (una por usuario)
+  siteReview SiteReview?
 
   // IP y país de tracking (registro + último login)
   registerIp       String? @db.VarChar(45)
@@ -218,13 +221,13 @@ enum AssetStatus {
 }
 
 model asset {
-  id          Int     @id @default(autoincrement())
-  title       String
-  titleEn     String? // nombre en inglés
-  slug        String  @unique
-  description String? @db.LongText
+  id            Int     @id @default(autoincrement())
+  title         String
+  titleEn       String? // nombre en inglés
+  slug          String  @unique
+  description   String? @db.LongText
   descriptionEn String? @db.LongText // descripción en inglés
-  isPremium   Boolean @default(false)
+  isPremium     Boolean @default(false)
 
   // Enlace de MEGA (placeholder, se modificará más adelante)
   megaLink String?
@@ -256,14 +259,14 @@ model asset {
   megaLinkAlive     Boolean? // null = nunca se chequeó, true/false = último resultado
   megaLinkCheckedAt DateTime? // fecha del último chequeo
 
-  createdAt DateTime       @default(now())
+  createdAt     DateTime         @default(now())
   // Importante SEO: un trigger SQL evita que este campo cambie en updates operativos/masivos.
   // Solo se toca en cambios reales de contenido del asset.
-  updatedAt DateTime       @updatedAt
+  updatedAt     DateTime         @updatedAt
   // Réplicas en cuentas backup
-  replicas  AssetReplica[]
+  replicas      AssetReplica[]
   // Hashes por imagen para comparación de similitud
-  imageHashes AssetImageHash[]
+  imageHashes   AssetImageHash[]
   // Freebies diarios (tabla separada para no tocar asset en el cron)
   dailyFreebies dailyFreebie[]
 
@@ -279,7 +282,7 @@ model asset {
 model dailyFreebie {
   id        Int      @id @default(autoincrement())
   assetId   Int
-  date      String   // Formato "YYYY-MM-DD"
+  date      String // Formato "YYYY-MM-DD"
   createdAt DateTime @default(now())
 
   asset asset @relation(fields: [assetId], references: [id], onDelete: Cascade)
@@ -296,9 +299,9 @@ model AssetImageHash {
   asset       asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   imagePath   String
   imageIndex  Int?
-  hashBits    String   // aHash binario (64 bits)
-  hashHex     String   // aHash hexadecimal (16 chars)
-  hashPrefix  String?  // prefijo para bucket/index rápido
+  hashBits    String // aHash binario (64 bits)
+  hashHex     String // aHash hexadecimal (16 chars)
+  hashPrefix  String? // prefijo para bucket/index rápido
   hashAlgo    String   @default("ahash-v1")
   hashVersion Int      @default(1)
   imageWidth  Int?
@@ -480,32 +483,32 @@ model Notification {
 
 // Modelo de pagos multi-pasarela (PayPal, Stripe, MercadoPago, etc)
 model Payment {
-  id                Int      @id @default(autoincrement())
-  user              user     @relation(fields: [userId], references: [id])
-  userId            Int
+  id                  Int                @id @default(autoincrement())
+  user                user               @relation(fields: [userId], references: [id])
+  userId              Int
   marketingCampaignId Int?
-  marketingCampaign MarketingCampaign? @relation(fields: [marketingCampaignId], references: [id], onDelete: SetNull)
-  planType          String // Ej: "30d", "90d", etc.
-  provider          String // Ej: "paypal", "stripe", "mercadopago"
-  externalOrderId   String // ID de la orden en la pasarela
-  externalCaptureId String? // ID de la captura en la pasarela (si aplica)
-  status            String // 'pending', 'completed', 'failed', etc.
-  amount            Float
-  currency          String   @default("USD")
-  utmSource         String?
-  utmMedium         String?
-  utmCampaign       String?
-  utmContent        String?
-  utmTerm           String?
-  clickGclid        String?
-  clickFbclid       String?
-  clickTtclid       String?
-  clickMsclkid      String?
-  trackingLandingUrl String? @db.VarChar(512)
-  trackingReferrer   String? @db.VarChar(512)
-  rawResponse       Json? // Respuesta completa de la pasarela
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  marketingCampaign   MarketingCampaign? @relation(fields: [marketingCampaignId], references: [id], onDelete: SetNull)
+  planType            String // Ej: "30d", "90d", etc.
+  provider            String // Ej: "paypal", "stripe", "mercadopago"
+  externalOrderId     String // ID de la orden en la pasarela
+  externalCaptureId   String? // ID de la captura en la pasarela (si aplica)
+  status              String // 'pending', 'completed', 'failed', etc.
+  amount              Float
+  currency            String             @default("USD")
+  utmSource           String?
+  utmMedium           String?
+  utmCampaign         String?
+  utmContent          String?
+  utmTerm             String?
+  clickGclid          String?
+  clickFbclid         String?
+  clickTtclid         String?
+  clickMsclkid        String?
+  trackingLandingUrl  String?            @db.VarChar(512)
+  trackingReferrer    String?            @db.VarChar(512)
+  rawResponse         Json? // Respuesta completa de la pasarela
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
 
   @@index([marketingCampaignId])
   @@index([provider])
@@ -593,16 +596,16 @@ model PaymentWebhookLog {
 
 // Campañas publicitarias definidas desde el dashboard admin
 model MarketingCampaign {
-  id          Int      @id @default(autoincrement())
+  id          Int     @id @default(autoincrement())
   name        String
-  slug        String   @unique
+  slug        String  @unique
   source      String?
   medium      String?
   content     String?
   term        String?
   landingPath String?
-  notes       String?  @db.Text
-  isActive    Boolean  @default(true)
+  notes       String? @db.Text
+  isActive    Boolean @default(true)
 
   users    user[]
   payments Payment[]
@@ -618,25 +621,25 @@ model MarketingCampaign {
 
 // Visitas anonimas/persistidas por campaña para atribucion top-of-funnel
 model MarketingVisit {
-  id                  Int      @id @default(autoincrement())
+  id                  Int                @id @default(autoincrement())
   marketingCampaignId Int?
   marketingCampaign   MarketingCampaign? @relation(fields: [marketingCampaignId], references: [id], onDelete: SetNull)
 
-  anonId              String?
-  sessionId           String?
-  pagePath            String?  @db.VarChar(255)
-  utmSource           String?
-  utmMedium           String?
-  utmCampaign         String?
-  utmContent          String?
-  utmTerm             String?
-  clickGclid          String?
-  clickFbclid         String?
-  clickTtclid         String?
-  clickMsclkid        String?
-  trackingLandingUrl  String?  @db.VarChar(512)
-  trackingReferrer    String?  @db.VarChar(512)
-  createdAt           DateTime @default(now())
+  anonId             String?
+  sessionId          String?
+  pagePath           String?  @db.VarChar(255)
+  utmSource          String?
+  utmMedium          String?
+  utmCampaign        String?
+  utmContent         String?
+  utmTerm            String?
+  clickGclid         String?
+  clickFbclid        String?
+  clickTtclid        String?
+  clickMsclkid       String?
+  trackingLandingUrl String?  @db.VarChar(512)
+  trackingReferrer   String?  @db.VarChar(512)
+  createdAt          DateTime @default(now())
 
   @@index([marketingCampaignId])
   @@index([createdAt(sort: Desc)])
@@ -667,9 +670,9 @@ model SearchEvent {
   userId Int?
   user   user? @relation(fields: [userId], references: [id], onDelete: SetNull)
 
-  queryOriginal      String @db.VarChar(512)
-  queryNorm          String @db.VarChar(191)
-  queryNormNoAccents String @db.VarChar(191)
+  queryOriginal      String  @db.VarChar(512)
+  queryNorm          String  @db.VarChar(191)
+  queryNormNoAccents String  @db.VarChar(191)
   resultCount        Int
   isAiSearch         Boolean @default(false)
 
@@ -723,43 +726,43 @@ model BatchImport {
 
   items BatchImportItem[]
 
-  createdAt  DateTime          @default(now())
-  updatedAt  DateTime          @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@map("batchimport")
 }
 
 model BatchImportItem {
-  id            Int                  @id @default(autoincrement())
-  batchId       Int
-  batch         BatchImport          @relation(fields: [batchId], references: [id], onDelete: Cascade)
-  
-  folderName    String               
-  targetAccount Int?                 
-  status        BatchImportStatus    @default(PENDING)
-  error         String?              @db.Text
-  
-  pesoMB        Float                @default(0)
+  id      Int         @id @default(autoincrement())
+  batchId Int
+  batch   BatchImport @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  folderName    String
+  targetAccount Int?
+  status        BatchImportStatus @default(PENDING)
+  error         String?           @db.Text
+
+  pesoMB        Float   @default(0)
   title         String?
   titleEn       String?
-  description   String?              @db.Text
-  descriptionEn String?              @db.Text
-  images        Json?                
-  archiveFile   String?              
-  
-  tags          Json?                
-  categories    Json?                
-  profiles      String?              
-  similarityApproved Boolean         @default(false)
-  similarResults     Json?
-  createdAssetId Int?                
+  description   String? @db.Text
+  descriptionEn String? @db.Text
+  images        Json?
+  archiveFile   String?
 
-  mainStatus    String?              @default("PENDING")
-  backupStatus  String?              @default("PENDING")
-  mainProgress  Float?               @default(0)
-  
-  createdAt     DateTime             @default(now())
-  updatedAt     DateTime             @updatedAt
+  tags               Json?
+  categories         Json?
+  profiles           String?
+  similarityApproved Boolean @default(false)
+  similarResults     Json?
+  createdAssetId     Int?
+
+  mainStatus   String? @default("PENDING")
+  backupStatus String? @default("PENDING")
+  mainProgress Float?  @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([batchId])
   @@index([status])
@@ -789,12 +792,12 @@ model SystemSetting {
 model GiftCode {
   id        Int       @id @default(autoincrement())
   code      String    @unique
-  days      Int                        // days of premium granted
-  maxUses   Int       @default(1)      // 1 = single use, N = campaign
+  days      Int // days of premium granted
+  maxUses   Int       @default(1) // 1 = single use, N = campaign
   usedCount Int       @default(0)
-  expiresAt DateTime?                  // null = never expires
+  expiresAt DateTime? // null = never expires
   isActive  Boolean   @default(true)
-  note      String?   @db.Text         // admin notes (e.g. "TikTok campaign")
+  note      String?   @db.Text // admin notes (e.g. "TikTok campaign")
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
@@ -807,13 +810,13 @@ model GiftRedemption {
   id         Int      @id @default(autoincrement())
   codeId     Int
   userId     Int
-  daysGiven  Int                        // days granted at redemption time
+  daysGiven  Int // days granted at redemption time
   redeemedAt DateTime @default(now())
 
   code GiftCode @relation(fields: [codeId], references: [id], onDelete: Cascade)
   user user     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([codeId, userId])            // one redemption per user per code
+  @@unique([codeId, userId]) // one redemption per user per code
   @@index([userId])
   @@map("giftredemption")
 }
@@ -826,21 +829,21 @@ enum PinterestPinStatus {
 }
 
 model PinterestPinQueue {
-  id          Int                @id @default(autoincrement())
-  assetId     Int                // Ref to asset (no strict FK to avoid cascade issues if asset is deleted, though could be FK)
-  scheduledAt DateTime           // Scheduled publish time
-  status      PinterestPinStatus @default(PENDING)
-  boardId     String             // Destination Pinterest Board ID
-  title       String?            // Custom or generated title
-  description String?            @db.Text
-  link        String?            // Target URL (e.g., Free pass or asset page)
-  filters     Json?              // e.g. { "flip": true, "zoom": 1.05 }
-  errorMessage String?           @db.Text // Error details if FAILED
-  publishedPinId String?         // ID of the pin in Pinterest once published
-  origin      String?            @db.VarChar(20) // manual | trend | season | classic | explore (piloto automático)
-  
-  createdAt   DateTime           @default(now())
-  updatedAt   DateTime           @updatedAt
+  id             Int                @id @default(autoincrement())
+  assetId        Int // Ref to asset (no strict FK to avoid cascade issues if asset is deleted, though could be FK)
+  scheduledAt    DateTime // Scheduled publish time
+  status         PinterestPinStatus @default(PENDING)
+  boardId        String // Destination Pinterest Board ID
+  title          String? // Custom or generated title
+  description    String?            @db.Text
+  link           String? // Target URL (e.g., Free pass or asset page)
+  filters        Json? // e.g. { "flip": true, "zoom": 1.05 }
+  errorMessage   String?            @db.Text // Error details if FAILED
+  publishedPinId String? // ID of the pin in Pinterest once published
+  origin         String?            @db.VarChar(20) // manual | trend | season | classic | explore (piloto automático)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([status])
   @@index([scheduledAt])
@@ -852,7 +855,7 @@ model PinterestAssetReview {
   assetId    Int      @id
   imagePath  String   @db.VarChar(512)
   verdict    String   @db.VarChar(12) // OK | REJECTED
-  scores     Json?    // { sexual, violence, realWeapons, hate } => none | mild | strong
+  scores     Json? // { sexual, violence, realWeapons, hate } => none | mild | strong
   reason     String?  @db.VarChar(255)
   reviewedAt DateTime @default(now())
 
@@ -884,52 +887,52 @@ enum ReelPostStatus {
 }
 
 model ReelPost {
-  id            Int            @id @default(autoincrement())
-  videoPath     String         @db.VarChar(512) // relativo a /uploads (reels/...)
-  originalName  String?        @db.VarChar(255)
-  fileSizeB     Int?
-  durationSec   Float?
-  width         Int?
-  height        Int?
-  assetId       Int?           // asset de STL HUB relacionado (opcional, sin FK)
-  assetTitle    String?        @db.VarChar(255)
-  link          String?        @db.VarChar(512) // link base al asset (los UTM se añaden al publicar)
-  subject       String?        @db.VarChar(255) // qué detectó la IA en el video
-  title         String?        @db.VarChar(150) // título para YouTube Shorts
-  youtubeDescription String?   @db.Text
-  youtubeChannels Json?         // ids de los canales de YouTube donde se publica (null = todos los conectados)
-  youtubeVariants Json?         // { [channelId]: { title, description } } para los canales que no son el principal
-  caption       String?        @db.Text         // texto para Instagram (CTA: link en la bio)
-  instagramAccounts Json?      // ids de las cuentas de Instagram donde se publica (null = todas las vinculadas)
-  instagramVariants Json?      // { [igUserId]: { caption } } para las cuentas que no son la principal
-  facebookCaption String?      @db.Text         // texto para Facebook (el link va en el primer comentario)
-  facebookPages Json?          // ids de las Páginas de Facebook donde se publica (null = todas las asignadas)
-  facebookVariants Json?       // { [pageId]: { caption } } para las Páginas que no son la principal
-  tiktokCaption String?        @db.Text         // texto para TikTok (vacío = se usa el de Instagram)
-  pinterestTitle       String? @db.VarChar(100) // título del pin de video (IA, en inglés, SEO de Pinterest)
-  pinterestDescription String? @db.Text         // descripción del pin de video (IA, en inglés, máx. 500)
-  tiktokOptions Json?          // { privacyLevel, allowComment, allowDuet, allowStitch, commercial, yourBrand, brandedContent }
-  onScreenText  String?        @db.VarChar(120) // sugerencia de texto sobre el video (IA)
-  hashtags      Json?          // ["tag", ...] sin #
-  platforms     Json           // ["instagram", "facebook", "youtube", "tiktok"]
-  language      String         @default("es") @db.VarChar(5)
-  aiGenerated   Boolean        @default(false)
-  aiStatus      String         @default("PROCESSING") @db.VarChar(12) // NONE | PROCESSING | READY | ERROR
-  aiError       String?        @db.Text
-  approved      Boolean        @default(false) // solo se publica lo aprobado
-  scheduledAt   DateTime?      // null = en la bandeja, sin día asignado
-  status        ReelPostStatus @default(PENDING)
-  publishing    Boolean        @default(false) // true mientras se está subiendo a las redes
-  overdueNotifiedAt DateTime?  // último aviso de "llegó su hora sin aprobar"
-  simulated     Boolean        @default(true) // true si se publicó en modo simulación
-  results       Json?          // { instagram: { id, url, publishedAt }, ... }
-  errorMessage  String?        @db.Text
-  publishedAt   DateTime?
-  horizontalUsesCount Int       @default(0)
+  id                   Int            @id @default(autoincrement())
+  videoPath            String         @db.VarChar(512) // relativo a /uploads (reels/...)
+  originalName         String?        @db.VarChar(255)
+  fileSizeB            Int?
+  durationSec          Float?
+  width                Int?
+  height               Int?
+  assetId              Int? // asset de STL HUB relacionado (opcional, sin FK)
+  assetTitle           String?        @db.VarChar(255)
+  link                 String?        @db.VarChar(512) // link base al asset (los UTM se añaden al publicar)
+  subject              String?        @db.VarChar(255) // qué detectó la IA en el video
+  title                String?        @db.VarChar(150) // título para YouTube Shorts
+  youtubeDescription   String?        @db.Text
+  youtubeChannels      Json? // ids de los canales de YouTube donde se publica (null = todos los conectados)
+  youtubeVariants      Json? // { [channelId]: { title, description } } para los canales que no son el principal
+  caption              String?        @db.Text // texto para Instagram (CTA: link en la bio)
+  instagramAccounts    Json? // ids de las cuentas de Instagram donde se publica (null = todas las vinculadas)
+  instagramVariants    Json? // { [igUserId]: { caption } } para las cuentas que no son la principal
+  facebookCaption      String?        @db.Text // texto para Facebook (el link va en el primer comentario)
+  facebookPages        Json? // ids de las Páginas de Facebook donde se publica (null = todas las asignadas)
+  facebookVariants     Json? // { [pageId]: { caption } } para las Páginas que no son la principal
+  tiktokCaption        String?        @db.Text // texto para TikTok (vacío = se usa el de Instagram)
+  pinterestTitle       String?        @db.VarChar(100) // título del pin de video (IA, en inglés, SEO de Pinterest)
+  pinterestDescription String?        @db.Text // descripción del pin de video (IA, en inglés, máx. 500)
+  tiktokOptions        Json? // { privacyLevel, allowComment, allowDuet, allowStitch, commercial, yourBrand, brandedContent }
+  onScreenText         String?        @db.VarChar(120) // sugerencia de texto sobre el video (IA)
+  hashtags             Json? // ["tag", ...] sin #
+  platforms            Json // ["instagram", "facebook", "youtube", "tiktok"]
+  language             String         @default("es") @db.VarChar(5)
+  aiGenerated          Boolean        @default(false)
+  aiStatus             String         @default("PROCESSING") @db.VarChar(12) // NONE | PROCESSING | READY | ERROR
+  aiError              String?        @db.Text
+  approved             Boolean        @default(false) // solo se publica lo aprobado
+  scheduledAt          DateTime? // null = en la bandeja, sin día asignado
+  status               ReelPostStatus @default(PENDING)
+  publishing           Boolean        @default(false) // true mientras se está subiendo a las redes
+  overdueNotifiedAt    DateTime? // último aviso de "llegó su hora sin aprobar"
+  simulated            Boolean        @default(true) // true si se publicó en modo simulación
+  results              Json? // { instagram: { id, url, publishedAt }, ... }
+  errorMessage         String?        @db.Text
+  publishedAt          DateTime?
+  horizontalUsesCount  Int            @default(0)
   lastUsedInHorizontal DateTime?
 
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([status])
   @@index([scheduledAt])
@@ -968,12 +971,12 @@ model HorizontalCompilation {
 model ShortLink {
   id          Int       @id @default(autoincrement())
   code        String    @unique @db.VarChar(32) // código de la URL corta (aleatorio, o fijo como "hoy")
-  targetUrl   String    @db.Text                // URL de destino completa (con UTM)
-  source      String    @db.VarChar(40)         // dónde se publica: youtube_horizontal, facebook, youtube_short, threads, instagram_bio
-  label       String?   @db.VarChar(255)        // descripción legible (modelo, canal, página…)
-  refType     String?   @db.VarChar(30)         // a qué pertenece: reel, horizontal
-  refId       Int?                              // id del reel o de la recopilación
-  clicks      Int       @default(0)             // clics de personas (sin bots)
+  targetUrl   String    @db.Text // URL de destino completa (con UTM)
+  source      String    @db.VarChar(40) // dónde se publica: youtube_horizontal, facebook, youtube_short, threads, instagram_bio
+  label       String?   @db.VarChar(255) // descripción legible (modelo, canal, página…)
+  refType     String?   @db.VarChar(30) // a qué pertenece: reel, horizontal
+  refId       Int? // id del reel o de la recopilación
+  clicks      Int       @default(0) // clics de personas (sin bots)
   lastClickAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -986,7 +989,7 @@ model ShortLink {
 /// Cada clic de una persona en un enlace corto (para la gráfica de clics por día)
 model ShortLinkClick {
   id          Int      @id @default(autoincrement())
-  shortLinkId Int                      // enlace corto (sin FK, como el resto de métricas)
+  shortLinkId Int // enlace corto (sin FK, como el resto de métricas)
   source      String   @db.VarChar(40) // red del enlace, copiada para agrupar sin join
   createdAt   DateTime @default(now())
 
@@ -996,29 +999,29 @@ model ShortLinkClick {
 }
 
 model TelegramChannel {
-  id              Int       @id @default(autoincrement())
-  name            String    @unique
-  label           String?
-  avatarUrl       String?
-  addedAt         DateTime  @default(now())
-  lastCheckedAt   DateTime?
-  
+  id            Int       @id @default(autoincrement())
+  name          String    @unique
+  label         String?
+  avatarUrl     String?
+  addedAt       DateTime  @default(now())
+  lastCheckedAt DateTime?
+
   // Estado del último escaneo rápido (antes en lastScanResult)
-  newFiles        Int       @default(0)
-  totalSize       String    @default("0 B")
-  totalSizeBytes  BigInt    @default(0) @db.UnsignedBigInt
-  maxId           Int       @default(0)
-  hasError        Boolean   @default(false)
-  errorMessage    String?   @db.Text
-  
+  newFiles       Int     @default(0)
+  totalSize      String  @default("0 B")
+  totalSizeBytes BigInt  @default(0) @db.UnsignedBigInt
+  maxId          Int     @default(0)
+  hasError       Boolean @default(false)
+  errorMessage   String? @db.Text
+
   // Información de la última descarga realizada (antes en last_downloads.json)
-  lastMsgId       Int?
-  lastFileName    String?   @db.VarChar(512)
+  lastMsgId        Int?
+  lastFileName     String?   @db.VarChar(512)
   lastDownloadedAt DateTime?
   lastDownloadUrl  String?   @db.VarChar(512)
 
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@map("telegramchannel")
 }
@@ -1043,7 +1046,7 @@ model TelegramDownloadJob {
 model userDailyRolls {
   id        Int      @id @default(autoincrement())
   userId    Int
-  date      String   // Formato "YYYY-MM-DD"
+  date      String // Formato "YYYY-MM-DD"
   rollsUsed Int      @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1062,14 +1065,13 @@ model UserNotification {
   title     String
   body      String?  @db.LongText
   isRead    Boolean  @default(false)
-  assetId   Int?     // Opcional: enlace al asset restaurado
+  assetId   Int? // Opcional: enlace al asset restaurado
   createdAt DateTime @default(now())
 
   @@index([userId])
   @@index([createdAt(sort: Desc)])
   @@map("usernotification")
 }
-
 
 // ─────────────────────────────────────────────────────────────
 // Email marketing: estado del contacto, envíos y eventos.
@@ -1102,18 +1104,18 @@ model EmailContact {
   stage EmailStage @default(NEW)
 
   // Señales del proveedor (Brevo)
-  lastSentAt    DateTime?
-  lastOpenAt    DateTime?
-  lastClickAt   DateTime?
-  lastBounceAt  DateTime?
+  lastSentAt   DateTime?
+  lastOpenAt   DateTime?
+  lastClickAt  DateTime?
+  lastBounceAt DateTime?
 
   // Reenganche
   reengagedAt   DateTime? // cuándo se le envió el correo de reenganche
   reengagedOpen Boolean   @default(false) // si reaccionó a él
 
   // Salida del marketing
-  optedOutAt     DateTime?
-  optOutReason   EmailOptOutReason?
+  optedOutAt   DateTime?
+  optOutReason EmailOptOutReason?
 
   // Recalculado por el job de audiencias
   stageUpdatedAt DateTime?
@@ -1150,21 +1152,21 @@ enum EmailSendStatus {
 
 // Qué se le envió a quién. Evita duplicados y permite medir por correo.
 model EmailLog {
-  id        Int       @id @default(autoincrement())
+  id        Int          @id @default(autoincrement())
   contactId Int
   contact   EmailContact @relation(fields: [contactId], references: [id], onDelete: Cascade)
 
-  kind      EmailKind
-  subject   String?   @db.VarChar(255)
+  kind       EmailKind
+  subject    String?   @db.VarChar(255)
   templateId Int? // id de la plantilla en Brevo
-  messageId String?   @db.VarChar(255) // id del mensaje devuelto por Brevo
+  messageId  String?   @db.VarChar(255) // id del mensaje devuelto por Brevo
 
   // Estado en la cola de envío del motor propio
   status       EmailSendStatus @default(QUEUED)
   scheduledFor DateTime? // hora a la que debe salir (ya ajustada a la zona del usuario)
-  attempts     Int       @default(0) // intentos de envío fallidos o realizados
-  lastError    String?   @db.VarChar(255) // último error de envío
-  dedupeKey    String?   @unique @db.VarChar(120) // evita repetir un paso del embudo (p. ej. WELCOME_2:15)
+  attempts     Int             @default(0) // intentos de envío fallidos o realizados
+  lastError    String?         @db.VarChar(255) // último error de envío
+  dedupeKey    String?         @unique @db.VarChar(120) // evita repetir un paso del embudo (p. ej. WELCOME_2:15)
 
   sentAt      DateTime? // se rellena al enviar; en cola es null
   deliveredAt DateTime?
@@ -1181,13 +1183,13 @@ model EmailLog {
 
 // Eventos crudos del webhook de Brevo. Sirve de auditoría y para reprocesar.
 model EmailEvent {
-  id        Int      @id @default(autoincrement())
-  event     String   @db.VarChar(40) // delivered, opened, click, hard_bounce, unsubscribe...
-  email     String   @db.VarChar(191)
-  messageId String?  @db.VarChar(255)
-  payload   String?  @db.LongText
+  id         Int      @id @default(autoincrement())
+  event      String   @db.VarChar(40) // delivered, opened, click, hard_bounce, unsubscribe...
+  email      String   @db.VarChar(191)
+  messageId  String?  @db.VarChar(255)
+  payload    String?  @db.LongText
   occurredAt DateTime
-  createdAt DateTime @default(now())
+  createdAt  DateTime @default(now())
 
   @@index([email])
   @@index([event])
@@ -1199,8 +1201,8 @@ model EmailEvent {
 model LicenseProduct {
   id        Int             @id @default(autoincrement())
   code      String          @unique @db.VarChar(64) // product_id que manda el programa (minúsculas, números y guiones)
-  name      String          @db.VarChar(120)        // nombre visible en el dashboard
-  active    Boolean         @default(true)          // inactivo: no se activan ni validan sus seriales
+  name      String          @db.VarChar(120) // nombre visible en el dashboard
+  active    Boolean         @default(true) // inactivo: no se activan ni validan sus seriales
   createdAt DateTime        @default(now())
   updatedAt DateTime        @updatedAt
   serials   LicenseSerial[]
@@ -1213,14 +1215,14 @@ model LicenseSerial {
   id              Int            @id @default(autoincrement())
   productId       Int
   product         LicenseProduct @relation(fields: [productId], references: [id], onDelete: Restrict)
-  serialHash      String         @unique @db.Char(64)     // SHA-256 (hex) del serial normalizado
-  masked          String         @db.VarChar(40)          // versión enmascarada para el dashboard (solo los últimos 4 caracteres)
-  note            String?        @db.VarChar(255)         // cliente, pedido o comentario interno
-  installationId  String?        @db.VarChar(128)         // instalación a la que quedó asociado (null = libre)
+  serialHash      String         @unique @db.Char(64) // SHA-256 (hex) del serial normalizado
+  masked          String         @db.VarChar(40) // versión enmascarada para el dashboard (solo los últimos 4 caracteres)
+  note            String?        @db.VarChar(255) // cliente, pedido o comentario interno
+  installationId  String?        @db.VarChar(128) // instalación a la que quedó asociado (null = libre)
   activatedAt     DateTime?
-  lastValidatedAt DateTime?                               // última activación o validación con conexión
-  resetCount      Int            @default(0)              // veces que se liberó la activación
-  revokedAt       DateTime?                               // revocado: no activa ni valida
+  lastValidatedAt DateTime? // última activación o validación con conexión
+  resetCount      Int            @default(0) // veces que se liberó la activación
+  revokedAt       DateTime? // revocado: no activa ni valida
   revokeReason    String?        @db.VarChar(255)
   createdAt       DateTime       @default(now())
   updatedAt       DateTime       @updatedAt
@@ -1248,4 +1250,32 @@ model SocialMetricSnapshot {
   @@index([takenAt])
   @@index([postId, network, account, takenAt])
   @@map("socialmetricsnapshot")
+}
+
+// Estado de moderación de una opinión sobre la web
+enum SiteReviewStatus {
+  PENDING // esperando aprobación del admin
+  APPROVED // visible en "Lo que dicen los makers" (si tiene 4-5 estrellas y consentimiento)
+  REJECTED // descartada; no se publica
+}
+
+/// Opinión de un usuario sobre STL Hub. Se pide en un modal tras sus primeras descargas y pasa por aprobación.
+model SiteReview {
+  id          Int              @id @default(autoincrement())
+  userId      Int              @unique // una opinión por usuario
+  user        user             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rating      Int // estrellas 1-5; las de 1-3 quedan como feedback privado
+  text        String?          @db.VarChar(500)
+  displayName String           @db.VarChar(60) // nombre a mostrar, p. ej. "Laura M."
+  consent     Boolean          @default(false) // aceptó que se publique en la web
+  language    String           @default("es") @db.VarChar(5)
+  downloads   Int              @default(0) // descargas que tenía al opinar (se muestra como "Maker verificado")
+  status      SiteReviewStatus @default(PENDING)
+  featured    Boolean          @default(false) // destacada: sale primero en la portada
+  reviewedAt  DateTime? // cuándo la aprobó o rechazó el admin
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  @@index([status, featured, createdAt(sort: Desc)])
+  @@map("sitereview")
 }
