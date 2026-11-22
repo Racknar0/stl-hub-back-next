@@ -490,12 +490,15 @@ export async function runAutopilot({ dryRun = false, trigger = 'manual' } = {}) 
 
     if (!dryRun) {
       await writeSetting(STATE_KEY, { lastRunDay: dayKey(new Date()), lastRunAt: new Date().toISOString(), lastRunStatus: status }, 'Estado del piloto automático de Pinterest');
-      const byType = TYPES.map(t => `${t}: ${summary.picks.filter(p => p.type === t).length}`).join(' · ');
-      await notify({
-        title: `Piloto automático: ${summary.scheduled} pines programados para ${key}`,
-        body: `Programados: ${summary.scheduled} de ${needed} necesarios (${byType}).\nDescartados por imagen: ${summary.rejected.length}.\nOmitidos: ${summary.skipped.length}.${summary.boardsCreated.length ? `\nTableros creados: ${summary.boardsCreated.join(', ')}` : ''}`,
-        error: status !== 'OK',
-      });
+      // Solo se avisa cuando algo sale mal (faltaron pines); si se programaron todos, no llega notificación
+      if (status !== 'OK') {
+        const byType = TYPES.map(t => `${t}: ${summary.picks.filter(p => p.type === t).length}`).join(' · ');
+        await notify({
+          title: `Piloto automático: solo ${summary.scheduled} de ${needed} pines programados para ${key}`,
+          body: `Programados: ${summary.scheduled} de ${needed} necesarios (${byType}).\nDescartados por imagen: ${summary.rejected.length}.\nOmitidos: ${summary.skipped.length}.${summary.boardsCreated.length ? `\nTableros creados: ${summary.boardsCreated.join(', ')}` : ''}`,
+          error: true,
+        });
+      }
       if (!pinterestOk) {
         await sendAlertEmail('⚠️ Pinterest desconectado - el piloto automático no podrá publicar',
           'La conexión con Pinterest caducó o falló. Los pines se programaron, pero fallarán al publicarse hasta que reconectes la cuenta desde el calendario del dashboard (stlgratis.com/dashboard/pinterest).');
