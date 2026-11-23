@@ -818,12 +818,18 @@ export async function publishReel(post) {
         links: [{ label: 'Reel de Facebook', url: results.facebook.url }, { label: 'Link a comentar', url: platformLink(post.link, 'facebook', post.id) }],
       });
     }
+    // Fecha del reel = la de su primera red publicada: un reintento días después (p. ej. por una red que falló) no la mueve
+    const firstAt = Object.values(results)
+      .filter(r => r?.id && !r.simulated && r.publishedAt)
+      .map(r => new Date(r.publishedAt))
+      .filter(d => !Number.isNaN(+d))
+      .sort((a, b) => a - b)[0];
     return await prisma.reelPost.update({
       where: { id: post.id },
       data: {
         results, publishing: false, simulated: false, approved: true,
         ...(allDone
-          ? { status: 'PUBLISHED', publishedAt: new Date(), errorMessage: null }
+          ? { status: 'PUBLISHED', publishedAt: post.publishedAt || firstAt || new Date(), errorMessage: null }
           : { status: 'FAILED', errorMessage: errors.join(' | ') }),
       },
     });
