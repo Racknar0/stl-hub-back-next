@@ -288,10 +288,22 @@ export async function getMetricsHistory({ from, to }) {
     for (const p of pts) for (const n of Object.values(p.byNetwork)) for (const k of METRIC_KEYS) out[k] += n[k];
     return out;
   };
+  const byNetworkOf = (pts) => {
+    const out = {};
+    for (const p of pts) {
+      for (const [n, v] of Object.entries(p.byNetwork)) {
+        const acc = (out[n] ||= Object.fromEntries(METRIC_KEYS.map(k => [k, 0])));
+        for (const k of METRIC_KEYS) acc[k] += v[k];
+      }
+    }
+    return out;
+  };
   return {
     from: start.toISOString(), to: end.toISOString(),
     points: inRange.map(p => ({ t: new Date(p.t).toISOString(), byNetwork: p.byNetwork })),
     previousTotals: previous.length ? totalOf(previous) : null,
+    // Lo mismo separado por red, para que el panel pueda dejar fuera alguna (p. ej. Pinterest en las vistas)
+    previousByNetwork: previous.length ? byNetworkOf(previous) : null,
     snapshots: groups.size,
   };
 }
