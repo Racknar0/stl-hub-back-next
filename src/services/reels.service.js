@@ -576,7 +576,8 @@ async function publishToPlatform(platform, post, { now = false } = {}) {
     const short = link ? await shortOrLong({ targetUrl: link, source: 'tumblr', label: `Reel ${post.id} · Tumblr`, refType: 'reel', refId: post.id }) : null;
     return publishTumblrVideo({
       videoAbsPath: toAbsVideoPath(post.videoPath), text: captionBody(post.caption), link: short,
-      linkTitle: post.assetTitle ? `Free STL: ${post.assetTitle}` : 'Free STL download', tags: Array.isArray(post.hashtags) ? post.hashtags : [],
+      // El nombre del modelo suele empezar por "#123 STL - ": se quita para no repetir "STL"
+      linkTitle: post.assetTitle ? `Free STL: ${String(post.assetTitle).replace(/^#?\d*\s*STL\s*-\s*/i, '')}` : 'Free STL download', tags: Array.isArray(post.hashtags) ? post.hashtags : [],
     });
   }
   if (platform === 'pinterest') {
