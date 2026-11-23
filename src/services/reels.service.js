@@ -730,7 +730,14 @@ export async function publishReel(post) {
         post = await generateAutoTexts(post.id);
       } catch (e) {
         console.error(`[REELS][TRENDS] Reel ${post.id}: textos automáticos al publicar fallaron (${e.message})`);
-        if (!post.caption?.trim()) {
+        const hadTexts = !!post.caption?.trim();
+        dispatchReelNotification({
+          post,
+          level: 'WARNING',
+          title: 'Textos automáticos fallidos',
+          detail: `No se pudieron generar los textos con tendencias: ${e.message}\n\nSe publica igual con ${hadTexts ? 'los textos que ya tenía el reel' : 'textos básicos (nombre del modelo y "listo para imprimir")'}.\n\nSi vuelve a pasar, revisa la clave de Gemini o pasa el reel a "Textos manuales".`,
+        }).catch(() => {});
+        if (!hadTexts) {
           const asset = post.assetId ? await prisma.asset.findUnique({ where: { id: post.assetId } }) : null;
           const basic = await mockReelTexts({ asset, language: post.language, originalName: post.originalName });
           post = await prisma.reelPost.update({

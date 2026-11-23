@@ -86,6 +86,36 @@ export async function collectTrends() {
   return summary;
 }
 
+const ALERT_KEY = 'TRENDS_ALERT_AT';
+const STALE_MS = 24 * 3600 * 1000;
+
+/**
+ * Si las fuentes llevan más de 24 h sin traer nada, crea una notificación en el dashboard (como mucho una al día).
+ * `lastSummary` es el resultado de la última recogida, para decir qué fuente falló y por qué.
+ */
+export async function checkTrendsHealth(lastSummary = null) {
+  const last = await prisma.trendTopic.findFirst({ orderBy: { collectedAt: 'desc' }, select: { collectedAt: true } });
+  if (last && Date.now() - last.collectedAt.getTime() < STALE_MS) return false;
+  const alert = await prisma.systemSetting.findUnique({ where: { key: ALERT_KEY } }).catch(() => null);
+  if (alert && Date.now() - Number(alert.value || 0) < STALE_MS) return false;
+  const detail = lastSummary ? Object.entries(lastSummary).map(([s, v]) => `- ${s}: ${v}`).join('\n') : '';
+  await prisma.notification.create({
+    data: {
+      title: 'Tendencias sin datos',
+      body: [
+        `Las fuentes de tendencias no traen nada desde ${last ? last.collectedAt.toLocaleString('es-CO', { timeZone: 'America/Bogota' }) : 'que se activó el sistema'}.`,
+        'Los reels se siguen publicando con sus textos automáticos, pero sin tendencias.',
+        ...(detail ? ['', 'Última recogida:', detail] : []),
+      ].join('\n'),
+      status: 'UNREAD',
+      type: 'SOCIAL',
+      typeStatus: 'WARNING',
+    },
+  });
+  await prisma.systemSetting.upsert({ where: { key: ALERT_KEY }, update: { value: String(Date.now()) }, create: { key: ALERT_KEY, value: String(Date.now()) } });
+  return true;
+}
+
 let trendsTimer = null;
 /** Tarea interna: cada 30 min mira si la última recogida tiene más de 6 h (un reinicio no hace perder el día). */
 export function startTrendsScheduler() {
@@ -93,7 +123,9 @@ export function startTrendsScheduler() {
   const tick = async () => {
     try {
       const last = await prisma.trendTopic.findFirst({ orderBy: { collectedAt: 'desc' }, select: { collectedAt: true } });
-      if (!last || Date.now() - last.collectedAt.getTime() >= COLLECT_EVERY_MS) await collectTrends();
+      let summary = null;
+      if (!last || Date.now() - last.collectedAt.getTime() >= COLLECT_EVERY_MS) summary = await collectTrends();
+      await checkTrendsHealth(summary);
     } catch (e) { console.error('[TRENDS] Recolector:', e.message); }
   };
   setTimeout(tick, 2 * 60000);
@@ -316,4 +348,4 @@ export function hotHashtag(text) {
   return String(text || '').split(/[^\p{L}\p{N}]+/u).filter(Boolean).map(w => w[0].toUpperCase() + w.slice(1)).join('').slice(0, 50);
 }
 
-export default { collectTrends, startTrendsScheduler, latestTrends, upcomingEvents, pickTrendAngle, buildTrendBrief, hotHashtag, parseGoogleTrendsRss, parseNewsRss, topicKeywords, topicTrends };
+export default { collectTrends, checkTrendsHealth, startTrendsScheduler, latestTrends, upcomingEvents, pickTrendAngle, buildTrendBrief, hotHashtag, parseGoogleTrendsRss, parseNewsRss, topicKeywords, topicTrends };
