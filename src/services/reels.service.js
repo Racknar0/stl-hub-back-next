@@ -7,6 +7,7 @@ import { dispatchReelNotification } from '../utils/reelsNotifications.js';
 import { uploadShort, connectionStatus as youtubeStatus, listChannels as youtubeChannels } from './youtube.service.js';
 import { publishVideo as publishTiktokVideo, tiktokOptionsProblem } from './tiktok.service.js';
 import { publishVideo as publishThreadsVideo, connectionStatus as threadsStatus, threadsText } from './threads.service.js';
+import { publishVideo as publishBlueskyVideo, connectionStatus as blueskyStatus, blueskyText } from './bluesky.service.js';
 import { getChannelVariantVideo, cleanVariants } from './reelsVideoVariants.service.js';
 import { publishDueHorizontal } from './horizontalShowcase.service.js';
 import { shortOrLong, setFixedLink, BIO_CODE } from './shortLinks.service.js';
@@ -14,7 +15,7 @@ import pinterestPublisher from './pinterestPublisher.service.js';
 
 const prisma = new PrismaClient();
 
-export const PLATFORMS = ['instagram', 'facebook', 'youtube', 'tiktok', 'threads', 'pinterest'];
+export const PLATFORMS = ['instagram', 'facebook', 'youtube', 'tiktok', 'threads', 'pinterest', 'bluesky'];
 const SETTINGS = { defaultTime: 'REELS_DEFAULT_TIME', timeSpread: 'REELS_TIME_SPREAD', language: 'REELS_LANGUAGE', youtubePrivacy: 'REELS_YOUTUBE_PRIVACY' };
 const DEFAULTS = { defaultTime: '18:00', timeSpread: 60, language: 'es', youtubePrivacy: 'public' };
 const YOUTUBE_PRIVACY = ['private', 'unlisted', 'public'];
@@ -371,6 +372,8 @@ export function missingFields(post) {
   }
   // Threads usa el caption de Instagram (sin su pie) + el link del modelo
   if (platforms.includes('threads') && !post.caption?.trim()) missing.push('caption (se usa también en Threads)');
+  // Bluesky igual que Threads, recortado a 300 caracteres
+  if (platforms.includes('bluesky') && !post.caption?.trim()) missing.push('caption (se usa también en Bluesky)');
   // Pinterest usa el título de YouTube (o el del modelo) y el caption de Instagram sin cabecera ni pie
   if (platforms.includes('pinterest') && !(post.title || post.assetTitle)?.trim()) missing.push('título (se usa en Pinterest)');
   return missing;
@@ -490,7 +493,7 @@ async function instagramTargets(post) {
   });
 }
 
-const PLATFORM_NAMES = { instagram: 'Instagram', facebook: 'Facebook', youtube: 'YouTube', tiktok: 'TikTok', threads: 'Threads', pinterest: 'Pinterest' };
+const PLATFORM_NAMES = { instagram: 'Instagram', facebook: 'Facebook', youtube: 'YouTube', tiktok: 'TikTok', threads: 'Threads', pinterest: 'Pinterest', bluesky: 'Bluesky' };
 
 // Reels que se están subiendo ahora mismo (evita publicar dos veces el mismo si coinciden el worker y "Publicar ahora")
 const inFlight = new Set();
@@ -561,6 +564,10 @@ async function publishToPlatform(platform, post, { now = false } = {}) {
   if (platform === 'threads') {
     const short = link ? await shortOrLong({ targetUrl: link, source: 'threads', label: `Reel ${post.id} · Threads`, refType: 'reel', refId: post.id }) : null;
     return publishThreadsVideo({ videoUrl: publicVideoUrl(post.videoPath), text: threadsText(captionBody(post.caption), short) });
+  }
+  if (platform === 'bluesky') {
+    const short = link ? await shortOrLong({ targetUrl: link, source: 'bluesky', label: `Reel ${post.id} · Bluesky`, refType: 'reel', refId: post.id }) : null;
+    return publishBlueskyVideo({ videoAbsPath: toAbsVideoPath(post.videoPath), text: blueskyText(captionBody(post.caption), short), alt: post.title || post.assetTitle || '' });
   }
   if (platform === 'pinterest') {
     // Sin textos propios (reels de antes): se generan ahora con la IA y se guardan
@@ -678,6 +685,38 @@ export async function publishReel(post) {
     await prisma.reelPost.update({ where: { id: post.id }, data: { publishing: false, status: 'FAILED', errorMessage: e.message } }).catch(() => {});
     if (e.status !== 409) dispatchReelNotification({ post, title: 'No se pudo publicar', detail: e.message });
     throw e;
+  } finally {
+    inFlight.delete(post.id);
+  }
+}
+
+// Redes de una sola cuenta que se pueden añadir a un reel ya publicado sin tocar las demás
+export const EXTRA_PLATFORMS = ['bluesky', 'threads'];
+
+/**
+ * Publica un reel (aunque ya esté publicado) solo en una red de una cuenta que todavía no lo tiene, p. ej. al
+ * conectar Bluesky después. Guarda el resultado y añade la red a las del reel; el estado del reel no cambia.
+ */
+export async function publishExtraPlatform(postId, platform) {
+  if (!EXTRA_PLATFORMS.includes(platform)) throw Object.assign(new Error('Esa red no se puede añadir a un reel publicado'), { status: 400 });
+  const post = await prisma.reelPost.findUnique({ where: { id: postId } });
+  if (!post) throw Object.assign(new Error('Reel no encontrado'), { status: 404 });
+  if (post.publishing || inFlight.has(post.id)) throw Object.assign(new Error('Este reel se está publicando ahora mismo'), { status: 409 });
+  if (post.results?.[platform]?.id && !post.results[platform].simulated) throw Object.assign(new Error(`Este reel ya está en ${PLATFORM_NAMES[platform]}`), { status: 400 });
+  const missing = missingFields({ ...post, platforms: [platform] });
+  if (missing.length) throw Object.assign(new Error(`Falta: ${missing.join(', ')}`), { status: 400 });
+  inFlight.add(post.id);
+  try {
+    const result = await publishToPlatform(platform, post, { now: true });
+    const fresh = await prisma.reelPost.findUnique({ where: { id: post.id } });
+    const platforms = Array.isArray(fresh.platforms) ? fresh.platforms : [];
+    return await prisma.reelPost.update({
+      where: { id: post.id },
+      data: {
+        results: { ...(fresh.results || {}), [platform]: { ...result, publishedAt: new Date().toISOString(), simulated: false } },
+        platforms: platforms.includes(platform) ? platforms : [...platforms, platform],
+      },
+    });
   } finally {
     inFlight.delete(post.id);
   }
@@ -966,16 +1005,17 @@ export async function addPlatformToPending(platform) {
 }
 
 /**
- * Redes por defecto de un reel nuevo: YouTube y Threads si su cuenta está conectada; Instagram, Facebook y
+ * Redes por defecto de un reel nuevo: YouTube, Threads y Bluesky si su cuenta está conectada; Instagram, Facebook y
  * Pinterest siempre. TikTok queda apagado por defecto (se programa en el programador nativo de TikTok);
  * se puede encender a mano en cada reel.
  */
 export async function defaultPlatforms() {
-  const [yt, th] = await Promise.all([
+  const [yt, th, bs] = await Promise.all([
     youtubeStatus().catch(() => ({ connected: false })),
     threadsStatus().catch(() => ({ connected: false })),
+    blueskyStatus().catch(() => ({ connected: false })),
   ]);
-  const connected = { youtube: yt.connected, threads: th.connected };
+  const connected = { youtube: yt.connected, threads: th.connected, bluesky: bs.connected };
   return PLATFORMS.filter(p => p !== 'tiktok' && (!(p in connected) || connected[p]));
 }
 
@@ -992,5 +1032,5 @@ export async function deleteReel(postId) {
 export default {
   getSettings, saveSettings, processReelAi, enqueueAi, missingFields, publishReel, publishInBackground, publishDueReels,
   startReelsWorker, assignDay, autoFill, deleteReel, reelsMissingYoutubeVariants, fillMissingYoutubeVariants,
-  reelsMissingPlatform, addPlatformToPending,
+  reelsMissingPlatform, addPlatformToPending, publishExtraPlatform,
 };

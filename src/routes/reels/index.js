@@ -8,6 +8,7 @@ import reels, { PLATFORMS, assetLink, dayKey, defaultPlatforms } from '../../ser
 import youtube from '../../services/youtube.service.js';
 import tiktok, { PRIVACY_LEVELS } from '../../services/tiktok.service.js';
 import threads from '../../services/threads.service.js';
+import bluesky from '../../services/bluesky.service.js';
 import pinterestService from '../../services/pinterest.service.js';
 import socialMetrics from '../../services/socialMetrics.service.js';
 import { listFacebookPages, listInstagramAccounts } from '../../services/metaReels.service.js';
@@ -225,11 +226,12 @@ router.put('/settings', requireAuth, requireAdmin, async (req, res) => {
 // 6. Estado de las cuentas (por ahora solo comprueba que haya credenciales configuradas)
 router.get('/connection-status', requireAuth, requireAdmin, async (req, res) => {
   const meta = !!(process.env.META_SYSTEM_USER_TOKEN && process.env.META_PAGE_ID && process.env.META_IG_USER_ID);
-  const [yt, tt, th, pin] = await Promise.all([
+  const [yt, tt, th, pin, bs] = await Promise.all([
     youtube.connectionStatus().catch(() => ({ configured: false, connected: false })),
     tiktok.connectionStatus().catch(() => ({ configured: false, connected: false })),
     threads.connectionStatus().catch(() => ({ configured: false, connected: false })),
     pinterestService.testConnection().catch(() => ({ connected: false })),
+    bluesky.connectionStatus().catch(() => ({ configured: false, connected: false })),
   ]);
   res.json({
     // Cuentas vinculadas a las Páginas asignadas (la principal primero)
@@ -239,6 +241,7 @@ router.get('/connection-status', requireAuth, requireAdmin, async (req, res) => 
     youtube: { ...yt, appConfigured: youtube.youtubeConfigured() },
     tiktok: { ...tt, appConfigured: tiktok.tiktokConfigured() },
     threads: { ...th, appConfigured: threads.threadsConfigured() },
+    bluesky: bs,
     // Pinterest se conecta en Publicaciones → Pinterest; aquí solo se informa si hay cuenta
     pinterest: { connected: !!pin.connected, username: pin.account?.username || null },
   });
@@ -330,6 +333,17 @@ router.get('/threads/callback', async (req, res) => {
 // 6k. Threads: desconectar la cuenta
 router.post('/threads/disconnect', requireAuth, requireAdmin, async (req, res) => {
   try { await threads.disconnect(); res.json({ success: true }); } catch (error) { sendError(res, error); }
+});
+
+// 6l. Bluesky: conectar con usuario + contraseña de aplicación (se valida iniciando sesión)
+router.post('/bluesky/connect', requireAuth, requireAdmin, async (req, res) => {
+  try { res.json({ success: true, account: await bluesky.connect({ identifier: req.body?.identifier, appPassword: req.body?.appPassword }) }); }
+  catch (error) { res.status(error.status || 400).json({ error: error.message }); }
+});
+
+// 6m. Bluesky: desconectar la cuenta
+router.post('/bluesky/disconnect', requireAuth, requireAdmin, async (req, res) => {
+  try { await bluesky.disconnect(); res.json({ success: true }); } catch (error) { sendError(res, error); }
 });
 
 // 7. Rellenar los próximos días libres con la bandeja
@@ -432,6 +446,15 @@ router.put('/:id', requireAuth, requireAdmin, async (req, res) => {
     }
     const post = await prisma.reelPost.update({ where: { id }, data });
     res.json({ post });
+  } catch (error) { sendError(res, error); }
+});
+
+// 12b. Publicar un reel (aunque ya esté publicado) solo en una red nueva de una cuenta (Bluesky, Threads)
+router.post('/:id/publish-extra/:platform', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: 'Id inválido' });
+    res.json({ post: await reels.publishExtraPlatform(id, String(req.params.platform)) });
   } catch (error) { sendError(res, error); }
 });
 
