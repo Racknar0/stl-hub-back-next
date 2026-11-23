@@ -70,7 +70,8 @@ async function api(pathname, { token, method = 'GET', body } = {}) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const detail = data.errors?.[0]?.detail || data.errors?.[0]?.title || data.meta?.msg;
-    throw Object.assign(new Error(`Tumblr: ${detail || `HTTP ${res.status}`}`), { status: res.status });
+    const extra = data.errors ? ` ${JSON.stringify(data.errors).slice(0, 300)}` : '';
+    throw Object.assign(new Error(`Tumblr: ${detail || `HTTP ${res.status}`}${extra}`), { status: res.status });
   }
   return data.response;
 }
@@ -130,12 +131,13 @@ export async function publishVideo({ videoAbsPath, text, link, linkTitle, tags =
   const token = await accessToken();
   const account = (await readSettings())[KEYS.account];
   if (!account?.blog) throw new Error('Tumblr: no hay blog conectado');
-  const content = [{ type: 'video', media: [{ type: 'video/mp4', identifier: 'video-file' }] }];
+  // En NPF el bloque de video lleva un solo objeto media (no una lista como las imágenes)
+  const content = [{ type: 'video', media: { type: 'video/mp4', identifier: 'video-file' } }];
   if (String(text || '').trim()) content.push({ type: 'text', text: String(text).trim() });
   if (link) content.push({ type: 'link', url: link, ...(linkTitle && { title: linkTitle }) });
 
   const form = new FormData();
-  form.append('json', JSON.stringify({ content, state: 'published', tags: tumblrTags(tags).join(',') }));
+  form.append('json', new Blob([JSON.stringify({ content, state: 'published', tags: tumblrTags(tags).join(',') })], { type: 'application/json' }));
   const bytes = await fs.promises.readFile(videoAbsPath);
   form.append('video-file', new Blob([bytes], { type: 'video/mp4' }), path.basename(videoAbsPath));
   const res = await api(`/blog/${encodeURIComponent(account.blog)}/posts`, { token, method: 'POST', body: form });
