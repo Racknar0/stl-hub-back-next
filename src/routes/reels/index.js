@@ -9,6 +9,7 @@ import youtube from '../../services/youtube.service.js';
 import tiktok, { PRIVACY_LEVELS } from '../../services/tiktok.service.js';
 import threads from '../../services/threads.service.js';
 import bluesky from '../../services/bluesky.service.js';
+import tumblr from '../../services/tumblr.service.js';
 import pinterestService from '../../services/pinterest.service.js';
 import socialMetrics from '../../services/socialMetrics.service.js';
 import { listFacebookPages, listInstagramAccounts } from '../../services/metaReels.service.js';
@@ -226,12 +227,13 @@ router.put('/settings', requireAuth, requireAdmin, async (req, res) => {
 // 6. Estado de las cuentas (por ahora solo comprueba que haya credenciales configuradas)
 router.get('/connection-status', requireAuth, requireAdmin, async (req, res) => {
   const meta = !!(process.env.META_SYSTEM_USER_TOKEN && process.env.META_PAGE_ID && process.env.META_IG_USER_ID);
-  const [yt, tt, th, pin, bs] = await Promise.all([
+  const [yt, tt, th, pin, bs, tb] = await Promise.all([
     youtube.connectionStatus().catch(() => ({ configured: false, connected: false })),
     tiktok.connectionStatus().catch(() => ({ configured: false, connected: false })),
     threads.connectionStatus().catch(() => ({ configured: false, connected: false })),
     pinterestService.testConnection().catch(() => ({ connected: false })),
     bluesky.connectionStatus().catch(() => ({ configured: false, connected: false })),
+    tumblr.connectionStatus().catch(() => ({ configured: false, connected: false })),
   ]);
   res.json({
     // Cuentas vinculadas a las Páginas asignadas (la principal primero)
@@ -242,6 +244,7 @@ router.get('/connection-status', requireAuth, requireAdmin, async (req, res) => 
     tiktok: { ...tt, appConfigured: tiktok.tiktokConfigured() },
     threads: { ...th, appConfigured: threads.threadsConfigured() },
     bluesky: bs,
+    tumblr: tb,
     // Pinterest se conecta en Publicaciones → Pinterest; aquí solo se informa si hay cuenta
     pinterest: { connected: !!pin.connected, username: pin.account?.username || null },
   });
@@ -344,6 +347,39 @@ router.post('/bluesky/connect', requireAuth, requireAdmin, async (req, res) => {
 // 6m. Bluesky: desconectar la cuenta
 router.post('/bluesky/disconnect', requireAuth, requireAdmin, async (req, res) => {
   try { await bluesky.disconnect(); res.json({ success: true }); } catch (error) { sendError(res, error); }
+});
+
+// 6n. Tumblr: guardar la app registrada en tumblr.com/oauth/apps (Consumer Key y Secret Key)
+router.post('/tumblr/app', requireAuth, requireAdmin, async (req, res) => {
+  try { await tumblr.saveApp({ clientId: req.body?.clientId, clientSecret: req.body?.clientSecret }); res.json({ success: true }); }
+  catch (error) { res.status(error.status || 400).json({ error: error.message }); }
+});
+
+// 6o. Tumblr: URL para autorizar el blog (el frontend la abre en una ventana)
+router.get('/tumblr/auth', requireAuth, requireAdmin, async (req, res) => {
+  try { res.json({ url: await tumblr.getAuthUrl() }); } catch (error) { res.status(error.status || 400).json({ error: error.message, code: error.code }); }
+});
+
+// 6p. Tumblr: vuelve aquí tras autorizar (ruta pública, protegida por el parámetro state)
+router.get('/tumblr/callback', async (req, res) => {
+  const page = (title, text, ok) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head>
+    <body style="background:#09090b;color:#fff;font-family:sans-serif;text-align:center;padding-top:60px;">
+      <h2 style="color:${ok ? '#22c55e' : '#f87171'}">${title}</h2><p>${text}</p>
+      ${ok ? '<script>setTimeout(() => window.close(), 3000)</script>' : ''}
+    </body></html>`;
+  try {
+    if (req.query.error) return res.status(400).send(page('Tumblr no se conectó', `Tumblr respondió: ${String(req.query.error_description || req.query.error).replace(/[<>]/g, '')}`, false));
+    const account = await tumblr.handleCallback({ code: req.query.code, state: req.query.state });
+    res.send(page('¡Tumblr conectado!', `Blog: <b>${String(account.blog || '').replace(/[<>]/g, '')}</b>. Ya puedes cerrar esta ventana y volver al Reels Publisher.`, true));
+  } catch (error) {
+    console.error('[REELS][TUMBLR] Callback:', error.message);
+    res.status(400).send(page('Tumblr no se conectó', String(error.message).replace(/[<>]/g, ''), false));
+  }
+});
+
+// 6q. Tumblr: desconectar el blog
+router.post('/tumblr/disconnect', requireAuth, requireAdmin, async (req, res) => {
+  try { await tumblr.disconnect(); res.json({ success: true }); } catch (error) { sendError(res, error); }
 });
 
 // 7. Rellenar los próximos días libres con la bandeja

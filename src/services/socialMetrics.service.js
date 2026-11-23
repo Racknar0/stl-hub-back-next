@@ -5,6 +5,7 @@ import { PrismaClient } from '@prisma/client';
 import youtube from './youtube.service.js';
 import threads from './threads.service.js';
 import bluesky from './bluesky.service.js';
+import tumblr from './tumblr.service.js';
 import pinterestService from './pinterest.service.js';
 import { listFacebookPages, listInstagramAccounts, facebookReelMetrics, instagramMediaMetrics } from './metaReels.service.js';
 
@@ -13,7 +14,7 @@ const prisma = new PrismaClient();
 const CACHE_MS = 30 * 60 * 1000;
 const cache = new Map(); // clave -> { at, value }
 
-const NETWORK_LABEL = { facebook: 'Facebook', instagram: 'Instagram', youtube: 'YouTube', pinterest: 'Pinterest', threads: 'Threads', bluesky: 'Bluesky' };
+const NETWORK_LABEL = { facebook: 'Facebook', instagram: 'Instagram', youtube: 'YouTube', pinterest: 'Pinterest', threads: 'Threads', bluesky: 'Bluesky', tumblr: 'Tumblr' };
 
 // `ages` recoge la hora de cada dato usado, para decirle al panel qué tan viejo es el más antiguo
 async function cached(key, loader, fresh = false, ages = null) {
@@ -80,12 +81,13 @@ export async function getSocialMetrics({ from, to, networks = null, fresh = fals
     return primary(null) ? bodyLine(post.caption) || fallback : fallback;
   };
 
-  const [pages, igAccounts, ytChannels, threadsStatus, blueskyStatus] = await Promise.all([
+  const [pages, igAccounts, ytChannels, threadsStatus, blueskyStatus, tumblrStatus] = await Promise.all([
     listFacebookPages().catch(() => []),
     listInstagramAccounts().catch(() => []),
     youtube.listChannels().catch(() => []),
     threads.connectionStatus().catch(() => ({})),
     bluesky.connectionStatus().catch(() => ({})),
+    tumblr.connectionStatus().catch(() => ({})),
   ]);
   const pageName = Object.fromEntries(pages.map(p => [p.id, p.name]));
   const igName = Object.fromEntries(igAccounts.map(a => [a.id, `@${a.username}`]));
@@ -107,6 +109,7 @@ export async function getSocialMetrics({ from, to, networks = null, fresh = fals
           : network === 'youtube' ? ytName[accountId] || ''
             : network === 'threads' ? (threadsStatus.account?.username ? `@${threadsStatus.account.username}` : '')
               : network === 'bluesky' ? (blueskyStatus.account?.handle ? `@${blueskyStatus.account.handle}` : '')
+                : network === 'tumblr' ? (tumblrStatus.account?.blog || r.blog || '')
               : '';
       entries.push({ postId: post.id, title: displayTitle(post, network, account), network, key, id: r.id, url: r.url || null, publishedAt: when.toISOString(), accountId, account: label || NETWORK_LABEL[network], pageId: network === 'facebook' ? accountId : r.pageId, when });
     }
@@ -164,6 +167,7 @@ export async function getSocialMetrics({ from, to, networks = null, fresh = fals
       else if (e.network === 'instagram') m = await cached(`ig:${e.id}`, () => instagramMediaMetrics({ mediaId: e.id }), fresh, ages);
       else if (e.network === 'youtube') { m = ytStats[e.id] || {}; if (m.error) throw new Error(m.error); }
       else if (e.network === 'bluesky') { m = bsStats[e.id] || {}; if (m.error) throw new Error(m.error); }
+      else if (e.network === 'tumblr') m = await cached(`tb:${e.id}`, () => tumblr.postMetrics(e.id), fresh, ages);
       else if (e.network === 'threads') m = await cached(`th:${e.id}`, () => threads.postInsights(e.id), fresh, ages);
       else if (e.network === 'pinterest') {
         const p = await cached(`pin:${e.id}:${todayStr}`, () => pinterestService.getPinAnalytics(e.id, ymd(e.when), todayStr), fresh, ages);

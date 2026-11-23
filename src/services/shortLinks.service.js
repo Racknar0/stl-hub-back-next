@@ -79,7 +79,7 @@ export async function resolveShortLink(code, { userAgent = '' } = {}) {
   return link.targetUrl;
 }
 
-const SOURCES = ['youtube_horizontal', 'facebook', 'youtube_short', 'threads', 'bluesky', 'instagram_bio'];
+const SOURCES = ['youtube_horizontal', 'facebook', 'youtube_short', 'threads', 'bluesky', 'tumblr', 'instagram_bio'];
 
 /** Enlaces cortos con sus clics (para el panel), más los totales por origen. */
 export async function listShortLinks({ source = null, q = '', limit = 300 } = {}) {
