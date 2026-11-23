@@ -137,7 +137,8 @@ export async function publishVideo({ videoAbsPath, text, link, linkTitle, tags =
   if (link) content.push({ type: 'link', url: link, ...(linkTitle && { title: linkTitle }) });
 
   const form = new FormData();
-  form.append('json', new Blob([JSON.stringify({ content, state: 'published', tags: tumblrTags(tags).join(',') })], { type: 'application/json' }));
+  // La parte json va como campo de texto: si va como archivo, Tumblr la trata como un medio más y la rechaza
+  form.append('json', JSON.stringify({ content, state: 'published', tags: tumblrTags(tags).join(',') }));
   const bytes = await fs.promises.readFile(videoAbsPath);
   form.append('video-file', new Blob([bytes], { type: 'video/mp4' }), path.basename(videoAbsPath));
   const res = await api(`/blog/${encodeURIComponent(account.blog)}/posts`, { token, method: 'POST', body: form });
