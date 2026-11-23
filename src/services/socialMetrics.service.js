@@ -64,7 +64,7 @@ export async function getSocialMetrics({ from, to, networks = null, fresh = fals
   const posts = await prisma.reelPost.findMany({
     where: { simulated: false, status: { in: ['PUBLISHED', 'FAILED'] }, OR: [{ publishedAt: searchWindow }, { publishedAt: null, scheduledAt: searchWindow }] },
     orderBy: { publishedAt: 'desc' },
-    select: { id: true, title: true, assetTitle: true, publishedAt: true, results: true, caption: true, facebookCaption: true, youtubeVariants: true, facebookVariants: true, instagramVariants: true, pinterestTitle: true },
+    select: { id: true, title: true, assetTitle: true, publishedAt: true, results: true, caption: true, facebookCaption: true, youtubeVariants: true, facebookVariants: true, instagramVariants: true, pinterestTitle: true, trendInfo: true },
   });
 
   // Título que se ve en la tabla: el real de cada cuenta (YouTube) o la primera frase de su texto (el resto de redes)
@@ -114,7 +114,7 @@ export async function getSocialMetrics({ from, to, networks = null, fresh = fals
                 : network === 'tumblr' ? (tumblrStatus.account?.blog || r.blog || '')
                   : network === 'mastodon' ? (mastodonStatus.account?.acct ? `@${mastodonStatus.account.acct}` : '')
               : '';
-      entries.push({ postId: post.id, title: displayTitle(post, network, account), network, key, id: r.id, url: r.url || null, publishedAt: when.toISOString(), accountId, account: label || NETWORK_LABEL[network], pageId: network === 'facebook' ? accountId : r.pageId, when });
+      entries.push({ postId: post.id, trend: post.trendInfo?.term || post.trendInfo?.bridge || null, title: displayTitle(post, network, account), network, key, id: r.id, url: r.url || null, publishedAt: when.toISOString(), accountId, account: label || NETWORK_LABEL[network], pageId: network === 'facebook' ? accountId : r.pageId, when });
     }
   }
 
@@ -163,7 +163,7 @@ export async function getSocialMetrics({ from, to, networks = null, fresh = fals
   // 3. Resto de redes: una llamada por publicación
   const todayStr = ymd(new Date());
   const rows = await pool(entries, 6, async (e) => {
-    const base = { postId: e.postId, title: e.title, network: e.network, account: e.account, publishedAt: e.publishedAt, url: e.url, long: !!e.long, ...EMPTY };
+    const base = { postId: e.postId, trend: e.trend || null, title: e.title, network: e.network, account: e.account, publishedAt: e.publishedAt, url: e.url, long: !!e.long, ...EMPTY };
     try {
       let m = {};
       if (e.network === 'facebook') m = await cached(`fb:${e.id}`, () => facebookReelMetrics({ pageId: e.pageId || e.accountId, videoId: e.id }), fresh, ages);

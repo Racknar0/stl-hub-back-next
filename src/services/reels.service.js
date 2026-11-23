@@ -14,6 +14,7 @@ import { getChannelVariantVideo, cleanVariants } from './reelsVideoVariants.serv
 import { publishDueHorizontal } from './horizontalShowcase.service.js';
 import { shortOrLong, setFixedLink, BIO_CODE } from './shortLinks.service.js';
 import pinterestPublisher from './pinterestPublisher.service.js';
+import { latestTrends, upcomingEvents, pickTrendAngle, buildTrendBrief } from './trends.service.js';
 
 const prisma = new PrismaClient();
 
@@ -147,7 +148,7 @@ export async function loadAssetImageParts(asset, limit = 3) {
 
 // ---------- IA ----------
 /** Genera los textos de un reel y, si no tiene asset, intenta encontrarlo en el catálogo. */
-export async function processReelAi(postId, { notes, language } = {}) {
+export async function processReelAi(postId, { notes, language, trendBrief = '' } = {}) {
   const post = await prisma.reelPost.findUnique({ where: { id: postId } });
   if (!post) return null;
   await prisma.reelPost.update({ where: { id: postId }, data: { aiStatus: 'PROCESSING', aiError: null } });
@@ -162,7 +163,7 @@ export async function processReelAi(postId, { notes, language } = {}) {
     }
     const texts = isMockAi()
       ? await mockReelTexts({ asset, notes, language: lang, originalName: post.originalName })
-      : await generateWithoutRepeats(post, asset, { notes, language: lang });
+      : await generateWithoutRepeats(post, asset, { notes, language: lang, trendBrief });
 
     return await prisma.reelPost.update({
       where: { id: postId },
@@ -175,10 +176,10 @@ export async function processReelAi(postId, { notes, language } = {}) {
         hashtags: texts.hashtags,
         title: texts.youtubeTitle || null,
         youtubeDescription: texts.youtubeDescription || null,
-        youtubeVariants: await youtubeVariantsFor(asset, texts, lang),
-        facebookVariants: await facebookVariantsFor(asset, texts, lang),
-        instagramVariants: await instagramVariantsFor(asset, texts, lang),
-        ...(await pinterestTextsFor(asset, { title: texts.youtubeTitle, description: texts.youtubeDescription })),
+        youtubeVariants: await youtubeVariantsFor(asset, texts, lang, trendBrief),
+        facebookVariants: await facebookVariantsFor(asset, texts, lang, trendBrief),
+        instagramVariants: await instagramVariantsFor(asset, texts, lang, trendBrief),
+        ...(await pinterestTextsFor(asset, { title: texts.youtubeTitle, description: texts.youtubeDescription }, trendBrief)),
         language: lang,
         aiGenerated: true,
         aiStatus: 'READY',
@@ -192,9 +193,9 @@ export async function processReelAi(postId, { notes, language } = {}) {
 }
 
 /** Título y descripción del pin de Pinterest (en inglés). Si la IA falla, quedan vacíos y se generan al publicar. */
-async function pinterestTextsFor(asset, base) {
+async function pinterestTextsFor(asset, base, trendBrief = '') {
   try {
-    const t = await generatePinterestTexts({ asset, base });
+    const t = await generatePinterestTexts({ asset, base, trendBrief });
     return { pinterestTitle: t.title, pinterestDescription: t.description };
   } catch (e) {
     console.warn(`[REELS][AI] Textos de Pinterest: ${e.message}`);
@@ -203,13 +204,13 @@ async function pinterestTextsFor(asset, base) {
 }
 
 /** Título y descripción distintos para cada canal de YouTube que no es el principal. */
-async function youtubeVariantsFor(asset, texts, language) {
+async function youtubeVariantsFor(asset, texts, language, trendBrief = '') {
   const channels = (await youtubeChannels().catch(() => [])).slice(1);
   if (!channels.length || isMockAi()) return null;
   const variants = {};
   for (const ch of channels) {
     try {
-      variants[ch.id] = await generateYoutubeVariant({ asset, language, base: { title: texts.youtubeTitle, description: texts.youtubeDescription }, avoid: Object.values(variants) });
+      variants[ch.id] = await generateYoutubeVariant({ asset, language, base: { title: texts.youtubeTitle, description: texts.youtubeDescription }, avoid: Object.values(variants), trendBrief });
     } catch (e) {
       console.warn(`[REELS][AI] Variante de YouTube para ${ch.title}: ${e.message}`);
     }
@@ -218,13 +219,13 @@ async function youtubeVariantsFor(asset, texts, language) {
 }
 
 /** Caption distinto para cada Página de Facebook que no es la principal. */
-async function facebookVariantsFor(asset, texts, language) {
+async function facebookVariantsFor(asset, texts, language, trendBrief = '') {
   const pages = (await listFacebookPages().catch(() => [])).slice(1);
   if (!pages.length || isMockAi()) return null;
   const variants = {};
   for (const pg of pages) {
     try {
-      variants[pg.id] = { caption: await generateFacebookVariant({ asset, language, base: texts.facebookCaption, avoid: Object.values(variants).map(v => v.caption) }) };
+      variants[pg.id] = { caption: await generateFacebookVariant({ asset, language, base: texts.facebookCaption, avoid: Object.values(variants).map(v => v.caption), trendBrief }) };
     } catch (e) {
       console.warn(`[REELS][AI] Variante de Facebook para ${pg.name}: ${e.message}`);
     }
@@ -233,13 +234,13 @@ async function facebookVariantsFor(asset, texts, language) {
 }
 
 /** Caption distinto para cada cuenta de Instagram que no es la principal. */
-async function instagramVariantsFor(asset, texts, language) {
+async function instagramVariantsFor(asset, texts, language, trendBrief = '') {
   const accounts = (await listInstagramAccounts().catch(() => [])).slice(1);
   if (!accounts.length || isMockAi()) return null;
   const variants = {};
   for (const acc of accounts) {
     try {
-      variants[acc.id] = { caption: await generateInstagramVariant({ asset, language, base: texts.instagramCaption, avoid: Object.values(variants).map(v => v.caption) }) };
+      variants[acc.id] = { caption: await generateInstagramVariant({ asset, language, base: texts.instagramCaption, avoid: Object.values(variants).map(v => v.caption), trendBrief }) };
     } catch (e) {
       console.warn(`[REELS][AI] Variante de Instagram para @${acc.username}: ${e.message}`);
     }
@@ -251,7 +252,7 @@ async function instagramVariantsFor(asset, texts, language) {
 const PROMISES_FREE = /\b(gratis|gratuit[oa]s?|free)\b/i;
 
 /** Llama a la IA pasándole las descripciones recientes para que no se repita, y la rechaza si promete "gratis". */
-async function generateWithoutRepeats(post, asset, { notes, language }) {
+async function generateWithoutRepeats(post, asset, { notes, language, trendBrief = '' }) {
   const recent = await prisma.reelPost.findMany({
     where: { id: { not: post.id }, aiGenerated: true, caption: { not: null } },
     orderBy: { updatedAt: 'desc' },
@@ -262,7 +263,7 @@ async function generateWithoutRepeats(post, asset, { notes, language }) {
   const imageParts = await loadAssetImageParts(asset);
   let texts;
   for (let attempt = 1; attempt <= 2; attempt++) {
-    texts = await generateReelTexts({ asset, imageParts, notes, language, recentBodies });
+    texts = await generateReelTexts({ asset, imageParts, notes, language, recentBodies, trendBrief });
     const bodies = [captionBody(texts.instagramCaption), captionBody(texts.facebookCaption)].join(' ');
     if (!PROMISES_FREE.test(bodies)) return texts;
     console.warn(`[REELS][AI] Reel ${post.id}: la descripción decía "gratis", se regenera (intento ${attempt})`);
@@ -359,11 +360,92 @@ export async function fillMissingYoutubeVariants() {
   return { queued: pending.length };
 }
 
+// ---------- Textos automáticos con tendencias ----------
+const AUTO_LEAD_MS = 3 * 3600 * 1000; // se generan unas 3 h antes de publicar
+const AUTO_FRESH_MS = 8 * 3600 * 1000; // textos automáticos generados hace menos de esto siguen valiendo
+const autoAttempts = new Map(); // postId -> último intento fallido (para no reintentar en cada minuto)
+let autoRunning = false;
+
+/** El reel está en modo automático y aún no tiene textos automáticos recientes para su hora de publicación. */
+export function needsAutoTexts(post, now = Date.now()) {
+  if (post.textMode !== 'auto' || post.status === 'PUBLISHED') return false;
+  const target = post.scheduledAt ? new Date(post.scheduledAt).getTime() : now;
+  return !post.autoTextsAt || Math.abs(target - new Date(post.autoTextsAt).getTime()) > AUTO_FRESH_MS;
+}
+
+/** Algún destino del reel ya se publicó de verdad (no se cambian los textos a mitad de una publicación). */
+const hasRealResults = (post) => Object.values(post.results && typeof post.results === 'object' ? post.results : {}).some(r => r?.id && !r.simulated);
+
+/**
+ * Genera todos los textos del reel (todas las redes y cuentas) con el ángulo de tendencia del día. Si no hay tendencias
+ * o la IA del ángulo falla, se generan igual sin tendencia. Devuelve el reel actualizado.
+ */
+export async function generateAutoTexts(postId) {
+  const post = await prisma.reelPost.findUnique({ where: { id: postId } });
+  if (!post) throw new Error('Reel no encontrado');
+  const lang = (await getSettings()).language;
+  const asset = post.assetId ? await prisma.asset.findUnique({ where: { id: post.assetId }, include: { tags: true, categories: true } }) : null;
+  let angle = null;
+  if (asset && !isMockAi()) {
+    try {
+      const trends = await latestTrends();
+      if (Object.keys(trends).length) angle = await pickTrendAngle({ asset, trends, events: upcomingEvents(post.scheduledAt ? new Date(post.scheduledAt) : new Date()), language: lang });
+    } catch (e) {
+      console.warn(`[REELS][TRENDS] Reel ${postId}: sin ángulo de tendencia (${e.message})`);
+    }
+  }
+  const updated = await processReelAi(postId, { language: lang, trendBrief: buildTrendBrief(angle) });
+  if (!updated || updated.aiStatus === 'ERROR') throw new Error(updated?.aiError || 'No se pudieron generar los textos');
+  const trendInfo = angle ? {
+    term: angle.related[0] || angle.seasonal?.event || angle.bridge?.trend || null,
+    kind: angle.related.length ? 'related' : angle.seasonal ? 'seasonal' : angle.bridge ? 'bridge' : null,
+    bridge: angle.bridge?.trend || null,
+    seasonal: angle.seasonal?.event || null,
+    related: angle.related,
+    hashtags: angle.hashtags,
+    generatedAt: new Date().toISOString(),
+  } : { term: null, kind: null, generatedAt: new Date().toISOString() };
+  return prisma.reelPost.update({ where: { id: postId }, data: { autoTextsAt: new Date(), trendInfo } });
+}
+
+/** Tarea del worker: reels automáticos que salen en las próximas 3 h y aún no tienen sus textos con tendencia. */
+async function runAutoTexts() {
+  if (autoRunning) return;
+  autoRunning = true;
+  try {
+    const now = Date.now();
+    const candidates = await prisma.reelPost.findMany({
+      where: { textMode: 'auto', status: { not: 'PUBLISHED' }, publishing: false, scheduledAt: { not: null, lte: new Date(now + AUTO_LEAD_MS) } },
+      orderBy: { scheduledAt: 'asc' },
+    });
+    for (const post of candidates) {
+      if (!needsAutoTexts(post, now) || hasRealResults(post) || inFlight.has(post.id)) continue;
+      if (now - (autoAttempts.get(post.id) || 0) < 10 * 60000) continue;
+      try {
+        await generateAutoTexts(post.id);
+        autoAttempts.delete(post.id);
+        console.log(`[REELS][TRENDS] Reel ${post.id}: textos automáticos listos`);
+      } catch (e) {
+        autoAttempts.set(post.id, Date.now());
+        console.error(`[REELS][TRENDS] Reel ${post.id}:`, e.message);
+      }
+    }
+  } finally {
+    autoRunning = false;
+  }
+}
+
 // ---------- Validación para publicar ----------
 export function missingFields(post) {
   const platforms = Array.isArray(post.platforms) ? post.platforms : [];
   const missing = [];
   if (!platforms.length) missing.push('plataforma');
+  // Modo automático: los textos se generan solos antes de publicar, así que aún no se exigen
+  if (needsAutoTexts(post)) {
+    const problem = platforms.includes('tiktok') ? tiktokOptionsProblem(post.tiktokOptions) : null;
+    if (problem) missing.push(problem);
+    return missing;
+  }
   if (platforms.includes('instagram') && !post.caption?.trim()) missing.push('caption de Instagram');
   if (platforms.includes('facebook') && !(post.facebookCaption || post.caption)?.trim()) missing.push('caption de Facebook');
   if (platforms.includes('youtube') && !post.title?.trim()) missing.push('título de YouTube');
@@ -584,7 +666,8 @@ async function publishToPlatform(platform, post, { now = false } = {}) {
     return publishTumblrVideo({
       videoAbsPath: toAbsVideoPath(post.videoPath), text: captionBody(post.caption), link: short,
       // El nombre del modelo suele empezar por "#123 STL - ": se quita para no repetir "STL"
-      linkTitle: post.assetTitle ? `Free STL: ${String(post.assetTitle).replace(/^#?\d*\s*STL\s*-\s*/i, '')}` : 'Free STL download', tags: Array.isArray(post.hashtags) ? post.hashtags : [],
+      // Los STL son de pago: la tarjeta nunca dice "free"
+      linkTitle: post.assetTitle ? `Get the STL: ${String(post.assetTitle).replace(/^#?\d*\s*STL\s*-\s*/i, '')}` : 'Get the STL', tags: Array.isArray(post.hashtags) ? post.hashtags : [],
     });
   }
   if (platform === 'pinterest') {
@@ -619,6 +702,23 @@ export async function publishReel(post) {
   if (inFlight.has(post.id)) throw Object.assign(new Error('Este reel ya se está publicando'), { status: 409 });
   inFlight.add(post.id);
   try {
+    // Modo automático sin textos recientes (p. ej. "Publicar ahora" o la IA falló antes): se generan ya.
+    // Si falla, se usan los textos que tenga y, si no tiene, unos básicos, para no publicar vacío.
+    if (needsAutoTexts(post) && !hasRealResults(post)) {
+      try {
+        post = await generateAutoTexts(post.id);
+      } catch (e) {
+        console.error(`[REELS][TRENDS] Reel ${post.id}: textos automáticos al publicar fallaron (${e.message})`);
+        if (!post.caption?.trim()) {
+          const asset = post.assetId ? await prisma.asset.findUnique({ where: { id: post.assetId } }) : null;
+          const basic = await mockReelTexts({ asset, language: post.language, originalName: post.originalName });
+          post = await prisma.reelPost.update({
+            where: { id: post.id },
+            data: { caption: basic.instagramCaption, facebookCaption: basic.facebookCaption, tiktokCaption: basic.instagramCaption, hashtags: basic.hashtags, title: basic.youtubeTitle, youtubeDescription: basic.youtubeDescription, aiStatus: 'READY' },
+          });
+        }
+      }
+    }
     const platforms = Array.isArray(post.platforms) ? post.platforms : [];
 
     if (platforms.some(p => p === 'instagram' || p === 'facebook') && !metaConfigured()) {
@@ -940,6 +1040,8 @@ export function startReelsWorker(intervalMs = 60000) {
   workerTimer = setInterval(() => {
     publishDueReels().catch(e => console.error('[REELS] Worker:', e.message));
     runResultTasks();
+    // Textos automáticos con tendencias de los reels que salen en las próximas 3 h
+    runAutoTexts().catch(e => console.error('[REELS][TRENDS] Worker:', e.message));
     // Video horizontal automático una vez al día a hora fija (render largo: no bloquea el resto)
     publishDueHorizontal({ notify: dispatchReelNotification }).catch(e => console.error('[HORIZONTAL] Worker:', e.message));
   }, intervalMs);
@@ -1052,5 +1154,5 @@ export async function deleteReel(postId) {
 export default {
   getSettings, saveSettings, processReelAi, enqueueAi, missingFields, publishReel, publishInBackground, publishDueReels,
   startReelsWorker, assignDay, autoFill, deleteReel, reelsMissingYoutubeVariants, fillMissingYoutubeVariants,
-  reelsMissingPlatform, addPlatformToPending, publishExtraPlatform,
+  reelsMissingPlatform, addPlatformToPending, publishExtraPlatform, generateAutoTexts, needsAutoTexts,
 };

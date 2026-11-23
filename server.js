@@ -7,6 +7,7 @@ import pinterestWorker from './src/services/pinterestWorker.service.js';
 import { startAutopilotScheduler } from './src/services/pinterestAutopilot.service.js';
 import { startReelsWorker } from './src/services/reels.service.js';
 import { startSnapshotScheduler } from './src/services/socialMetrics.service.js';
+import { startTrendsScheduler } from './src/services/trends.service.js';
 import { startEmailEngine } from './src/services/emailEngine.service.js';
 import { startReengageCloser } from './src/services/emailReengage.service.js';
 import telegramCheckerService from './src/services/telegramChecker.service.js';
@@ -38,6 +39,7 @@ server.listen(PORT, () => {
     pinterestWorker.start(60000); // Revisa la cola cada 1 minuto
     startReelsWorker(60000); // Publica los reels aprobados cuando llega su hora (real o simulado según el ajuste)
     startSnapshotScheduler(); // Foto de las métricas de las redes cada 6 h (historial del panel Redes)
+    startTrendsScheduler(); // Tendencias del día cada 6 h (textos automáticos de los reels)
     startAutopilotScheduler(); // Piloto automático: prepara los pines de mañana una vez al día (si está activado)
   }, 5000);
 

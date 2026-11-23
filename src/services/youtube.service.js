@@ -261,4 +261,15 @@ export async function videoStats(channelId, ids) {
   }]));
 }
 
-export default { youtubeConfigured, getAuthUrl, handleCallback, connectionStatus, listChannels, disconnect, uploadShort, uploadHorizontalVideo, videoStats };
+/** Títulos de los videos más populares de una categoría (20 = Gaming, 24 = Entretenimiento, 1 = Cine y animación). */
+export async function mostPopular({ categoryId = '20', regionCode = 'US', max = 25 } = {}) {
+  const [account] = await loadAccounts();
+  if (!account) return [];
+  const token = await accessToken(account);
+  const res = await fetch(`https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&chart=mostPopular&regionCode=${regionCode}&videoCategoryId=${categoryId}&maxResults=${max}`, { headers: { Authorization: `Bearer ${token}` } });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`YouTube: ${data.error?.message || `HTTP ${res.status}`}`);
+  return (data.items || []).map(v => ({ title: v.snippet?.title || '', views: Number(v.statistics?.viewCount ?? 0) }));
+}
+
+export default { youtubeConfigured, getAuthUrl, handleCallback, connectionStatus, listChannels, disconnect, uploadShort, uploadHorizontalVideo, videoStats, mostPopular };

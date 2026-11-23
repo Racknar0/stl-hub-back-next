@@ -11,6 +11,7 @@ import threads from '../../services/threads.service.js';
 import bluesky from '../../services/bluesky.service.js';
 import tumblr from '../../services/tumblr.service.js';
 import mastodon from '../../services/mastodon.service.js';
+import trends from '../../services/trends.service.js';
 import pinterestService from '../../services/pinterest.service.js';
 import socialMetrics from '../../services/socialMetrics.service.js';
 import { listFacebookPages, listInstagramAccounts } from '../../services/metaReels.service.js';
@@ -144,7 +145,8 @@ router.post('/ai-generate', requireAuth, requireAdmin, async (req, res) => {
     const posts = await prisma.reelPost.findMany({
       where: ids?.length
         ? { id: { in: ids }, status: { not: 'PUBLISHED' }, aiStatus: { not: 'PROCESSING' } }
-        : { status: { not: 'PUBLISHED' }, aiStatus: { in: ['NONE', 'ERROR'] } },
+        // Sin ids: solo los reels en modo manual (los automáticos generan sus textos solos antes de publicar)
+        : { status: { not: 'PUBLISHED' }, aiStatus: { in: ['NONE', 'ERROR'] }, textMode: 'manual' },
       orderBy: { createdAt: 'asc' },
       select: { id: true },
     });
@@ -468,6 +470,13 @@ router.put('/:id', requireAuth, requireAdmin, async (req, res) => {
       ...(b.onScreenText !== undefined && { onScreenText: text(b.onScreenText)?.slice(0, 120) ?? null }),
       ...(b.hashtags !== undefined && { hashtags: normalizeHashtags(b.hashtags) }),
     };
+    // Modo de textos: auto (con tendencias, se generan solos antes de publicar) o manual (los del editor)
+    if (b.textMode !== undefined) {
+      if (!['auto', 'manual'].includes(b.textMode)) return res.status(400).json({ error: 'Modo de textos inválido' });
+      data.textMode = b.textMode;
+      // Al volver a automático se regeneran con las tendencias del día de publicación
+      if (b.textMode === 'auto' && existing.textMode !== 'auto') Object.assign(data, { autoTextsAt: null, trendInfo: null });
+    }
     if (b.platforms !== undefined) {
       const targets = normalizePlatforms(b.platforms);
       if (!targets.length) return res.status(400).json({ error: 'Elige al menos una red' });
@@ -506,6 +515,22 @@ router.post('/:id/publish-extra/:platform', requireAuth, requireAdmin, async (re
     if (!Number.isInteger(id)) return res.status(400).json({ error: 'Id inválido' });
     res.json({ post: await reels.publishExtraPlatform(id, String(req.params.platform)) });
   } catch (error) { sendError(res, error); }
+});
+
+// 12c. Generar ya los textos automáticos con las tendencias de hoy (normalmente se hace solo ~3 h antes de publicar)
+router.post('/:id/auto-texts', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const existing = await prisma.reelPost.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: 'Reel no encontrado' });
+    if (existing.status === 'PUBLISHED' || existing.publishing) return res.status(400).json({ error: 'Este reel ya se publicó o se está publicando' });
+    res.json({ post: await reels.generateAutoTexts(id) });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// 12d. Tendencias de hoy y fechas próximas (las que usan los textos automáticos)
+router.get('/trends', requireAuth, requireAdmin, async (req, res) => {
+  try { res.json({ trends: await trends.latestTrends(), events: trends.upcomingEvents() }); } catch (error) { sendError(res, error); }
 });
 
 // 12. Publicar ahora (también sirve para reintentar un reel con error)

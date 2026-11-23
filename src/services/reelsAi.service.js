@@ -25,7 +25,7 @@ export function captionBody(caption) {
     .trim();
 }
 
-function buildPrompt({ asset, notes, language, withImages, recentBodies = [] }) {
+function buildPrompt({ asset, notes, language, withImages, recentBodies = [], trendBrief = '' }) {
   const lang = LANG_NAMES[language] || 'Spanish';
   return [
     'You are a short-form video copywriter for "STL HUB", a site that SELLS premium 3D printable STL files.',
@@ -51,6 +51,7 @@ function buildPrompt({ asset, notes, language, withImages, recentBodies = [] }) 
     '- Avoid generic filler ("cobra vida", "lleno de detalles", "ideal para tu colección", "brings to life") unless it is genuinely the best option.',
     ...(recentBodies.length ? ['PREVIOUS DESCRIPTIONS (do NOT imitate them):', ...recentBodies.map((b, i) => `${i + 1}. ${b.replace(/\n/g, ' / ')}`)] : []),
     '',
+    ...(trendBrief ? [trendBrief, '- With the brief: instagramBody and facebookBody may OPEN with the bridge hook (each with different wording); youtubeTitle may only use related trends, keywords or the seasonal angle; hashtags: prefer the trending ones from the brief, still exactly 5.', ''] : []),
     '## subject: what the model is in a few words (e.g. "Squall Leonhart figure").',
     '## hashtags (exactly 5, without #, no spaces, CamelCase): 2 specific (character/franchise), 2 niche (3DPrinting, STLFile), 1 broad.',
     '## youtubeTitle (max 90 chars): name first, then what it is; may end with #Shorts.',
@@ -100,14 +101,14 @@ export async function mockReelTexts({ asset, notes, language = 'es', originalNam
  * Genera los textos de un reel con Gemini (uno por red) a partir de los datos del asset
  * y sus imágenes de producto (imageParts: [{ inlineData: { mimeType, data } }]). El video no se envía.
  */
-export async function generateReelTexts({ asset, imageParts = [], notes, language = 'es', recentBodies = [] }) {
+export async function generateReelTexts({ asset, imageParts = [], notes, language = 'es', recentBodies = [], trendBrief = '' }) {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
   const ai = new GoogleGenAI({ apiKey });
 
   const ask = () => ai.models.generateContent({
     model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
-    contents: [buildPrompt({ asset, notes, language, withImages: imageParts.length > 0, recentBodies }), ...imageParts],
+    contents: [buildPrompt({ asset, notes, language, withImages: imageParts.length > 0, recentBodies, trendBrief }), ...imageParts],
     // Algo más de temperatura para que las descripciones no se parezcan entre sí
     config: { responseMimeType: 'application/json', temperature: 1.1 },
   });
@@ -144,7 +145,7 @@ export async function generateReelTexts({ asset, imageParts = [], notes, languag
  * Otro título y otra descripción de YouTube para el mismo modelo (para un segundo o tercer canal): mismo tema,
  * redacción claramente distinta a la base y a las variantes ya generadas.
  */
-export async function generateYoutubeVariant({ asset, language = 'es', base, avoid = [] }) {
+export async function generateYoutubeVariant({ asset, language = 'es', base, avoid = [], trendBrief = '' }) {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
   const ai = new GoogleGenAI({ apiKey });
@@ -155,6 +156,7 @@ export async function generateYoutubeVariant({ asset, language = 'es', base, avo
     'It must be clearly different (wording, angle, hook) from these existing versions, which must NOT be repeated or paraphrased closely:',
     JSON.stringify([base, ...avoid].filter(Boolean)),
     'Rules: title max 90 characters, catchy, without "#Shorts". Description: 1-2 short sentences plus 3 hashtags on a new line, and the last line exactly "' + (language === 'en' ? 'Get the STL:' : 'Consigue el STL:') + '".',
+    ...(trendBrief ? [trendBrief, 'For this YouTube version: the title may only use related trends/keywords or the seasonal angle (never the bridge); the description may open with a rephrased bridge hook.'] : []),
     'Return ONLY JSON: {"title": "...", "description": "..."}',
   ].join('\n');
   const response = await ai.models.generateContent({
@@ -177,7 +179,7 @@ export async function generateYoutubeVariant({ asset, language = 'es', base, avo
  * Otro caption de Facebook para el mismo modelo (para otra Página): mismo tema, redacción distinta
  * a la base y a las variantes ya generadas. Devuelve el caption completo (encabezado + texto + CTA).
  */
-export async function generateFacebookVariant({ asset, language = 'es', base, avoid = [] }) {
+export async function generateFacebookVariant({ asset, language = 'es', base, avoid = [], trendBrief = '' }) {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
   const ai = new GoogleGenAI({ apiKey });
@@ -187,6 +189,7 @@ export async function generateFacebookVariant({ asset, language = 'es', base, av
     'The STL files are PAID: never say "free"/"gratis". No URLs, no hashtags, no call to action.',
     'It must be clearly different (wording, angle, hook) from these existing versions, which must NOT be repeated or paraphrased closely:',
     JSON.stringify([captionBody(base), ...avoid.map(captionBody)].filter(Boolean)),
+    ...(trendBrief ? [trendBrief, 'For this Facebook version: you may open with the bridge hook, rephrased.'] : []),
     'Return ONLY JSON: {"body": "..."}',
   ].join('\n');
   const response = await ai.models.generateContent({
@@ -211,7 +214,7 @@ export async function generateFacebookVariant({ asset, language = 'es', base, av
  * Otro caption de Instagram para el mismo modelo (para otra cuenta): mismo formato (2-3 líneas con emoji)
  * y redacción distinta. Devuelve el caption completo (encabezado + texto + CTA).
  */
-export async function generateInstagramVariant({ asset, language = 'es', base, avoid = [] }) {
+export async function generateInstagramVariant({ asset, language = 'es', base, avoid = [], trendBrief = '' }) {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
   const ai = new GoogleGenAI({ apiKey });
@@ -222,6 +225,7 @@ export async function generateInstagramVariant({ asset, language = 'es', base, a
     'The STL files are PAID: never say "free"/"gratis". No URLs, no hashtags, no call to action.',
     'It must be clearly different (wording, angle, emojis) from these existing versions, which must NOT be repeated or paraphrased closely:',
     JSON.stringify([captionBody(base), ...avoid.map(captionBody)].filter(Boolean)),
+    ...(trendBrief ? [trendBrief, 'For this Instagram version: line 1 may be the bridge hook, rephrased; the character/model name must still appear.'] : []),
     'Return ONLY JSON: {"body": "..."}',
   ].join('\n');
   const response = await ai.models.generateContent({
@@ -246,7 +250,7 @@ export async function generateInstagramVariant({ asset, language = 'es', base, a
  * Título y descripción del pin de video para Pinterest, siempre en inglés (la audiencia de Pinterest es global y el
  * pin lleva a la página en inglés). Pinterest funciona como buscador: palabras clave naturales + gancho + invitación.
  */
-export async function generatePinterestTexts({ asset, base = {} }) {
+export async function generatePinterestTexts({ asset, base = {}, trendBrief = '' }) {
   const name = asset?.titleEn || asset?.title || base.title || '3D printable figure';
   if (isMockAi()) {
     return {
@@ -269,6 +273,7 @@ export async function generatePinterestTexts({ asset, base = {} }) {
     'TITLE: max 95 characters, the character/model name first, attention-grabbing and specific (e.g. "Mikasa Ackerman 3D Print – Detailed Attack on Titan Resin Statue STL"). No emojis, no hashtags, no clickbait in caps.',
     'DESCRIPTION: 300-480 characters. Open with a vivid hook about the figure/scene, then say what you get (ready-to-print STL for resin or FDM, detail level, great to paint/display/gift), then a clear invitation to click such as "Tap to get the STL and start printing." Up to 1 emoji. End with 3-5 relevant hashtags on a new line.',
     'The STL files are PAID: never say "free". No URLs, no prices.',
+    ...(trendBrief ? [trendBrief, 'For Pinterest: use ONLY the related trends/keywords and the seasonal angle (Pinterest is a search engine); IGNORE the bridge hook completely.'] : []),
     'Return ONLY JSON: {"title": "...", "description": "..."}',
   ].filter(Boolean).join('\n');
   const response = await ai.models.generateContent({

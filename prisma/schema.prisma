@@ -919,6 +919,9 @@ model ReelPost {
   aiGenerated          Boolean        @default(false)
   aiStatus             String         @default("PROCESSING") @db.VarChar(12) // NONE | PROCESSING | READY | ERROR
   aiError              String?        @db.Text
+  textMode             String         @default("auto") @db.VarChar(10) // auto = los textos se generan solos con tendencias ~3 h antes de publicar; manual = se usan los del editor
+  autoTextsAt          DateTime? // cuándo se generaron los textos automáticos (con tendencias)
+  trendInfo            Json? // tendencia usada en los textos automáticos { term, kind, hook, related, generatedAt }
   approved             Boolean        @default(false) // solo se publica lo aprobado
   scheduledAt          DateTime? // null = en la bandeja, sin día asignado
   status               ReelPostStatus @default(PENDING)
@@ -1278,4 +1281,16 @@ model SiteReview {
 
   @@index([status, featured, createdAt(sort: Desc)])
   @@map("sitereview")
+}
+
+/// Tendencias del día recogidas de varias fuentes; alimentan los textos automáticos de los reels
+model TrendTopic {
+  id          Int      @id @default(autoincrement())
+  collectedAt DateTime @default(now())
+  source      String   @db.VarChar(20) // google | pinterest | youtube | bluesky | mastodon
+  term        String   @db.VarChar(200)
+  score       Int? // tráfico, crecimiento o usos según la fuente (para ordenar)
+
+  @@index([collectedAt])
+  @@map("trendtopic")
 }
