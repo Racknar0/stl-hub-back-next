@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import { rollNeedsReview } from '../services/siteReviews.service.js';
 
 const prisma = new PrismaClient();
 
@@ -261,19 +262,26 @@ export const getMyFreebieRolls = async (req, res) => {
     const maxRolls = config && config.value ? (parseInt(config.value, 10) || 3) : 3;
 
     const today = new Date().toISOString().split('T')[0];
-    const row = await prisma.userDailyRolls.findUnique({
-      where: {
-        userId_date: {
-          userId,
-          date: today,
+    const [row, review] = await Promise.all([
+      prisma.userDailyRolls.findUnique({
+        where: {
+          userId_date: {
+            userId,
+            date: today,
+          },
         },
-      },
-      select: { rollsUsed: true },
-    });
+        select: { rollsUsed: true },
+      }),
+      prisma.siteReview.findUnique({ where: { userId }, select: { id: true } }),
+    ]);
 
+    const rollsUsed = row?.rollsUsed ?? 0;
+    const hasReview = Boolean(review);
     return res.json({
-      rollsUsed: row?.rollsUsed ?? 0,
-      maxRolls
+      rollsUsed,
+      maxRolls,
+      hasReview,
+      reviewRequired: rollNeedsReview({ rollsUsed, maxRolls, hasReview }),
     });
   } catch (e) {
     console.error('[ME] getMyFreebieRolls error:', e);
@@ -306,6 +314,12 @@ export const registerFreebieRoll = async (req, res) => {
     const currentRolls = record?.rollsUsed ?? 0;
     if (currentRolls >= maxRolls) {
       return res.status(400).json({ message: 'Ya has agotado tus tiradas de hoy.' });
+    }
+
+    // La última tirada del día exige haber dejado una opinión sobre la web
+    const review = await prisma.siteReview.findUnique({ where: { userId }, select: { id: true } });
+    if (rollNeedsReview({ rollsUsed: currentRolls, maxRolls, hasReview: Boolean(review) })) {
+      return res.status(403).json({ code: 'REVIEW_REQUIRED', message: 'Deja tu opinión para desbloquear la última tirada de hoy.', rollsUsed: currentRolls, maxRolls });
     }
 
     const updated = await prisma.userDailyRolls.upsert({

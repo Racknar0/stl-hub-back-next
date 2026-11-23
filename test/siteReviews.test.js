@@ -36,3 +36,13 @@ test('shouldPromptReview: solo tras las descargas mínimas y sin opinión previa
   assert.equal(shouldPromptReview({ downloads: REVIEW_MIN_DOWNLOADS, hasReview: false }), true);
   assert.equal(shouldPromptReview({ downloads: 40, hasReview: true }), false);
 });
+
+test('la última tirada de Freebies se desbloquea solo con opinión', async () => {
+  const { rollNeedsReview } = await import('../src/services/siteReviews.service.js');
+  assert.equal(rollNeedsReview({ rollsUsed: 0, maxRolls: 3, hasReview: false }), false);
+  assert.equal(rollNeedsReview({ rollsUsed: 1, maxRolls: 3, hasReview: false }), false);
+  assert.equal(rollNeedsReview({ rollsUsed: 2, maxRolls: 3, hasReview: false }), true);
+  assert.equal(rollNeedsReview({ rollsUsed: 2, maxRolls: 3, hasReview: true }), false);
+  assert.equal(rollNeedsReview({ rollsUsed: 3, maxRolls: 3, hasReview: false }), false);
+  assert.equal(rollNeedsReview({ rollsUsed: 0, maxRolls: 1, hasReview: false }), false);
+});

@@ -9,6 +9,14 @@ export const REVIEW_PUBLIC_MIN_RATING = 4;
 
 export const REVIEW_STATUSES = ['PENDING', 'APPROVED', 'REJECTED'];
 
+// Freebies: la última tirada del día se desbloquea dejando una opinión (vale cualquier nota y estado).
+// Con una sola tirada diaria no se bloquea nada.
+export function rollNeedsReview({ rollsUsed, maxRolls, hasReview }) {
+  const used = Number(rollsUsed) || 0;
+  const max = Number(maxRolls) || 0;
+  return !hasReview && max >= 2 && used === max - 1;
+}
+
 const cleanText = (value, max) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 
 // Valida y normaliza lo que envía el modal. Devuelve { data } o { error }.
