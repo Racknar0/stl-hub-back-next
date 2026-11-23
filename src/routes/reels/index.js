@@ -172,10 +172,21 @@ router.get('/month', requireAuth, requireAdmin, async (req, res) => {
     const y = parseInt(req.query.year, 10) || new Date().getFullYear();
     const m = parseInt(req.query.month, 10);
     if (isNaN(m)) return res.json({ postsByDay: {} });
-    const posts = await prisma.reelPost.findMany({
-      where: { scheduledAt: { gte: new Date(y, m, 1), lt: new Date(y, m + 1, 1) } },
+    const found = await prisma.reelPost.findMany({
+      where: { scheduledAt: { gte: new Date(y, m - 1, 25), lt: new Date(y, m + 1, 7) } },
       orderBy: { scheduledAt: 'asc' },
     });
+    // Un reel ya publicado va en el día de su primera red publicada: un reintento posterior (antes movía el reel a
+    // ese día) no lo cambia de sitio en el calendario
+    const posts = found.map((post) => {
+      const firstAt = Object.values(post.results || {})
+        .filter(r => r?.id && !r.simulated && r.publishedAt)
+        .map(r => new Date(r.publishedAt))
+        .filter(d => !Number.isNaN(+d))
+        .sort((a, b) => a - b)[0];
+      if (!firstAt || firstAt >= new Date(post.scheduledAt)) return post;
+      return { ...post, scheduledAt: firstAt, ...(post.publishedAt && new Date(post.publishedAt) > firstAt && { publishedAt: firstAt }) };
+    }).filter(p => new Date(p.scheduledAt) >= new Date(y, m, 1) && new Date(p.scheduledAt) < new Date(y, m + 1, 1));
     const postsByDay = {};
     // Normalmente 1 por día, pero "Publicar ahora" puede sumar otro al día de hoy
     for (const post of posts) (postsByDay[new Date(post.scheduledAt).getDate()] ??= []).push(post);
@@ -542,6 +553,13 @@ router.post('/:id/publish', requireAuth, requireAdmin, async (req, res) => {
     if (post.publishing) return res.status(409).json({ error: 'Este reel ya se está publicando' });
     const missing = reels.missingFields(post);
     if (missing.length) return res.status(400).json({ error: `Falta: ${missing.join(', ')}` });
+
+    // Reintento de un reel que ya salió en alguna red (p. ej. falló solo una): se queda en su día y no toca el de hoy
+    if (Object.values(post.results || {}).some(r => r?.id && !r.simulated) && post.scheduledAt) {
+      await prisma.reelPost.update({ where: { id: post.id }, data: { publishing: true, approved: true, errorMessage: null } });
+      reels.publishInBackground({ ...post, approved: true, publishing: true });
+      return res.json({ post: { ...post, approved: true, publishing: true } });
+    }
 
     // Publicar ahora ocupa el día de hoy: si hoy tenía otro reel sin publicar, vuelve a la bandeja
     const now = new Date();
