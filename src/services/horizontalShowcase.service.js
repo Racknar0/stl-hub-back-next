@@ -16,11 +16,11 @@ const SETTINGS = {
   LAST_LANGUAGE: 'HORIZONTAL_LAST_LANGUAGE',
   LAST_PUBLISHED_AT: 'HORIZONTAL_LAST_PUBLISHED_AT',
   AUTO_ENABLED: 'HORIZONTAL_AUTO_ENABLED', // "false" apaga la publicación automática
-  DAILY_TIME: 'HORIZONTAL_DAILY_TIME', // hora fija diaria "HH:MM" en hora de Colombia (por defecto 21:00)
+  DAILY_TIME: 'HORIZONTAL_DAILY_TIME', // hora fija diaria "HH:MM" en hora de Colombia (por defecto 15:00)
   LAST_AUTO_DAY: 'HORIZONTAL_LAST_AUTO_DAY', // último día (Colombia, YYYY-MM-DD) en que se intentó el automático
   LAST_FB_PAGE: 'HORIZONTAL_LAST_FB_PAGE' // id de la última Página de Facebook donde salió un video horizontal
 };
-const DEFAULT_DAILY_TIME = '21:00';
+const DEFAULT_DAILY_TIME = '15:00';
 
 const HORIZONTAL_DIR = path.resolve('uploads', 'horizontal');
 const COMPLETED_DIR = path.resolve(HORIZONTAL_DIR, 'completed');
@@ -484,6 +484,7 @@ export async function getHorizontalStatus() {
       } : null,
     },
     nextPublish: next.label,
+    dailyTime: (await autoSettings()).time,
     nextPublishNote: next.note,
     channelToday: todayChannel,
     channelConnected,
@@ -1005,6 +1006,18 @@ async function publishedToday(day) {
   return Boolean(found);
 }
 
+/** Cambia la hora fija diaria ("HH:MM", hora de Colombia) de la publicación automática. */
+export async function setAutoDailyTime(time) {
+  const value = String(time || '').trim();
+  if (!TIME_RE.test(value)) throw new Error('Hora inválida (usa HH:MM)');
+  await prisma.systemSetting.upsert({
+    where: { key: SETTINGS.DAILY_TIME },
+    update: { value },
+    create: { key: SETTINGS.DAILY_TIME, value, description: 'Hora diaria (Colombia) del video horizontal automático' },
+  });
+  return autoSettings();
+}
+
 /** Hora real del próximo video horizontal (label) y una nota que la explica, en hora de Colombia. */
 export async function nextAutoPublishInfo() {
   const cfg = await autoSettings();
@@ -1084,6 +1097,7 @@ export default {
   ensureDirs,
   publishDueHorizontal,
   nextAutoPublishInfo,
+  setAutoDailyTime,
   latestReadyCompilation,
   publishToFacebook,
   nextFacebookPage,

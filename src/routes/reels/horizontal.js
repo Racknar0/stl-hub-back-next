@@ -14,6 +14,16 @@ router.get('/status', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
+// 1b. Hora diaria (Colombia) del video automático
+router.put('/daily-time', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const cfg = await horizontalService.setAutoDailyTime(req.body?.time);
+    res.json({ success: true, time: cfg.time });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 // 2. Modelos con su estado de rotación / cooldown
 router.get('/models', requireAuth, requireAdmin, async (req, res) => {
   try {
