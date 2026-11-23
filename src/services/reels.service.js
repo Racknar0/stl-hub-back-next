@@ -706,6 +706,8 @@ async function publishToPlatform(platform, post, { now = false } = {}) {
       videoAbsPath: toAbsVideoPath(post.videoPath),
       ...pinterestTexts(post),
       link: pinterestLink(post),
+      // Si Pinterest bloquea el enlace del modelo, el pin sale igual llevando a la portada
+      fallbackLink: 'https://stlgratis.com/en',
       assetId: post.assetId,
     });
   }
@@ -790,7 +792,10 @@ export async function publishReel(post) {
     }
 
     const done = (p) => (results[p]?.id && !results[p].simulated) || results[p]?.deferred;
-    const allDone = targets.length > 0 && targets.every(done);
+    // Pinterest no bloquea el reel: si solo falla ahí (p. ej. rechaza el enlace) el reel queda publicado igual
+    const blocking = targets.filter(p => p !== 'pinterest');
+    const allDone = targets.length > 0 && (blocking.length ? blocking : targets).every(done);
+    const pinterestOnly = allDone && !done('pinterest') && targets.includes('pinterest');
     const published = targets.filter(p => results[p]?.id && !results[p].simulated);
     // Bio de Instagram: stlgratis.com/v/hoy pasa a llevar al modelo de este reel en cuanto sale en Instagram
     if (published.includes('instagram') && post.link) {
@@ -804,7 +809,7 @@ export async function publishReel(post) {
       dispatchReelNotification({
         post,
         title: published.length ? 'Publicado solo en parte' : 'No se pudo publicar',
-        detail: `${errors.join('\n')}\n\n${published.length ? `Sí se publicó en: ${published.map(nameOf).join(', ')}. ` : ''}Usa "Reintentar publicación": solo se reintentan las redes que fallaron.`,
+        detail: `${errors.join('\n')}\n\n${published.length ? `Sí se publicó en: ${published.map(nameOf).join(', ')}. ` : ''}${pinterestOnly ? 'Solo falló Pinterest: el reel queda como publicado y no se reintenta solo.' : 'Usa "Reintentar publicación": solo se reintentan las redes que fallaron.'}`,
         links: publishedLinks,
       });
     }
@@ -829,7 +834,7 @@ export async function publishReel(post) {
       data: {
         results, publishing: false, simulated: false, approved: true,
         ...(allDone
-          ? { status: 'PUBLISHED', publishedAt: post.publishedAt || firstAt || new Date(), errorMessage: null }
+          ? { status: 'PUBLISHED', publishedAt: post.publishedAt || firstAt || new Date(), errorMessage: pinterestOnly && errors.length ? errors.join(' | ') : null }
           : { status: 'FAILED', errorMessage: errors.join(' | ') }),
       },
     });

@@ -406,7 +406,7 @@ class PinterestPublisherService {
    * @param {number|null} params.assetId Asset para elegir el tablero por su categoría
    * @param {number} params.coverSeconds Segundo del video que se usa como portada
    */
-  async publishVideoPin({ videoAbsPath, title, description, link, assetId = null, coverSeconds = 1 }) {
+  async publishVideoPin({ videoAbsPath, title, description, link, fallbackLink = null, assetId = null, coverSeconds = 1 }) {
     if (!videoAbsPath || !fs.existsSync(videoAbsPath)) throw new Error('El archivo de video no está en el servidor');
     const accessToken = await pinterestService.getValidAccessToken();
     const auth = { Authorization: `Bearer ${accessToken}` };
@@ -454,17 +454,31 @@ class PinterestPublisherService {
       link: link || '',
       media_source: { source_type: 'video_id', media_id: reg.media_id, cover_image_key_frame_time: coverSeconds },
     };
-    const pinResp = await fetch(`${this.baseUrl}/pins`, {
+    const createPin = (body) => fetch(`${this.baseUrl}/pins`, {
       method: 'POST',
       headers: { ...auth, 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(body),
     });
+    let pinResp = await createPin(payload);
+    let usedFallback = false;
     if (!pinResp.ok) {
       const text = await pinResp.text().catch(() => '');
-      throw new Error(`Error de Pinterest al crear el pin de video: ${text.slice(0, 300)}`);
+      // Pinterest bloquea a veces el enlace de un modelo concreto ("This site doesn't allow you to save Pins"):
+      // se reintenta una vez con el enlace de respaldo, aprovechando el video ya subido
+      if (fallbackLink && fallbackLink !== payload.link && /doesn't allow you to save Pins/i.test(text)) {
+        console.warn(`[Pinterest] Enlace bloqueado (${payload.link}); reintentando con ${fallbackLink}`);
+        pinResp = await createPin({ ...payload, link: fallbackLink });
+        usedFallback = true;
+        if (!pinResp.ok) {
+          const retryText = await pinResp.text().catch(() => '');
+          throw new Error(`Error de Pinterest al crear el pin de video (también con el enlace de respaldo): ${retryText.slice(0, 300)}`);
+        }
+      } else {
+        throw new Error(`Error de Pinterest al crear el pin de video: ${text.slice(0, 300)}`);
+      }
     }
     const pin = await pinResp.json();
-    return { id: pin.id, pinId: pin.id, boardId, url: `https://www.pinterest.com/pin/${pin.id}/` };
+    return { id: pin.id, pinId: pin.id, boardId, url: `https://www.pinterest.com/pin/${pin.id}/`, ...(usedFallback && { linkFallback: fallbackLink }) };
   }
 }
 
