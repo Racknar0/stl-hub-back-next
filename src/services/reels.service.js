@@ -9,6 +9,7 @@ import { publishVideo as publishTiktokVideo, tiktokOptionsProblem } from './tikt
 import { publishVideo as publishThreadsVideo, connectionStatus as threadsStatus, threadsText } from './threads.service.js';
 import { publishVideo as publishBlueskyVideo, connectionStatus as blueskyStatus, blueskyText } from './bluesky.service.js';
 import { publishVideo as publishTumblrVideo, connectionStatus as tumblrStatus } from './tumblr.service.js';
+import { publishVideo as publishMastodonVideo, connectionStatus as mastodonStatus, mastodonText } from './mastodon.service.js';
 import { getChannelVariantVideo, cleanVariants } from './reelsVideoVariants.service.js';
 import { publishDueHorizontal } from './horizontalShowcase.service.js';
 import { shortOrLong, setFixedLink, BIO_CODE } from './shortLinks.service.js';
@@ -16,7 +17,7 @@ import pinterestPublisher from './pinterestPublisher.service.js';
 
 const prisma = new PrismaClient();
 
-export const PLATFORMS = ['instagram', 'facebook', 'youtube', 'tiktok', 'threads', 'pinterest', 'bluesky', 'tumblr'];
+export const PLATFORMS = ['instagram', 'facebook', 'youtube', 'tiktok', 'threads', 'pinterest', 'bluesky', 'tumblr', 'mastodon'];
 const SETTINGS = { defaultTime: 'REELS_DEFAULT_TIME', timeSpread: 'REELS_TIME_SPREAD', language: 'REELS_LANGUAGE', youtubePrivacy: 'REELS_YOUTUBE_PRIVACY' };
 const DEFAULTS = { defaultTime: '18:00', timeSpread: 60, language: 'es', youtubePrivacy: 'public' };
 const YOUTUBE_PRIVACY = ['private', 'unlisted', 'public'];
@@ -377,6 +378,8 @@ export function missingFields(post) {
   if (platforms.includes('bluesky') && !post.caption?.trim()) missing.push('caption (se usa también en Bluesky)');
   // Tumblr igual: caption sin cabecera ni pie + tarjeta con el link del modelo
   if (platforms.includes('tumblr') && !post.caption?.trim()) missing.push('caption (se usa también en Tumblr)');
+  // Mastodon igual: caption sin cabecera ni pie + link + hashtags
+  if (platforms.includes('mastodon') && !post.caption?.trim()) missing.push('caption (se usa también en Mastodon)');
   // Pinterest usa el título de YouTube (o el del modelo) y el caption de Instagram sin cabecera ni pie
   if (platforms.includes('pinterest') && !(post.title || post.assetTitle)?.trim()) missing.push('título (se usa en Pinterest)');
   return missing;
@@ -496,7 +499,7 @@ async function instagramTargets(post) {
   });
 }
 
-const PLATFORM_NAMES = { instagram: 'Instagram', facebook: 'Facebook', youtube: 'YouTube', tiktok: 'TikTok', threads: 'Threads', pinterest: 'Pinterest', bluesky: 'Bluesky', tumblr: 'Tumblr' };
+const PLATFORM_NAMES = { instagram: 'Instagram', facebook: 'Facebook', youtube: 'YouTube', tiktok: 'TikTok', threads: 'Threads', pinterest: 'Pinterest', bluesky: 'Bluesky', tumblr: 'Tumblr', mastodon: 'Mastodon' };
 
 // Reels que se están subiendo ahora mismo (evita publicar dos veces el mismo si coinciden el worker y "Publicar ahora")
 const inFlight = new Set();
@@ -571,6 +574,10 @@ async function publishToPlatform(platform, post, { now = false } = {}) {
   if (platform === 'bluesky') {
     const short = link ? await shortOrLong({ targetUrl: link, source: 'bluesky', label: `Reel ${post.id} · Bluesky`, refType: 'reel', refId: post.id }) : null;
     return publishBlueskyVideo({ videoAbsPath: toAbsVideoPath(post.videoPath), text: blueskyText(captionBody(post.caption), short), alt: post.title || post.assetTitle || '' });
+  }
+  if (platform === 'mastodon') {
+    const short = link ? await shortOrLong({ targetUrl: link, source: 'mastodon', label: `Reel ${post.id} · Mastodon`, refType: 'reel', refId: post.id }) : null;
+    return publishMastodonVideo({ videoAbsPath: toAbsVideoPath(post.videoPath), text: mastodonText(captionBody(post.caption), short, post.hashtags), alt: post.title || post.assetTitle || '' });
   }
   if (platform === 'tumblr') {
     const short = link ? await shortOrLong({ targetUrl: link, source: 'tumblr', label: `Reel ${post.id} · Tumblr`, refType: 'reel', refId: post.id }) : null;
@@ -702,7 +709,7 @@ export async function publishReel(post) {
 }
 
 // Redes de una sola cuenta que se pueden añadir a un reel ya publicado sin tocar las demás
-export const EXTRA_PLATFORMS = ['bluesky', 'threads', 'tumblr'];
+export const EXTRA_PLATFORMS = ['bluesky', 'threads', 'tumblr', 'mastodon'];
 
 /**
  * Publica un reel (aunque ya esté publicado) solo en una red de una cuenta que todavía no lo tiene, p. ej. al
@@ -1016,18 +1023,19 @@ export async function addPlatformToPending(platform) {
 }
 
 /**
- * Redes por defecto de un reel nuevo: YouTube, Threads, Bluesky y Tumblr si su cuenta está conectada; Instagram, Facebook y
+ * Redes por defecto de un reel nuevo: YouTube, Threads, Bluesky, Tumblr y Mastodon si su cuenta está conectada; Instagram, Facebook y
  * Pinterest siempre. TikTok queda apagado por defecto (se programa en el programador nativo de TikTok);
  * se puede encender a mano en cada reel.
  */
 export async function defaultPlatforms() {
-  const [yt, th, bs, tb] = await Promise.all([
+  const [yt, th, bs, tb, md] = await Promise.all([
     youtubeStatus().catch(() => ({ connected: false })),
     threadsStatus().catch(() => ({ connected: false })),
     blueskyStatus().catch(() => ({ connected: false })),
     tumblrStatus().catch(() => ({ connected: false })),
+    mastodonStatus().catch(() => ({ connected: false })),
   ]);
-  const connected = { youtube: yt.connected, threads: th.connected, bluesky: bs.connected, tumblr: tb.connected };
+  const connected = { youtube: yt.connected, threads: th.connected, bluesky: bs.connected, tumblr: tb.connected, mastodon: md.connected };
   return PLATFORMS.filter(p => p !== 'tiktok' && (!(p in connected) || connected[p]));
 }
 
