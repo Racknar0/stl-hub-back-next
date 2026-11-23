@@ -47,3 +47,16 @@ test('parseNewsRss quita el medio del final del titular', async () => {
   const xml = '<rss><item><title>Blizzard reveals WoW Forever event - IGN</title></item><item><title>World of Warcraft: what to know - Polygon</title></item></rss>';
   assert.deepEqual(parseNewsRss(xml), ['Blizzard reveals WoW Forever event', 'World of Warcraft: what to know']);
 });
+
+test('buildTrendBrief con tendencia caliente: va primero, hashtag y sin puente salvo en la versión permitida', async () => {
+  const { hotHashtag } = await import('../src/services/trends.service.js');
+  assert.equal(hotHashtag('WoW Forever'), 'WoWForever');
+  assert.equal(hotHashtag('avengers: doomsday'), 'AvengersDoomsday');
+  const angle = { hot: 'WoW Forever', related: ['World of Warcraft'], keywords: [], seasonal: null, bridge: { trend: 'Avengers Doomsday', hook: 'x' }, hashtags: [] };
+  const main = buildTrendBrief(angle, { allowBridge: false });
+  assert.match(main, /HOT TOPIC.*"WoW Forever"/);
+  assert.match(main, /#WoWForever as the FIRST hashtag/);
+  assert.match(main, /Do NOT mention "Avengers Doomsday"/);
+  const alt = buildTrendBrief(angle, { allowBridge: true });
+  assert.match(alt, /SECOND line of the caption only/);
+});

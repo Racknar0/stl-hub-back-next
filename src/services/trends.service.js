@@ -254,7 +254,8 @@ export async function pickTrendAngle({ asset, trends, events, topic = null, lang
     `UPCOMING DATES: ${events?.length ? events.map(e => `${e.name} in ${e.daysLeft} days`).join(', ') : 'none soon'}`,
     '',
     'Return ONLY JSON with this shape:',
-    '{"related": ["trends/keywords GENUINELY related to the model: same franchise, character, theme, genre, or what the object is used for"],',
+    '{"hot": "the exact popular name of a HOT topic of the model\'s own franchise/theme right now (launch, expansion, event, trailer, season, movie, announcement), e.g. \\"WoW Forever\\"; null if there is none (the franchise name alone is NOT a hot topic)",',
+    ' "related": ["trends/keywords GENUINELY related to the model: same franchise, character, theme, genre, or what the object is used for"],',
     ' "keywords": ["up to 4 search phrases people type that fit the model and today (for YouTube/Pinterest titles)"],',
     ' "seasonal": {"event": "upcoming date that fits", "daysLeft": 0, "angle": "e.g. gift idea, Halloween decor"} or null,',
     ' "bridge": {"trend": "the strongest trend of the day, even if unrelated", "hook": "ONE short, witty opening line that links that trend with the model WITHOUT lying (e.g. \\"While we wait for GTA VI on PC, print this epic treasure chest\\")"} or null,',
@@ -270,7 +271,9 @@ export async function pickTrendAngle({ asset, trends, events, topic = null, lang
   });
   const p = parseJson(response?.text);
   const clean = (v) => String(v || '').trim();
+  const hot = clean(p.hot) && !/^null$/i.test(clean(p.hot)) ? clean(p.hot).slice(0, 60) : null;
   return {
+    hot,
     related: (Array.isArray(p.related) ? p.related : []).map(clean).filter(Boolean).slice(0, 6),
     keywords: (Array.isArray(p.keywords) ? p.keywords : []).map(clean).filter(Boolean).slice(0, 4),
     seasonal: p.seasonal?.event ? { event: clean(p.seasonal.event), daysLeft: Number(p.seasonal.daysLeft) || null, angle: clean(p.seasonal.angle) } : null,
@@ -283,15 +286,34 @@ export async function pickTrendAngle({ asset, trends, events, topic = null, lang
  * Brief que se añade a los prompts de textos: qué se puede usar y dónde. Las tendencias relacionadas y la fecha van
  * en cualquier campo; el puente (tendencia sin relación) solo como frase de enganche de los textos sociales.
  */
-export function buildTrendBrief(angle) {
+export function buildTrendBrief(angle, { allowBridge = true } = {}) {
   if (!angle) return '';
   const lines = ["## TODAY'S TREND BRIEF (use it to get more reach, following these rules)"];
+  if (angle.hot) {
+    // Tendencia caliente de la propia saga: es lo que más vistas trae, va en títulos, primera línea y hashtags
+    lines.push(`- HOT TOPIC of the model's own franchise right now: "${angle.hot}". It is the TOP priority and it IS related to the model:`);
+    lines.push(`  · put "${angle.hot}" in every title (YouTube, Pinterest), right after the model name (e.g. "Thrall – ${angle.hot} Warchief 3D Printable Bust");`);
+    lines.push(`  · mention it naturally in the FIRST line of every caption/description (e.g. "${angle.hot} has fans buzzing…"), each version with different wording;`);
+    lines.push(`  · include the hashtag #${hotHashtag(angle.hot)} as the FIRST hashtag.`);
+  }
   if (angle.related.length || angle.keywords.length) lines.push(`- Related trends/keywords (OK anywhere: titles, descriptions, hashtags): ${[...angle.related, ...angle.keywords].join(', ')}`);
-  if (angle.seasonal) lines.push(`- Seasonal angle (OK anywhere): ${angle.seasonal.event}${angle.seasonal.daysLeft != null ? ` in ${angle.seasonal.daysLeft} days` : ''} → ${angle.seasonal.angle}`);
-  if (angle.bridge) lines.push(`- Bridge hook with an UNRELATED trend ("${angle.bridge.trend}"): use it ONLY as the opening line of social captions (Instagram/Facebook bodies) and optionally in the YouTube description. NEVER put it in the YouTube title, the hashtags or Pinterest texts. Suggested line: "${angle.bridge.hook}" (rephrase it for each version).`);
+  if (angle.seasonal) lines.push(`- Seasonal angle (OK anywhere, secondary): ${angle.seasonal.event}${angle.seasonal.daysLeft != null ? ` in ${angle.seasonal.daysLeft} days` : ''} → ${angle.seasonal.angle}`);
+  if (angle.bridge && allowBridge) {
+    lines.push(angle.hot
+      ? `- Optional playful aside with an UNRELATED trend ("${angle.bridge.trend}"): you may add it as a SECOND line of the caption only, never as the opening, never in titles, hashtags or Pinterest. Suggested: "${angle.bridge.hook}".`
+      : `- Bridge hook with an UNRELATED trend ("${angle.bridge.trend}"): use it ONLY as the opening line of social captions (Instagram/Facebook bodies) and optionally in the YouTube description. NEVER put it in the YouTube title, the hashtags or Pinterest texts. Suggested line: "${angle.bridge.hook}" (rephrase it).`);
+  } else if (angle.bridge) {
+    lines.push(`- Do NOT mention "${angle.bridge.trend}" or any other unrelated trend in this version.`);
+  }
   if (angle.hashtags.length) lines.push(`- Trending hashtags you may use (they are related to the model or the niche): ${angle.hashtags.join(', ')}`);
   lines.push('- Never pretend the model is part of an unrelated franchise. Keep the model name first in titles.');
+  lines.push('- Write correct, natural English or Spanish (articles a/an, agreement); no repeated openings across versions.');
   return lines.join('\n');
 }
 
-export default { collectTrends, startTrendsScheduler, latestTrends, upcomingEvents, pickTrendAngle, buildTrendBrief, parseGoogleTrendsRss, parseNewsRss, topicKeywords, topicTrends };
+/** Hashtag de una tendencia: "WoW Forever" -> "WoWForever" (sin espacios ni signos, respeta mayúsculas). */
+export function hotHashtag(text) {
+  return String(text || '').split(/[^\p{L}\p{N}]+/u).filter(Boolean).map(w => w[0].toUpperCase() + w.slice(1)).join('').slice(0, 50);
+}
+
+export default { collectTrends, startTrendsScheduler, latestTrends, upcomingEvents, pickTrendAngle, buildTrendBrief, hotHashtag, parseGoogleTrendsRss, parseNewsRss, topicKeywords, topicTrends };

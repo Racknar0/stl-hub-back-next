@@ -14,7 +14,7 @@ import { getChannelVariantVideo, cleanVariants } from './reelsVideoVariants.serv
 import { publishDueHorizontal } from './horizontalShowcase.service.js';
 import { shortOrLong, setFixedLink, BIO_CODE } from './shortLinks.service.js';
 import pinterestPublisher from './pinterestPublisher.service.js';
-import { latestTrends, upcomingEvents, pickTrendAngle, buildTrendBrief, topicTrends } from './trends.service.js';
+import { latestTrends, upcomingEvents, pickTrendAngle, buildTrendBrief, hotHashtag, topicTrends } from './trends.service.js';
 
 const prisma = new PrismaClient();
 
@@ -148,7 +148,7 @@ export async function loadAssetImageParts(asset, limit = 3) {
 
 // ---------- IA ----------
 /** Genera los textos de un reel y, si no tiene asset, intenta encontrarlo en el catálogo. */
-export async function processReelAi(postId, { notes, language, trendBrief = '' } = {}) {
+export async function processReelAi(postId, { notes, language, trendBrief = '', trendBriefAlt = '' } = {}) {
   const post = await prisma.reelPost.findUnique({ where: { id: postId } });
   if (!post) return null;
   await prisma.reelPost.update({ where: { id: postId }, data: { aiStatus: 'PROCESSING', aiError: null } });
@@ -177,7 +177,7 @@ export async function processReelAi(postId, { notes, language, trendBrief = '' }
         title: texts.youtubeTitle || null,
         youtubeDescription: texts.youtubeDescription || null,
         youtubeVariants: await youtubeVariantsFor(asset, texts, lang, trendBrief),
-        facebookVariants: await facebookVariantsFor(asset, texts, lang, trendBrief),
+        facebookVariants: await facebookVariantsFor(asset, texts, lang, trendBrief, trendBriefAlt),
         instagramVariants: await instagramVariantsFor(asset, texts, lang, trendBrief),
         ...(await pinterestTextsFor(asset, { title: texts.youtubeTitle, description: texts.youtubeDescription }, trendBrief)),
         language: lang,
@@ -219,13 +219,16 @@ async function youtubeVariantsFor(asset, texts, language, trendBrief = '') {
 }
 
 /** Caption distinto para cada Página de Facebook que no es la principal. */
-async function facebookVariantsFor(asset, texts, language, trendBrief = '') {
+// trendBriefAlt (si viene) se usa solo en la última Página: es la única donde se permite el puente creativo
+// cuando ya hay una tendencia caliente de la saga (así no se repite el mismo enganche en todas las cuentas)
+async function facebookVariantsFor(asset, texts, language, trendBrief = '', trendBriefAlt = '') {
   const pages = (await listFacebookPages().catch(() => [])).slice(1);
   if (!pages.length || isMockAi()) return null;
   const variants = {};
-  for (const pg of pages) {
+  for (const [i, pg] of pages.entries()) {
     try {
-      variants[pg.id] = { caption: await generateFacebookVariant({ asset, language, base: texts.facebookCaption, avoid: Object.values(variants).map(v => v.caption), trendBrief }) };
+      const brief = trendBriefAlt && i === pages.length - 1 ? trendBriefAlt : trendBrief;
+      variants[pg.id] = { caption: await generateFacebookVariant({ asset, language, base: texts.facebookCaption, avoid: Object.values(variants).map(v => v.caption), trendBrief: brief }) };
     } catch (e) {
       console.warn(`[REELS][AI] Variante de Facebook para ${pg.name}: ${e.message}`);
     }
@@ -399,11 +402,22 @@ export async function generateAutoTexts(postId) {
       console.warn(`[REELS][TRENDS] Reel ${postId}: sin ángulo de tendencia (${e.message})`);
     }
   }
-  const updated = await processReelAi(postId, { language: lang, trendBrief: buildTrendBrief(angle) });
+  // Con tendencia caliente de la saga, el puente (tendencia sin relación) solo se permite en una cuenta
+  const trendBrief = buildTrendBrief(angle, { allowBridge: !angle?.hot });
+  const trendBriefAlt = angle?.hot && angle?.bridge ? buildTrendBrief(angle, { allowBridge: true }) : '';
+  let updated = await processReelAi(postId, { language: lang, trendBrief, trendBriefAlt });
   if (!updated || updated.aiStatus === 'ERROR') throw new Error(updated?.aiError || 'No se pudieron generar los textos');
+  // El hashtag de la tendencia caliente va siempre primero (lo usan Instagram, TikTok, Mastodon y Tumblr)
+  if (angle?.hot) {
+    const tag = hotHashtag(angle.hot);
+    const current = Array.isArray(updated.hashtags) ? updated.hashtags : [];
+    const hashtags = [tag, ...current.filter(h => String(h).toLowerCase() !== tag.toLowerCase())].slice(0, 5);
+    updated = await prisma.reelPost.update({ where: { id: postId }, data: { hashtags } });
+  }
   const trendInfo = angle ? {
-    term: angle.related[0] || angle.seasonal?.event || angle.bridge?.trend || null,
-    kind: angle.related.length ? 'related' : angle.seasonal ? 'seasonal' : angle.bridge ? 'bridge' : null,
+    term: angle.hot || angle.related[0] || angle.seasonal?.event || angle.bridge?.trend || null,
+    kind: angle.hot ? 'hot' : angle.related.length ? 'related' : angle.seasonal ? 'seasonal' : angle.bridge ? 'bridge' : null,
+    hot: angle.hot || null,
     bridge: angle.bridge?.trend || null,
     seasonal: angle.seasonal?.event || null,
     related: angle.related,

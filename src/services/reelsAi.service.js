@@ -51,7 +51,7 @@ function buildPrompt({ asset, notes, language, withImages, recentBodies = [], tr
     '- Avoid generic filler ("cobra vida", "lleno de detalles", "ideal para tu colección", "brings to life") unless it is genuinely the best option.',
     ...(recentBodies.length ? ['PREVIOUS DESCRIPTIONS (do NOT imitate them):', ...recentBodies.map((b, i) => `${i + 1}. ${b.replace(/\n/g, ' / ')}`)] : []),
     '',
-    ...(trendBrief ? [trendBrief, '- With the brief: instagramBody and facebookBody may OPEN with the bridge hook (each with different wording); youtubeTitle may only use related trends, keywords or the seasonal angle; hashtags: prefer the trending ones from the brief, still exactly 5.', ''] : []),
+    ...(trendBrief ? [trendBrief, '- Follow the brief priorities: if there is a HOT TOPIC, instagramBody, facebookBody, youtubeTitle and youtubeDescription must open with/include it and it is the first hashtag; only if there is no hot topic may the bodies open with the bridge hook (different wording in each). youtubeTitle never uses an unrelated trend. Hashtags: exactly 5, prefer the trending related ones.', ''] : []),
     '## subject: what the model is in a few words (e.g. "Squall Leonhart figure").',
     '## hashtags (exactly 5, without #, no spaces, CamelCase): 2 specific (character/franchise), 2 niche (3DPrinting, STLFile), 1 broad.',
     '## youtubeTitle (max 90 chars): name first, then what it is; may end with #Shorts.',
@@ -156,7 +156,7 @@ export async function generateYoutubeVariant({ asset, language = 'es', base, avo
     'It must be clearly different (wording, angle, hook) from these existing versions, which must NOT be repeated or paraphrased closely:',
     JSON.stringify([base, ...avoid].filter(Boolean)),
     'Rules: title max 90 characters, catchy, without "#Shorts". Description: 1-2 short sentences plus 3 hashtags on a new line, and the last line exactly "' + (language === 'en' ? 'Get the STL:' : 'Consigue el STL:') + '".',
-    ...(trendBrief ? [trendBrief, 'For this YouTube version: the title may only use related trends/keywords or the seasonal angle (never the bridge); the description may open with a rephrased bridge hook.'] : []),
+    ...(trendBrief ? [trendBrief, 'For this YouTube version: if there is a HOT TOPIC, put it in the title right after the model name and open the description with it; never use an unrelated trend in the title; only if the brief allows it, the description may mention the bridge, rephrased.'] : []),
     'Return ONLY JSON: {"title": "...", "description": "..."}',
   ].join('\n');
   const response = await ai.models.generateContent({
@@ -189,7 +189,7 @@ export async function generateFacebookVariant({ asset, language = 'es', base, av
     'The STL files are PAID: never say "free"/"gratis". No URLs, no hashtags, no call to action.',
     'It must be clearly different (wording, angle, hook) from these existing versions, which must NOT be repeated or paraphrased closely:',
     JSON.stringify([captionBody(base), ...avoid.map(captionBody)].filter(Boolean)),
-    ...(trendBrief ? [trendBrief, 'For this Facebook version: you may open with the bridge hook, rephrased.'] : []),
+    ...(trendBrief ? [trendBrief, 'For this Facebook version: follow the brief priorities (hot topic first if any; the bridge only where the brief allows it), with an opening different from the existing versions.'] : []),
     'Return ONLY JSON: {"body": "..."}',
   ].join('\n');
   const response = await ai.models.generateContent({
@@ -225,7 +225,7 @@ export async function generateInstagramVariant({ asset, language = 'es', base, a
     'The STL files are PAID: never say "free"/"gratis". No URLs, no hashtags, no call to action.',
     'It must be clearly different (wording, angle, emojis) from these existing versions, which must NOT be repeated or paraphrased closely:',
     JSON.stringify([captionBody(base), ...avoid.map(captionBody)].filter(Boolean)),
-    ...(trendBrief ? [trendBrief, 'For this Instagram version: line 1 may be the bridge hook, rephrased; the character/model name must still appear.'] : []),
+    ...(trendBrief ? [trendBrief, 'For this Instagram version: follow the brief priorities (line 1 mentions the hot topic if any; the bridge only where the brief allows it); the character/model name must still appear; opening different from the existing versions.'] : []),
     'Return ONLY JSON: {"body": "..."}',
   ].join('\n');
   const response = await ai.models.generateContent({
