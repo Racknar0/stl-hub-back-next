@@ -41,3 +41,9 @@ test('missingFields: en modo automático sin textos no exige captions; en manual
   // Automático ya generado para su hora: se valida normal
   assert.ok(missingFields({ ...base, textMode: 'auto', autoTextsAt: new Date(base.scheduledAt) }).length >= 2);
 });
+
+test('parseNewsRss quita el medio del final del titular', async () => {
+  const { parseNewsRss } = await import('../src/services/trends.service.js');
+  const xml = '<rss><item><title>Blizzard reveals WoW Forever event - IGN</title></item><item><title>World of Warcraft: what to know - Polygon</title></item></rss>';
+  assert.deepEqual(parseNewsRss(xml), ['Blizzard reveals WoW Forever event', 'World of Warcraft: what to know']);
+});

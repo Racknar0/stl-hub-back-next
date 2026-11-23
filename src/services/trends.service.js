@@ -7,7 +7,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { PrismaClient } from '@prisma/client';
 import pinterestService from './pinterest.service.js';
-import { mostPopular } from './youtube.service.js';
+import { mostPopular, searchRecent } from './youtube.service.js';
 
 const prisma = new PrismaClient();
 const COLLECT_EVERY_MS = 6 * 3600 * 1000;
@@ -154,6 +154,65 @@ export function upcomingEvents(from = new Date(), days = 21) {
   return out.sort((a, b) => a.daysLeft - b.daysLeft);
 }
 
+// ---------- Tendencias del tema del modelo (su saga, juego o temática) ----------
+/** Titulares de Google Noticias (RSS): sin el " - Medio" del final. */
+export function parseNewsRss(xml) {
+  return parseGoogleTrendsRss(xml).map(t => t.term.replace(/\s+-\s+[^-]{2,60}$/, '').trim()).filter(Boolean);
+}
+
+async function newsAbout(keyword) {
+  const q = encodeURIComponent(`${keyword} when:3d`);
+  const res = await fetch(`https://news.google.com/rss/search?q=${q}&hl=en-US&gl=US&ceid=US:en`, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; trends-reader)' } });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return parseNewsRss(await res.text()).slice(0, 8);
+}
+
+/** Palabras clave de búsqueda del modelo (saga, juego, temática o uso), con la IA. */
+export async function topicKeywords(asset) {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!apiKey || !asset) return [];
+  const ai = new GoogleGenAI({ apiKey });
+  const prompt = [
+    'Give 1 to 3 short web search keywords (in English) for the franchise, game, universe or theme of this 3D printable model, from most to least specific.',
+    'Use the franchise/universe name, not the character alone (e.g. Thrall -> "World of Warcraft", "Blizzard"; Psylocke -> "X-Men", "Marvel"; a treasure chest -> "Dungeons & Dragons", "treasure chest"; a planter -> "indoor plants").',
+    `Title: ${asset.titleEn || asset.title || ''}`,
+    `Categories: ${(asset.categories || []).map(c => c.nameEn || c.name).join(', ')}`,
+    `Tags: ${(asset.tags || []).map(t => t.nameEn || t.name).slice(0, 12).join(', ')}`,
+    'Return ONLY JSON: {"keywords": ["..."]}',
+  ].join('\n');
+  const response = await ai.models.generateContent({ model: process.env.GEMINI_MODEL || 'gemini-2.5-flash', contents: [prompt], config: { responseMimeType: 'application/json', temperature: 0.2 } });
+  const parsed = parseJson(response?.text);
+  return (Array.isArray(parsed.keywords) ? parsed.keywords : []).map(k => String(k).trim()).filter(Boolean).slice(0, 3);
+}
+
+// Las búsquedas de un tema se guardan 3 h (reintentos y reels del mismo tema no gastan cuota otra vez)
+const topicCache = new Map();
+const TOPIC_TTL = 3 * 3600 * 1000;
+
+/**
+ * Qué está pasando ahora con el tema del modelo: titulares de los últimos 3 días (Google Noticias, de cada palabra
+ * clave) y videos más vistos de los últimos 3 días en YouTube (solo de la primera, para cuidar la cuota).
+ */
+export async function topicTrends(asset) {
+  const keywords = await topicKeywords(asset).catch(() => []);
+  const out = { keywords, news: [], youtube: [] };
+  for (const [i, kw] of keywords.entries()) {
+    const key = kw.toLowerCase();
+    let hit = topicCache.get(key);
+    if (!hit || Date.now() - hit.at > TOPIC_TTL) {
+      const [news, youtube] = await Promise.all([
+        newsAbout(kw).catch(() => []),
+        i === 0 ? searchRecent({ q: kw, days: 3, max: 10 }).catch(() => []) : Promise.resolve([]),
+      ]);
+      hit = { at: Date.now(), news, youtube };
+      topicCache.set(key, hit);
+    }
+    out.news.push(...hit.news.map(t => `[${kw}] ${t}`));
+    out.youtube.push(...hit.youtube.map(t => `[${kw}] ${t}`));
+  }
+  return out;
+}
+
 // ---------- Ángulo para un modelo ----------
 function parseJson(text) {
   const raw = String(text || '').trim();
@@ -168,7 +227,7 @@ function parseJson(text) {
  * Pide a la IA el ángulo de tendencia para un modelo: tendencias que encajan de verdad, fecha cercana útil,
  * un puente creativo con la tendencia más fuerte (aunque no tenga relación) y hashtags/keywords relacionados.
  */
-export async function pickTrendAngle({ asset, trends, events, language = 'en' }) {
+export async function pickTrendAngle({ asset, trends, events, topic = null, language = 'en' }) {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
   const ai = new GoogleGenAI({ apiKey });
@@ -181,7 +240,15 @@ export async function pickTrendAngle({ asset, trends, events, language = 'en' })
     `- Categories: ${(asset?.categories || []).map(c => c.nameEn || c.name).join(', ') || 'N/A'}`,
     `- Tags: ${(asset?.tags || []).map(t => t.nameEn || t.name).slice(0, 15).join(', ') || 'N/A'}`,
     '',
-    'TODAY\'S TRENDS BY SOURCE:',
+    ...(topic && (topic.news.length || topic.youtube.length) ? [
+      `WHAT IS HAPPENING NOW IN THE MODEL'S OWN FRANCHISE/THEME (last 3 days; keywords: ${topic.keywords.join(', ')}):`,
+      ...(topic.news.length ? [`- News headlines: ${topic.news.join(' | ')}`] : []),
+      ...(topic.youtube.length ? [`- Most viewed YouTube videos: ${topic.youtube.join(' | ')}`] : []),
+      'PRIORITY: if these show a hot topic (a launch, expansion, event, anniversary, trailer, season, update, movie, announcement), put its exact popular name FIRST in "related", add it to "keywords" and to "hashtags" (e.g. WoWForever). This is the best possible trend because it is related to the model.',
+      'IGNORE negative topics (layoffs, lawsuits, deaths, scandals, controversies, outages, price hikes).',
+      '',
+    ] : []),
+    'TODAY\'S GENERAL TRENDS BY SOURCE:',
     ...Object.entries(trends || {}).map(([s, list]) => `- ${s}: ${list.join(' | ')}`),
     '',
     `UPCOMING DATES: ${events?.length ? events.map(e => `${e.name} in ${e.daysLeft} days`).join(', ') : 'none soon'}`,
@@ -227,4 +294,4 @@ export function buildTrendBrief(angle) {
   return lines.join('\n');
 }
 
-export default { collectTrends, startTrendsScheduler, latestTrends, upcomingEvents, pickTrendAngle, buildTrendBrief, parseGoogleTrendsRss };
+export default { collectTrends, startTrendsScheduler, latestTrends, upcomingEvents, pickTrendAngle, buildTrendBrief, parseGoogleTrendsRss, parseNewsRss, topicKeywords, topicTrends };

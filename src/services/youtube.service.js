@@ -272,4 +272,19 @@ export async function mostPopular({ categoryId = '20', regionCode = 'US', max = 
   return (data.items || []).map(v => ({ title: v.snippet?.title || '', views: Number(v.statistics?.viewCount ?? 0) }));
 }
 
-export default { youtubeConfigured, getAuthUrl, handleCallback, connectionStatus, listChannels, disconnect, uploadShort, uploadHorizontalVideo, videoStats, mostPopular };
+/** Videos más vistos de los últimos `days` días sobre un tema (cuesta 100 unidades de cuota por búsqueda). */
+export async function searchRecent({ q, days = 3, max = 10, regionCode = 'US' } = {}) {
+  const [account] = await loadAccounts();
+  if (!account || !q) return [];
+  const token = await accessToken(account);
+  const params = new URLSearchParams({
+    part: 'snippet', type: 'video', order: 'viewCount', q, maxResults: String(max), regionCode,
+    relevanceLanguage: 'en', publishedAfter: new Date(Date.now() - days * 86400000).toISOString(),
+  });
+  const res = await fetch(`https://www.googleapis.com/youtube/v3/search?${params}`, { headers: { Authorization: `Bearer ${token}` } });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`YouTube: ${data.error?.message || `HTTP ${res.status}`}`);
+  return (data.items || []).map(v => String(v.snippet?.title || '').replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&')).filter(Boolean);
+}
+
+export default { youtubeConfigured, getAuthUrl, handleCallback, connectionStatus, listChannels, disconnect, uploadShort, uploadHorizontalVideo, videoStats, mostPopular, searchRecent };

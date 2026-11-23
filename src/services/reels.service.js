@@ -14,7 +14,7 @@ import { getChannelVariantVideo, cleanVariants } from './reelsVideoVariants.serv
 import { publishDueHorizontal } from './horizontalShowcase.service.js';
 import { shortOrLong, setFixedLink, BIO_CODE } from './shortLinks.service.js';
 import pinterestPublisher from './pinterestPublisher.service.js';
-import { latestTrends, upcomingEvents, pickTrendAngle, buildTrendBrief } from './trends.service.js';
+import { latestTrends, upcomingEvents, pickTrendAngle, buildTrendBrief, topicTrends } from './trends.service.js';
 
 const prisma = new PrismaClient();
 
@@ -386,10 +386,15 @@ export async function generateAutoTexts(postId) {
   const lang = (await getSettings()).language;
   const asset = post.assetId ? await prisma.asset.findUnique({ where: { id: post.assetId }, include: { tags: true, categories: true } }) : null;
   let angle = null;
+  let topic = null;
   if (asset && !isMockAi()) {
     try {
-      const trends = await latestTrends();
-      if (Object.keys(trends).length) angle = await pickTrendAngle({ asset, trends, events: upcomingEvents(post.scheduledAt ? new Date(post.scheduledAt) : new Date()), language: lang });
+      // Tendencias generales del día + lo que pasa ahora en la saga/tema del propio modelo
+      const [trends, topicData] = await Promise.all([latestTrends(), topicTrends(asset).catch(() => null)]);
+      topic = topicData;
+      if (Object.keys(trends).length || topic?.news?.length || topic?.youtube?.length) {
+        angle = await pickTrendAngle({ asset, trends, topic, events: upcomingEvents(post.scheduledAt ? new Date(post.scheduledAt) : new Date()), language: lang });
+      }
     } catch (e) {
       console.warn(`[REELS][TRENDS] Reel ${postId}: sin ángulo de tendencia (${e.message})`);
     }
@@ -403,6 +408,8 @@ export async function generateAutoTexts(postId) {
     seasonal: angle.seasonal?.event || null,
     related: angle.related,
     hashtags: angle.hashtags,
+    // Qué se buscó del tema del modelo (para poder revisar de dónde salió la tendencia)
+    topic: topic ? { keywords: topic.keywords, news: topic.news.slice(0, 3), youtube: topic.youtube.slice(0, 3) } : null,
     generatedAt: new Date().toISOString(),
   } : { term: null, kind: null, generatedAt: new Date().toISOString() };
   return prisma.reelPost.update({ where: { id: postId }, data: { autoTextsAt: new Date(), trendInfo } });
