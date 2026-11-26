@@ -465,6 +465,7 @@ enum NotificationTypeStatus {
   SUCCESS
   PENDING
   ERROR
+  WARNING // avisos que no son error (p. ej. reel publicado con textos de respaldo)
 }
 
 model Notification {

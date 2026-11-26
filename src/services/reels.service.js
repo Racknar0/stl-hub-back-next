@@ -159,7 +159,9 @@ export async function processReelAi(postId, { notes, language, trendBrief = '', 
       ? await prisma.asset.findUnique({ where: { id: post.assetId }, include: { tags: true, categories: true } })
       : null;
     if (!asset && !isMockAi()) {
-      throw new Error('El reel no tiene asset: el nombre del video debe empezar por el ID del asset (p. ej. "11848 squall.mp4") o ponlo a mano en el editor');
+      throw new Error(post.assetId
+        ? `El asset #${post.assetId} ya no existe en el catálogo (se borró): pon el ID de otro asset en el editor del reel o pásalo a "Textos manuales"`
+        : 'El reel no tiene asset: el nombre del video debe empezar por el ID del asset (p. ej. "11848 squall.mp4") o ponlo a mano en el editor');
     }
     const texts = isMockAi()
       ? await mockReelTexts({ asset, notes, language: lang, originalName: post.originalName })
@@ -449,11 +451,45 @@ async function runAutoTexts() {
       } catch (e) {
         autoAttempts.set(post.id, Date.now());
         console.error(`[REELS][TRENDS] Reel ${post.id}:`, e.message);
+        await alertAutoTextsEarly(post, e.message).catch(err => console.warn(`[REELS][TRENDS] Aviso temprano del reel ${post.id}:`, err.message));
       }
     }
   } finally {
     autoRunning = false;
   }
+}
+
+/**
+ * Primer fallo de los textos automáticos (unas 3 h antes de publicar): avisa una sola vez por reel, con tiempo para
+ * corregirlo. La marca se guarda en el reel (trendInfo.alertAt) para no repetir el aviso tras un reinicio.
+ */
+async function alertAutoTextsEarly(post, error) {
+  const info = post.trendInfo && typeof post.trendInfo === 'object' ? post.trendInfo : {};
+  if (info.alertAt && Date.now() - new Date(info.alertAt).getTime() < 24 * 3600 * 1000) return;
+  const at = post.scheduledAt ? new Date(post.scheduledAt).toLocaleTimeString('es-CO', { timeZone: 'America/Bogota', hour: '2-digit', minute: '2-digit' }) : 'su hora';
+  await dispatchReelNotification({
+    post,
+    level: 'WARNING',
+    title: 'No se pueden generar los textos automáticos',
+    detail: `${error}\n\nEl reel sale hoy a las ${at}. Si lo corriges antes, se generarán con tendencias en el siguiente intento (cada 10 min). Si no, saldrá con ${post.caption?.trim() ? 'los textos que ya tiene' : 'textos básicos'}.`,
+  });
+  await prisma.reelPost.update({ where: { id: post.id }, data: { trendInfo: { ...info, alertAt: new Date().toISOString(), alertError: String(error).slice(0, 300) } } });
+}
+
+/**
+ * Enlace de respaldo cuando el asset del reel se borró: la búsqueda del sitio con el nombre del modelo
+ * (en inglés si el enlace original era /en/), para no mandar a nadie a una página 404.
+ */
+export function deadAssetSearchLink(post) {
+  const words = String(post.assetTitle || post.title || post.subject || '')
+    .replace(/#\S+/g, ' ')
+    .replace(/^\s*#?\d*\s*stl\s*[-–—:]?\s*/i, '')
+    .replace(/[^\p{L}\p{N}\s'-]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80);
+  const en = /\/en\//.test(String(post.link || '')) || post.language === 'en';
+  return `https://stlgratis.com${en ? '/en' : ''}/search?q=${encodeURIComponent(words || '3d model')}`;
 }
 
 // ---------- Validación para publicar ----------
@@ -747,6 +783,15 @@ export async function publishReel(post) {
             data: { caption: basic.instagramCaption, facebookCaption: basic.facebookCaption, tiktokCaption: basic.instagramCaption, hashtags: basic.hashtags, title: basic.youtubeTitle, youtubeDescription: basic.youtubeDescription, aiStatus: 'READY' },
           });
         }
+      }
+    }
+    // Si el asset del reel ya no existe, su enlace daría 404: se publica con la búsqueda del modelo
+    if (post.assetId && post.link && !hasRealResults(post)) {
+      const exists = await prisma.asset.findUnique({ where: { id: post.assetId }, select: { id: true } });
+      if (!exists) {
+        const link = deadAssetSearchLink(post);
+        console.warn(`[REELS] Reel ${post.id}: el asset #${post.assetId} ya no existe, se enlaza a la búsqueda (${link})`);
+        post = await prisma.reelPost.update({ where: { id: post.id }, data: { link } });
       }
     }
     const platforms = Array.isArray(post.platforms) ? post.platforms : [];

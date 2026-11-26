@@ -60,3 +60,12 @@ test('buildTrendBrief con tendencia caliente: va primero, hashtag y sin puente s
   const alt = buildTrendBrief(angle, { allowBridge: true });
   assert.match(alt, /SECOND line of the caption only/);
 });
+
+test('deadAssetSearchLink: búsqueda con el nombre limpio del modelo', async () => {
+  const { deadAssetSearchLink } = await import('../src/services/reels.service.js');
+  assert.equal(
+    deadAssetSearchLink({ assetTitle: 'STL - Goliath Gargoyles Disney', link: 'https://stlgratis.com/en/asset/stl---goliath-gargoyles-disney' }),
+    'https://stlgratis.com/en/search?q=Goliath%20Gargoyles%20Disney',
+  );
+  assert.equal(deadAssetSearchLink({ assetTitle: '#37794 STL - Cammy White', link: 'https://stlgratis.com/es/asset/x', language: 'es' }), 'https://stlgratis.com/search?q=Cammy%20White');
+});
